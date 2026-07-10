@@ -1096,14 +1096,25 @@ def resolve_tracker_path(mod_root_arg, vanilla_repo_arg) -> Path:
     return mod_root.parent / "vanilla-tracker" / "repo.git"
 
 
-def do_snapshot(repo: Path, tag: str, patch_name: str) -> None:
-    """Snapshot the vanilla install's .txt/.yml/.gui files into the tracker
+def _version_key(tag: str):
+    """Sort key for version-ish tags: numeric fields compare numerically,
+    and a suffix like '-beta' sorts below the plain release."""
+    nums = tuple(int(n) for n in re.findall(r"\d+", tag))
+    suffix = re.sub(r"[\d.]+", "", tag)
+    return (nums, 0 if suffix else 1, suffix)
+
+
+def do_snapshot(repo: Path, tag: str, patch_name: str,
+                game_root_arg: str | None = None) -> None:
+    """Snapshot a vanilla install's .txt/.yml/.gui files into the tracker
     as one commit tagged with the game version. Creates the bare repo on
     first use, so a new machine needs no manual git setup."""
-    game_root = Path(os.environ.get("PDX_GAME_ROOT", str(DEFAULT_GAME_ROOT)))
+    game_root = Path(game_root_arg or
+                     os.environ.get("PDX_GAME_ROOT", str(DEFAULT_GAME_ROOT)))
     if not game_root.is_dir():
         print(f"Error: game directory not found: {game_root}\n"
-              "Set $PDX_GAME_ROOT to the game's 'game' directory.",
+              "Set $PDX_GAME_ROOT or pass --game-root pointing at the "
+              "game's 'game' directory.",
               file=sys.stderr)
         sys.exit(1)
 
@@ -1120,6 +1131,23 @@ def do_snapshot(repo: Path, tag: str, patch_name: str) -> None:
     if tag_exists:
         print(f"Error: tag '{tag}' already exists in the tracker.", file=sys.stderr)
         sys.exit(1)
+
+    # Commits must be chronological (oldest patch first): the audits diff
+    # the newest two commits, so appending an OLDER version after a newer
+    # one inverts every audit window. Refuse rather than corrupt.
+    existing = subprocess.run(
+        ["git", "--git-dir", str(repo), "tag", "-l"],
+        capture_output=True, text=True).stdout.split()
+    if existing:
+        newest = max(existing, key=_version_key)
+        if _version_key(tag) < _version_key(newest):
+            print(f"Error: '{tag}' is older than the newest tracked version "
+                  f"('{newest}'), and snapshots must be recorded oldest "
+                  "first. To back-populate history, snapshot old versions "
+                  "in order BEFORE the current one (delete the repo.git "
+                  "directory and start over if needed; snapshots are cheap, "
+                  "derived data).", file=sys.stderr)
+            sys.exit(1)
 
     print(f"Snapshotting {game_root} as {tag}...")
     with tempfile.TemporaryDirectory(prefix="vanilla-tracker-") as tmp:
@@ -1208,11 +1236,15 @@ def main():
     ap.add_argument("--patch-name", default="Pavia",
                     help="Patch name used in the snapshot commit message "
                          "(default: Pavia)")
+    ap.add_argument("--game-root", metavar="DIR",
+                    help="Game 'game' directory to snapshot from (default: "
+                         "$PDX_GAME_ROOT or the Steam install). Point at an "
+                         "extracted old-version copy to back-populate history")
     args = ap.parse_args()
 
     if args.snapshot:
         repo = resolve_tracker_path(args.mod_root, args.vanilla_repo)
-        do_snapshot(repo, args.snapshot, args.patch_name)
+        do_snapshot(repo, args.snapshot, args.patch_name, args.game_root)
         sys.exit(0)
 
     mod_root = find_mod_root(args.mod_root)
