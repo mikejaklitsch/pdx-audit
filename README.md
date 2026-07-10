@@ -4,7 +4,7 @@ Audits a Paradox mod against vanilla patch changes. When the game updates, mod o
 
 It runs three audits:
 
-- **Override audit** (default): finds every `INJECT:`/`REPLACE:`/`TRY_INJECT:` directive in the mod, locates the target block in vanilla at the old and new snapshots, and reports what vanilla changed. Changed REPLACE blocks are classified as reconciled or STALE depending on whether the mod's replacement already contains vanilla's new lines. STALE findings are the highest priority output.
+- **Override audit** (default): finds every `INJECT:`/`REPLACE:`/`TRY_INJECT:`/`TRY_REPLACE:` directive in the mod, locates the target block in vanilla at the old and new snapshots, and reports what vanilla changed. Changed REPLACE and TRY_REPLACE blocks are classified as reconciled or STALE depending on whether the mod's replacement already contains vanilla's new lines. STALE findings are the highest priority output. A TRY_* directive whose target does not exist in vanilla is reported as expected and non-fatal rather than as a miss.
 - **Dependency audit** (`--deps`): flags `token =` identifiers the mod assigns that vanilla used at the old snapshot but dropped by the new one, meaning the token was likely renamed or removed. Suggests rename candidates.
 - **GUI audit** (`--gui`): finds mod GUI template/type definitions that implicitly shadow same-name vanilla definitions, plus same-path `.gui` file replacements, and reports which shadowed vanilla definitions changed.
 
@@ -44,7 +44,7 @@ Each snapshot reads the live install, so nothing needs to be copied. Order matte
 
 When rolling the install back and forth is not practical:
 
-- `--game-root /path/to/copy/game` snapshots any extracted copy of a version, for example a DepotDownloader fetch or a backup you kept. Only the `.txt`/`.yml`/`.gui` files matter.
+- `--game-root /path/to/copy/game` snapshots any extracted copy of a version, for example a backup you kept, or an old build downloaded with DepotDownloader (an open-source tool that logs into Steam with your own account and downloads a specific historical build of a game you own, without touching your live install). Only the `.txt`/`.yml`/`.gui` files matter.
 - Copying someone's existing `vanilla-tracker/` directory next to your mods gives you their full history with no snapshotting at all; it is self-contained.
 
 Back-populating is optional. Two snapshots (the patch you last verified your mod against and the current one) cover the default audit; deeper history only widens what `--full` can see.

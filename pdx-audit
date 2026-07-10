@@ -3,7 +3,7 @@
 
 Two audits, both driven by the vanilla-tracker bare git repo:
 
-  Override audit (default): finds every INJECT:/REPLACE:/TRY_INJECT: directive
+  Override audit (default): finds every INJECT:/REPLACE:/TRY_INJECT:/TRY_REPLACE: directive
   in the mod, locates the target block in vanilla at two commits (old, new), and
   reports what vanilla changed. For changed REPLACE blocks it also checks the
   mod's replacement text and reports whether it already contains vanilla's new
@@ -224,7 +224,7 @@ def find_overrides(mod_root):
         except Exception:
             continue
         for ln, line in enumerate(text.split("\n"), 1):
-            m = re.match(r"\s*(REPLACE|INJECT|TRY_INJECT)\s*:\s*(\w+)", line)
+            m = re.match(r"\s*(TRY_REPLACE|TRY_INJECT|REPLACE|INJECT)\s*:\s*(\w+)", line)
             if m:
                 results.append({
                     "type": m.group(1),
@@ -1324,7 +1324,7 @@ def main():
             not_found.append(ov)
         elif not old_e and new_e:
             entry = (ov, None, new_e)
-            if ov["type"] == "REPLACE":
+            if ov["type"] in ("REPLACE", "TRY_REPLACE"):
                 changed_replace.append(entry)
             else:
                 changed_inject.append(entry)
@@ -1335,7 +1335,7 @@ def main():
                 unchanged.append((ov, old_e, new_e))
             else:
                 entry = (ov, old_e, new_e)
-                if ov["type"] == "REPLACE":
+                if ov["type"] in ("REPLACE", "TRY_REPLACE"):
                     changed_replace.append(entry)
                 else:
                     changed_inject.append(entry)
@@ -1346,9 +1346,9 @@ def main():
     if old_msg or new_msg:
         print(f"*{old_msg} → {new_msg}*")
     print()
-    n_replace = sum(1 for t, _ in seen if t == "REPLACE")
+    n_replace = sum(1 for t, _ in seen if t in ("REPLACE", "TRY_REPLACE"))
     n_inject = len(seen) - n_replace
-    print(f"**{len(seen)}** unique overrides scanned ({n_replace} REPLACE, {n_inject} INJECT)")
+    print(f"**{len(seen)}** unique overrides scanned ({n_replace} REPLACE-type, {n_inject} INJECT-type)")
     print(f"- **{n_changed}** vanilla blocks changed — action needed")
     print(f"- **{len(removed)}** vanilla blocks removed — override orphaned")
     print(f"- **{len(not_found)}** not found in vanilla (mod-only or nested)")
@@ -1375,8 +1375,9 @@ def main():
     )
 
     if not_found:
-        try_injects = [o for o in not_found if o["type"] == "TRY_INJECT"]
-        hard_misses = [o for o in not_found if o["type"] != "TRY_INJECT"]
+        try_types = ("TRY_INJECT", "TRY_REPLACE")
+        try_injects = [o for o in not_found if o["type"] in try_types]
+        hard_misses = [o for o in not_found if o["type"] not in try_types]
 
         if hard_misses:
             print(f"## Not Found in Vanilla ({len(hard_misses)})")
@@ -1389,10 +1390,10 @@ def main():
             print()
 
         if try_injects:
-            print(f"## TRY_INJECT — Not Found (expected, non-fatal) ({len(try_injects)})")
+            print(f"## TRY_* Overrides Not Found (expected, non-fatal) ({len(try_injects)})")
             print()
             for ov in try_injects:
-                print(f"- TRY_INJECT:{ov['block']} — `{ov['file']}:{ov['line']}`")
+                print(f"- {ov['type']}:{ov['block']} at `{ov['file']}:{ov['line']}`")
             print()
 
     if args.all and unchanged:
