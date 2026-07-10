@@ -34,21 +34,18 @@ The vanilla install is located via `--game-root` or `$PDX_GAME_ROOT` (point eith
 
 ## Back-populating history
 
-A tracker started today has only the current patch, and audits need at least two snapshots. To add older versions, snapshot them oldest first, each from a copy of that version's files:
+A tracker started today has only the current patch, and audits need at least two snapshots. If prior patches are relevant to your workflow, walk your Steam install through them oldest first and snapshot each one:
 
-```bash
-pdx-audit --snapshot 1.3.8  --game-root /path/to/eu5-1.3.8/game
-pdx-audit --snapshot 1.3.10                # then the live install
-```
+1. In Steam, open the game's Properties, Betas tab, and select the oldest version you care about. Paradox keeps previous patches selectable there.
+2. Let Steam update, then run `pdx-audit --snapshot <version>`.
+3. Select the next version, update, snapshot again. Repeat until you are back on the current patch.
 
-Ways to get an old version's files:
+Each snapshot reads the live install, so nothing needs to be copied. Order matters because the audits treat git order as patch order; the tool refuses an out-of-order version, so a missed step fails loudly instead of corrupting the history. If you do end up needing an older version after tracking a newer one, delete `repo.git` and rebuild in order. Snapshots are cheap, derived data.
 
-- **Steam beta branches.** Paradox keeps previous patches selectable under the game's Properties, Betas tab. Switch to the old version, copy its `game` directory somewhere, switch back, then snapshot the copy.
-- **DepotDownloader** can fetch a specific old build directly from Steam without touching your install.
-- **Any backup** you kept of a previous install works; only the `.txt`/`.yml`/`.gui` files matter.
-- **Copy someone's existing tracker.** The `vanilla-tracker/` directory is self-contained; dropping a copy next to your mods gives you their full history with no snapshotting at all.
+When rolling the install back and forth is not practical:
 
-Snapshots must be recorded in version order because the audits treat git order as patch order. The tool refuses an out-of-order snapshot; if you discover you need an older version after tracking a newer one, delete `repo.git` and rebuild in order. Snapshots are cheap, derived data.
+- `--game-root /path/to/copy/game` snapshots any extracted copy of a version, for example a DepotDownloader fetch or a backup you kept. Only the `.txt`/`.yml`/`.gui` files matter.
+- Copying someone's existing `vanilla-tracker/` directory next to your mods gives you their full history with no snapshotting at all; it is self-contained.
 
 Back-populating is optional. Two snapshots (the patch you last verified your mod against and the current one) cover the default audit; deeper history only widens what `--full` can see.
 
