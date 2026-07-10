@@ -410,20 +410,160 @@ def _containment(mod_text, old_text, new_text):
     return missing, kept
 
 
+# ── block-context classification for graded reconciliation ────────────────
+# Line membership proves a line exists somewhere in the mod block, not which
+# sub-block. Those collapse only in order-free (modifier-style) blocks; inside
+# a limit/trigger/effect/script-value the containing block matters. We tag each
+# changed line with its enclosing block so the verdict can tell an exact match
+# from a merely-present one.
+
+FLOW_KEYS = {
+    "limit", "trigger", "allow", "potential", "is_shown", "visible", "filter",
+    "effect", "immediate", "option", "if", "else", "else_if", "elseif",
+    "while", "switch", "random", "random_list", "hidden_effect",
+    "complex_effect", "and", "or", "not", "nand", "nor", "calc_true_if",
+    "count", "trigger_if", "trigger_else", "trigger_else_if",
+}
+FLOW_PREFIXES = ("every_", "random_", "ordered_", "any_")
+# Directories whose block bodies are order-free key=value modifier lists.
+# script_values are NOT order-free: value/add/multiply order is significant.
+ORDER_FREE_DIRS = {"static_modifiers", "defines", "modifier_type_definitions"}
+
+
+def _is_flow_key(key):
+    if not key:
+        return False
+    kl = key.lower()
+    if kl in FLOW_KEYS or kl.startswith(FLOW_PREFIXES):
+        return True
+    return ":" in kl  # scope shift, e.g. scope:actor, c:FRA
+
+
+def _order_free_category(file_path):
+    return any(p in ORDER_FREE_DIRS for p in re.split(r"[\\/]", file_path))
+
+
+def _block_key(prefix):
+    """The key naming the block opened by the '{' at the end of `prefix`."""
+    m = re.search(r"([A-Za-z0-9_:.]+)\s*=\s*$", prefix)
+    if m:
+        return m.group(1)
+    m = re.search(r"([A-Za-z0-9_:.]+)\s*$", prefix)  # bare token / weight key
+    return m.group(1) if m else "*"
+
+
+def _enclosing_keys(lines):
+    """For each line, the innermost enclosing block key (None at block top).
+    Approximate but comment-aware; precise enough to classify a line's context."""
+    stack, out = [], []
+    for raw in lines:
+        code = raw.split("#")[0]
+        out.append(stack[-1] if stack else None)
+        first_open = code.find("{")
+        if first_open == -1:
+            for _ in range(code.count("}")):
+                if stack:
+                    stack.pop()
+            continue
+        for _ in range(code[:first_open].count("}")):  # closes before the open
+            if stack:
+                stack.pop()
+        rest = code[first_open:]
+        net = rest.count("{") - rest.count("}")
+        if net > 0:
+            stack.append(_block_key(code[:first_open]))
+            stack.extend("*" for _ in range(net - 1))
+        elif net < 0:
+            for _ in range(-net):
+                if stack:
+                    stack.pop()
+    return out
+
+
+def _changed_line_ctxs(old_text, new_text):
+    """Changed lines tagged with their enclosing block key.
+    Returns (added, removed): lists of (norm_line, enclosing_key)."""
+    a, b = old_text.split("\n"), new_text.split("\n")
+    ak, bk = _enclosing_keys(a), _enclosing_keys(b)
+    an, bn = [_norm(x) for x in a], [_norm(x) for x in b]
+    sm = difflib.SequenceMatcher(None, an, bn, autojunk=False)
+    added, removed = [], []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag in ("replace", "delete"):
+            removed += [(an[i], ak[i]) for i in range(i1, i2) if an[i]]
+        if tag in ("replace", "insert"):
+            added += [(bn[j], bk[j]) for j in range(j1, j2) if bn[j]]
+    return added, removed
+
+
+def _classify_ctx(key, cat_order_free):
+    """'order_free' | 'flow' | 'unknown' for a changed line's enclosing block."""
+    if _is_flow_key(key):
+        return "flow"
+    if key is None:  # direct child of the override block
+        return "order_free" if cat_order_free else "flow"
+    kl = key.lower()
+    if kl == "modifier" or kl.endswith("_modifier") or kl in ("game_data", "ai_will_do", "weight"):
+        return "order_free"
+    return "unknown"
+
+
 def replace_reconciliation(mod_root, ov, old_text, new_text):
-    """For a changed REPLACE: how the mod's replacement block relates to
-    vanilla's change. Returns (status, missing, kept):
-      'reconciled' — mod contains every vanilla-added code line and carries
-                     no line vanilla removed
-      'stale'      — one or both lists are non-empty
-      'unknown'    — could not parse mod block or no old/new text to compare"""
+    """Graded verdict on how a changed REPLACE relates to vanilla's change.
+    Returns (state, detail); state is one of:
+      'exact'   mod reflects the change and every changed line sits in an
+                order-free block, so membership proves it is in the right place
+      'inexact' mod carries the changed lines but at least one is in a
+                position-sensitive block (limit/trigger/effect/script value),
+                so we cannot confirm it lands in the right sub-block
+      'review'  a changed line is in a block we could not classify
+      'stale'   a vanilla-added line is absent from the mod, or a removed line
+                is still carried in an order-free block
+      'unknown' mod block or vanilla text unavailable
+    detail holds the per-bucket line lists for reporting."""
     if old_text is None or new_text is None:
-        return "unknown", [], []
+        return "unknown", {}
     block = extract_mod_block(mod_root, ov)
     if block is None:
-        return "unknown", [], []
-    missing, kept = _containment(block, old_text, new_text)
-    return ("reconciled" if not (missing or kept) else "stale"), missing, kept
+        return "unknown", {}
+    mod_norms = {_norm(l) for l in block.split("\n")}
+    new_norms = {_norm(l) for l in new_text.split("\n")}
+    cat = _order_free_category(ov["file"])
+    added, removed = _changed_line_ctxs(old_text, new_text)
+    missing, kept, inexact, review = [], [], [], []
+    for n, key in added:
+        if n not in mod_norms:
+            if n not in missing:
+                missing.append(n)
+            continue
+        cls = _classify_ctx(key, cat)
+        if cls == "flow" and n not in inexact:
+            inexact.append(n)
+        elif cls == "unknown" and n not in review:
+            review.append(n)
+    for n, key in removed:
+        if not n.strip("{} ") or n in new_norms:  # brace-only, or moved not removed
+            continue
+        if n not in mod_norms:  # correctly dropped
+            continue
+        cls = _classify_ctx(key, cat)
+        if cls == "order_free":
+            if n not in kept:
+                kept.append(n)
+        elif cls == "flow":
+            if n not in inexact:
+                inexact.append(n)
+        elif n not in review:
+            review.append(n)
+    if missing or kept:
+        state = "stale"
+    elif review:
+        state = "review"
+    elif inexact:
+        state = "inexact"
+    else:
+        state = "exact"
+    return state, {"missing": missing, "kept": kept, "inexact": inexact, "review": review}
 
 
 def inject_overlap(mod_root, ov, old_text, new_text):
@@ -1052,22 +1192,36 @@ def print_section(title, items, show_diff, is_replace, mod_root=None):
                 print(f"  *({n_add} added, {n_rem} removed)*")
 
         if is_replace and mod_root is not None:
-            status, missing, kept = replace_reconciliation(mod_root, ov, old_text, new_text)
-            if status == "reconciled":
-                print("  **Mod status:** ✓ replacement already contains vanilla's change")
-            elif status == "stale":
-                if missing:
+            state, det = replace_reconciliation(mod_root, ov, old_text, new_text)
+
+            def _lines(bucket):
+                for m in bucket[:10]:
+                    print(f"      `{m}`")
+                if len(bucket) > 10:
+                    print(f"      ... and {len(bucket) - 10} more")
+
+            if state == "exact":
+                print("  **Mod status:** ✓ exact change already present")
+            elif state == "inexact":
+                print("  **Mod status:** ≈ change present but may not be exact; "
+                      "position-sensitive context, review:")
+                _lines(det["inexact"])
+            elif state == "review":
+                print("  **Mod status:** ? cannot confirm change matches current "
+                      "state, review:")
+                _lines(det["review"])
+            elif state == "stale":
+                if det["missing"]:
                     print("  **Mod status:** ✗ replacement is MISSING vanilla lines:")
-                    for m in missing[:10]:
-                        print(f"      `{m}`")
-                    if len(missing) > 10:
-                        print(f"      ... and {len(missing) - 10} more")
-                if kept:
+                    _lines(det["missing"])
+                if det["kept"]:
                     print("  **Mod status:** ✗ replacement still carries lines vanilla removed:")
-                    for m in kept[:10]:
-                        print(f"      `{m}`")
-                    if len(kept) > 10:
-                        print(f"      ... and {len(kept) - 10} more")
+                    _lines(det["kept"])
+                for label, bucket in (("may not be exact", det["inexact"]),
+                                      ("cannot confirm", det["review"])):
+                    if bucket:
+                        print(f"  **Also ({label}):**")
+                        _lines(bucket)
 
         if not is_replace and mod_root is not None:
             status, keys = inject_overlap(mod_root, ov, old_text, new_text)
@@ -1342,6 +1496,15 @@ def main():
 
     n_changed = len(changed_replace) + len(changed_inject)
 
+    replace_states = [
+        replace_reconciliation(mod_root, ov_e, oe[1] if oe else None,
+                               ne[1] if ne else None)[0]
+        for ov_e, oe, ne in changed_replace
+    ]
+    n_stale = replace_states.count("stale")
+    n_review = replace_states.count("inexact") + replace_states.count("review")
+    n_exact = replace_states.count("exact")
+
     print(f"# Override Audit: {old_hash[:7]} → {new_hash[:7]}")
     if old_msg or new_msg:
         print(f"*{old_msg} → {new_msg}*")
@@ -1353,6 +1516,9 @@ def main():
     print(f"- **{len(removed)}** vanilla blocks removed — override orphaned")
     print(f"- **{len(not_found)}** not found in vanilla (mod-only or nested)")
     print(f"- **{len(unchanged)}** unchanged")
+    if changed_replace:
+        print(f"  - changed REPLACE reconciliation: **{n_stale}** stale, "
+              f"**{n_review}** need review, **{n_exact}** already exact")
     print()
 
     if removed:
@@ -1407,7 +1573,8 @@ def main():
         print("**All overrides are current with vanilla.** No action needed.")
     else:
         print("---")
-        print(f"**Action needed:** {len(changed_replace)} REPLACE blocks stale, "
+        review_note = f" (+{n_review} to review)" if n_review else ""
+        print(f"**Action needed:** {n_stale} REPLACE blocks stale{review_note}, "
               f"{len(changed_inject)} INJECT targets shifted, "
               f"{len(removed)} orphaned.")
         if not args.diff and n_changed > 0:
