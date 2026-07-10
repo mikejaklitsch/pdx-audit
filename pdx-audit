@@ -51,10 +51,12 @@ Usage:
 
 import subprocess
 import re
+import shutil
 import sys
 import argparse
 import difflib
 import tarfile
+import tempfile
 import io
 import json
 import hashlib
@@ -1082,6 +1084,93 @@ def print_section(title, items, show_diff, is_replace, mod_root=None):
         print()
 
 
+def resolve_tracker_path(mod_root_arg, vanilla_repo_arg) -> Path:
+    """Where the tracker repo lives (or should live). Unlike
+    find_vanilla_repo this does not require it to exist yet."""
+    if vanilla_repo_arg:
+        return Path(vanilla_repo_arg).resolve()
+    env = os.environ.get("PDX_VANILLA_REPO")
+    if env:
+        return Path(env).resolve()
+    mod_root = find_mod_root(mod_root_arg)
+    return mod_root.parent / "vanilla-tracker" / "repo.git"
+
+
+def do_snapshot(repo: Path, tag: str, patch_name: str) -> None:
+    """Snapshot the vanilla install's .txt/.yml/.gui files into the tracker
+    as one commit tagged with the game version. Creates the bare repo on
+    first use, so a new machine needs no manual git setup."""
+    game_root = Path(os.environ.get("PDX_GAME_ROOT", str(DEFAULT_GAME_ROOT)))
+    if not game_root.is_dir():
+        print(f"Error: game directory not found: {game_root}\n"
+              "Set $PDX_GAME_ROOT to the game's 'game' directory.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    if not repo.exists():
+        repo.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "--bare", "--quiet", str(repo)], check=True)
+        subprocess.run(["git", "--git-dir", str(repo), "symbolic-ref",
+                        "HEAD", "refs/heads/master"], check=True)
+        print(f"Created tracker repo: {repo}")
+
+    tag_exists = subprocess.run(
+        ["git", "--git-dir", str(repo), "rev-parse", "--verify", "--quiet",
+         f"refs/tags/{tag}"], capture_output=True).returncode == 0
+    if tag_exists:
+        print(f"Error: tag '{tag}' already exists in the tracker.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Snapshotting {game_root} as {tag}...")
+    with tempfile.TemporaryDirectory(prefix="vanilla-tracker-") as tmp:
+        work = Path(tmp) / "work"
+        work.mkdir()
+        n_files = 0
+        for ext in ("*.txt", "*.yml", "*.gui"):
+            for f in game_root.rglob(ext):
+                rel = f.relative_to(game_root)
+                dest = work / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(f, dest)
+                n_files += 1
+
+        env = dict(os.environ,
+                   GIT_DIR=str(repo),
+                   GIT_WORK_TREE=str(work),
+                   GIT_INDEX_FILE=str(Path(tmp) / "index"))
+
+        def g(*args, check=True):
+            return subprocess.run(["git", *args], env=env, check=check,
+                                  capture_output=True, text=True)
+
+        has_head = subprocess.run(
+            ["git", "--git-dir", str(repo), "rev-parse", "--verify",
+             "--quiet", "HEAD"], capture_output=True).returncode == 0
+
+        if has_head:
+            g("read-tree", "HEAD")
+        g("add", "-A")
+        if has_head and g("diff", "--cached", "--quiet", check=False).returncode == 0:
+            print("No changes from the previous snapshot; nothing committed.")
+            return
+
+        tree = g("write-tree").stdout.strip()
+        msg = f"{tag} {patch_name}".strip()
+        commit_args = ["commit-tree", tree]
+        if has_head:
+            commit_args += ["-p", "HEAD"]
+        commit_args += ["-m", msg]
+        commit = g(*commit_args).stdout.strip()
+        g("update-ref", "refs/heads/master", commit)
+        g("tag", tag)
+
+    print(f"Done: {msg} ({n_files} files).")
+    tags = subprocess.run(["git", "--git-dir", str(repo), "tag", "-l",
+                           "--sort=-v:refname"], capture_output=True, text=True)
+    recent = " ".join(tags.stdout.split()[:5])
+    print(f"Tracked versions (newest first): {recent}")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -1112,7 +1201,19 @@ def main():
                     help="Mod root directory (default: auto-detect via .metadata/)")
     ap.add_argument("--vanilla-repo",
                     help="Path to vanilla-tracker bare git repo")
+    ap.add_argument("--snapshot", metavar="TAG",
+                    help="Snapshot the current vanilla install into the "
+                         "tracker as version TAG (creates the tracker repo "
+                         "on first use), then exit")
+    ap.add_argument("--patch-name", default="Pavia",
+                    help="Patch name used in the snapshot commit message "
+                         "(default: Pavia)")
     args = ap.parse_args()
+
+    if args.snapshot:
+        repo = resolve_tracker_path(args.mod_root, args.vanilla_repo)
+        do_snapshot(repo, args.snapshot, args.patch_name)
+        sys.exit(0)
 
     mod_root = find_mod_root(args.mod_root)
     vanilla_repo = find_vanilla_repo(mod_root, args.vanilla_repo)
