@@ -54,7 +54,7 @@ Back-populating is optional. Two snapshots (the patch you last verified your mod
 Run from anywhere inside a mod (root found via `.metadata/`):
 
 ```bash
-pdx-audit                     # override audit, newest two snapshots
+pdx-audit                     # override audit, newest two snapshots (the one-patch-back check; no hashes needed)
 pdx-audit --deps              # dependency audit
 pdx-audit --gui               # GUI shadowing audit
 pdx-audit --full              # widen window to the oldest snapshot
@@ -62,12 +62,12 @@ pdx-audit --diff              # include unified diffs for changed blocks
 pdx-audit --all               # include unchanged blocks in output
 pdx-audit --block farming_village    # audit a single block
 pdx-audit --category building_types  # filter to one category directory
-pdx-audit --old <hash> --new <hash>  # explicit commit window
-pdx-audit --list-commits      # list tracked snapshots
+pdx-audit --old 1.3.8 --new 1.3.10   # explicit window; --old/--new take a version tag OR a commit hash
+pdx-audit --list-commits      # list tracked snapshots (pass a shown tag or hash to --old/--new)
 pdx-audit --snapshot 1.3.12   # record a new vanilla snapshot, then exit
 ```
 
-After a game patch, run the snapshot first, then all three audits. The default window is only the newest two snapshots; use `--full` to catch breakage that landed in an older patch.
+After a game patch, run the snapshot first, then all three audits. Bare `pdx-audit` compares the newest two snapshots: that is the one-patch-back check, and it needs no arguments or hashes. Use `--full` to reach the oldest snapshot, or `--old`/`--new` for any other window; both accept version tags (e.g. `--old 1.3.8 --new 1.3.10`) or commit hashes, listed by `--list-commits`.
 
 ## Notes
 
