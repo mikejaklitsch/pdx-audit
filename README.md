@@ -57,6 +57,7 @@ Run from anywhere inside a mod (root found via `.metadata/`):
 pdx-audit                     # override audit, newest two snapshots (the one-patch-back check; no hashes needed)
 pdx-audit --deps              # dependency audit
 pdx-audit --gui               # GUI shadowing audit
+pdx-audit --gui --since-fork  # GUI audit vs each override's fork point (recommended for wide audits)
 pdx-audit --full              # widen window to the oldest snapshot
 pdx-audit --diff              # include unified diffs for changed blocks
 pdx-audit --all               # include unchanged blocks in output
@@ -68,6 +69,8 @@ pdx-audit --snapshot 1.3.12   # record a new vanilla snapshot, then exit
 ```
 
 After a game patch, run the snapshot first, then all three audits. Bare `pdx-audit` compares the newest two snapshots: that is the one-patch-back check, and it needs no arguments or hashes. Use `--full` to reach the oldest snapshot, or `--old`/`--new` for any other window; both accept version tags (e.g. `--old 1.3.8 --new 1.3.10`) or commit hashes, listed by `--list-commits`.
+
+`--full` diffs every override against the *oldest* snapshot, so it reports the entire history of vanilla evolution — including changes the mod already incorporated (phantom findings) whenever an override was forked from a recent patch. `--gui --since-fork` fixes this: it detects each override's fork point (the tracked vanilla version its copy is closest to) and measures drift from there forward, so only genuinely-missed vanilla changes surface. Each finding is labelled with its fork point; a very old fork point (e.g. `pre-patch`) flags a heavily-diverged copy to verify by hand. Prefer `--since-fork` over `--full` for a wide GUI audit; the plain one-patch-back check does not need it.
 
 ## Notes
 

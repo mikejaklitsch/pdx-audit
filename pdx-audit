@@ -133,6 +133,30 @@ def get_commits(vanilla_repo):
     return result
 
 
+def resolve_ref(vanilla_repo, ref, commits, side):
+    """Validate a user-supplied --old/--new value (version tag or commit hash)
+    against the tracker. Returns the version label ('1.3.10 Pavia') for display,
+    or "" if the ref resolves but isn't a tracked commit. Aborts loudly with a
+    'did you mean' hint when the ref matches nothing — otherwise an unresolvable
+    version silently extracts an empty tree and every block looks 'changed'."""
+    resolved = git(vanilla_repo, "rev-parse", "--verify", "--quiet",
+                   f"{ref}^{{commit}}").strip()
+    if resolved:
+        for h, msg in commits:
+            if resolved.startswith(h):
+                return msg
+        return ""
+    versions = [msg.split()[0] for _, msg in commits if msg]
+    hits = [v for v in versions if v.startswith(ref)]
+    if not hits:
+        hits = difflib.get_close_matches(ref, versions, n=3, cutoff=0.4)
+    hint = (f"  did you mean: {', '.join(hits)}?" if hits
+            else "  run pdx-audit --list-commits to see tracked versions")
+    print(f"Error: --{side} '{ref}' does not match any tracked commit or tag.\n"
+          f"{hint}", file=sys.stderr)
+    sys.exit(1)
+
+
 # ── tracker staleness check ──────────────────────────────────────────────
 
 DEFAULT_GAME_ROOT = Path(
@@ -382,6 +406,55 @@ def _norm(line):
     return s.strip()
 
 
+def _norm_clean(line):
+    """Whitespace / '='-spacing canonicalization for an already comment-free
+    line (see _explode_braces, which strips comments up front)."""
+    s = re.sub(r"\s+", " ", line)
+    s = re.sub(r"\s*=\s*", " = ", s)
+    return s.strip()
+
+
+def _explode_braces(text):
+    """Split `text` so each '{' and '}' outside strings and comments sits on its
+    own logical line. Makes single-line (`a = { b }`) and multi-line brace
+    formatting compare equal, so a formatter collapsing short blocks onto one
+    line cannot masquerade as drift. String- and comment-aware: '#' outside a
+    string starts a comment to end of line; braces and '#' inside a "..." literal
+    are preserved as content (GUI colour codes like "#R ...#!" stay intact)."""
+    out, buf = [], []
+    in_str = False
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if in_str:
+            buf.append(c)
+            if c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+            buf.append(c)
+        elif c == '#':  # comment: drop to end of line
+            j = text.find("\n", i)
+            i = n if j == -1 else j
+            continue
+        elif c == '\n':
+            out.append("".join(buf)); buf = []
+        elif c in "{}":
+            out.append("".join(buf)); buf = []
+            out.append(c)
+        else:
+            buf.append(c)
+        i += 1
+    out.append("".join(buf))
+    return out
+
+
+def _explode_norms(text):
+    """Normalized, non-empty logical lines of `text`, brace-granularity
+    independent (short `{ }` blocks exploded onto their own lines)."""
+    return [n for n in (_norm_clean(l) for l in _explode_braces(text)) if n]
+
+
 def _containment(mod_text, old_text, new_text):
     """Compare a mod block against vanilla's old→new change by normalized-line
     containment. Returns (missing, kept):
@@ -389,21 +462,21 @@ def _containment(mod_text, old_text, new_text):
       kept    — code lines vanilla removed outright that the mod still carries
                 (lines still present anywhere in new vanilla text are moves,
                 not removals, and are not flagged; bare-brace lines skipped)
-    Comment-only lines are ignored on both sides."""
-    mod_norms = {_norm(l) for l in mod_text.split("\n")}
-    a = old_text.strip().splitlines()
-    b = new_text.strip().splitlines()
+    Brace formatting is normalized on both sides (short `{ }` blocks exploded
+    onto their own lines) so a formatter collapsing blocks onto a single line
+    cannot read as drift. Comment-only lines are ignored on both sides."""
+    mod_norms = set(_explode_norms(mod_text))
+    a = _explode_norms(old_text)
+    b = _explode_norms(new_text)
+    new_norms = set(b)
     d = list(difflib.unified_diff(a, b, n=0))
     added = [l[1:] for l in d if l.startswith("+") and not l.startswith("+++")]
     removed = [l[1:] for l in d if l.startswith("-") and not l.startswith("---")]
-    new_norms = {_norm(l) for l in b}
     missing, kept = [], []
-    for line in added:
-        n = _norm(line)
-        if n and n not in mod_norms and n not in missing:
+    for n in added:
+        if n and n.strip("{} ") and n not in mod_norms and n not in missing:
             missing.append(n)
-    for line in removed:
-        n = _norm(line)
+    for n in removed:
         if (n and n.strip("{} ") and n not in new_norms
                 and n in mod_norms and n not in kept):
             kept.append(n)
@@ -948,6 +1021,69 @@ def _print_containment(mod_text, old_text, new_text, subject):
             print(f"      ... and {len(kept) - 10} more")
 
 
+def _text_distance(a, b):
+    """Lightweight similarity distance between two block/file texts: the number
+    of changed (added + removed) lines under a normalized line diff. Lower means
+    more similar. None on either side is treated as maximally distant."""
+    if a is None or b is None:
+        return 10 ** 9
+    add, rem, _ = diff_summary(a, b)
+    return add + rem
+
+
+def build_fork_baselines(vanilla_repo, commits, modules, mdefs, mod_file_texts):
+    """Per-file fork-point detection for the GUI audit.
+
+    For each mod shadow definition and each same-path replacement file, pick the
+    vanilla commit whose version is *closest* to the mod's copy (fewest changed
+    lines) — that is the version the mod was forked from. Measuring drift from
+    the fork point forward, instead of from a fixed oldest commit, suppresses
+    phantom findings for vanilla changes the mod already incorporated (a wide
+    --full window otherwise reports the entire history of vanilla evolution).
+
+    Returns (def_base, file_base):
+      def_base  — (module, kind, name) -> (vfile, text, fork_hash, fork_msg)
+      file_base — vfile -> (text, fork_hash, fork_msg)"""
+    all_idx = {}
+    for i, (h, _msg) in enumerate(commits):
+        di, fi, _ = build_gui_vanilla(
+            vanilla_repo, h, modules,
+            f"fork scan {i + 1}/{len(commits)} ({h[:7]})")
+        all_idx[h] = (di, fi)
+
+    def_base = {}
+    for d in mdefs:
+        key = (d["module"], d["kind"], d["name"])
+        if key in def_base:
+            continue
+        best = None
+        for h, msg in commits:
+            v = all_idx[h][0].get(key)
+            if not v:
+                continue
+            dist = _text_distance(d["text"], v[1])
+            if best is None or dist < best[0]:
+                best = (dist, h, msg, v)
+        if best:
+            _dist, h, msg, v = best
+            def_base[key] = (v[0], v[1], h, msg)
+
+    file_base = {}
+    for rel, mtext in mod_file_texts.items():
+        best = None
+        for h, msg in commits:
+            t = all_idx[h][1].get(rel)
+            if t is None:
+                continue
+            dist = _text_distance(mtext, t)
+            if best is None or dist < best[0]:
+                best = (dist, h, msg, t)
+        if best:
+            _dist, h, msg, t = best
+            file_base[rel] = (t, h, msg)
+    return def_base, file_base
+
+
 def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args):
     files = mod_gui_files(mod_root)
     if not files:
@@ -987,6 +1123,15 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
               f"best-effort (old: {len(bad_old)}, new: {len(bad_new)})",
               file=sys.stderr)
 
+    # Fork-point baselines: per-def / per-file nearest tracked vanilla version,
+    # used as 'old' instead of the fixed old_hash so drift is measured from the
+    # version each file was forked from (suppresses phantom findings).
+    fork_defs, fork_files = {}, {}
+    if getattr(args, "since_fork", False):
+        mod_file_texts = {rel: text for rel, text in files}
+        fork_defs, fork_files = build_fork_baselines(
+            vanilla_repo, get_commits(vanilla_repo), modules, mdefs, mod_file_texts)
+
     # Files that replace a vanilla file at the same path are audited at file
     # level below; their definitions are replacements, not shadows.
     same_path = {rel for rel, _ in files if rel in old_files or rel in new_files}
@@ -997,7 +1142,11 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         if d["file"] in same_path:
             continue
         key = (d["module"], d["kind"], d["name"])
-        o = old_idx.get(key)
+        if fork_defs:
+            fb = fork_defs.get(key)
+            o = (fb[0], fb[1]) if fb else None
+        else:
+            o = old_idx.get(key)
         n = new_idx.get(key)
         if not o and not n:
             mod_only += 1
@@ -1010,10 +1159,22 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         else:
             changed.append((d, o, n))
 
+    # Split changed shadows by whether the mod copy already carries vanilla's
+    # change. A definition vanilla edited whose mod shadow already reflects the
+    # edit is reconciled, not drift, and must not be reported as action-needed.
+    stale_changed, reconciled_changed = [], []
+    for d, o, n in changed:
+        missing, kept = _containment(d["text"], o[1], n[1])
+        (stale_changed if (missing or kept) else reconciled_changed).append((d, o, n))
+
     replaced = []
     same_path_unchanged = []
     for rel, _text in files:
-        ot = old_files.get(rel)
+        if fork_files:
+            fb = fork_files.get(rel)
+            ot = fb[0] if fb else None
+        else:
+            ot = old_files.get(rel)
         nt = new_files.get(rel)
         if ot is None and nt is None:
             continue
@@ -1022,9 +1183,15 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         else:
             same_path_unchanged.append(rel)
 
-    print(f"# GUI Override Audit: {old_hash[:7]} → {new_hash[:7]}")
-    if old_msg or new_msg:
-        print(f"*{old_msg} → {new_msg}*")
+    if fork_defs or fork_files:
+        print(f"# GUI Override Audit: per-file fork point → {new_hash[:7]} "
+              f"(--since-fork)")
+        print(f"*each override compared against the nearest tracked vanilla "
+              f"version → {new_msg}*")
+    else:
+        print(f"# GUI Override Audit: {old_hash[:7]} → {new_hash[:7]}")
+        if old_msg or new_msg:
+            print(f"*{old_msg} → {new_msg}*")
     print()
     shadow_defs = [d for d in mdefs if d["file"] not in same_path]
     n_tmpl = sum(1 for d in shadow_defs if d["kind"] == "template")
@@ -1038,7 +1205,11 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
     print(f"**{len(shadow_defs)}** shadow-capable definitions ({n_tmpl} template, "
           f"{n_type} type) in **{len(files)}** mod .gui files"
           + ("; " + "; ".join(extras) if extras else ""))
-    print(f"- **{len(changed)}** shadowed vanilla definitions changed — action needed")
+    print(f"- **{len(stale_changed)}** shadowed vanilla definitions changed and not "
+          f"reconciled — action needed")
+    if reconciled_changed:
+        print(f"- **{len(reconciled_changed)}** shadowed definitions vanilla changed "
+              f"but the mod copy already reconciled")
     print(f"- **{len(replaced)}** same-path file replacements where vanilla's file "
           f"changed — action needed")
     print(f"- **{len(new_coll)}** new name collisions (vanilla added a same-name definition)")
@@ -1046,33 +1217,50 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
     print(f"- **{len(unchanged)}** unchanged shadows, **{mod_only}** mod-only definitions")
     print()
 
-    if changed:
-        print(f"## Changed Shadowed Definitions — mod GUI override is suppressing "
-              f"vanilla changes ({len(changed)})")
+    def _print_changed_def(d, o, n):
+        print(f"### {d['name']}")
+        print(f"- **Kind:** {d['kind']}")
+        print(f"- **Mod:** `{d['file']}:{d['line']}`")
+        print(f"- **Vanilla:** `{n[0]}`")
+        fb = fork_defs.get((d["module"], d["kind"], d["name"]))
+        if fb:
+            print(f"- **Forked from:** {fb[2][:7]} ({fb[3]})")
+        if _loads_after_vanilla(d["file"], n[0]):
+            print("- **Load order:** ⚠ mod file does not sort before the vanilla "
+                  "file — the mod definition may never apply (verify)")
+        if args.diff:
+            dl = diff_lines(o[1], n[1], d["name"])
+            if dl:
+                print("```diff")
+                sys.stdout.write("".join(dl))
+                print("```")
+        else:
+            n_add, n_rem, key_lines = diff_summary(o[1], n[1])
+            for line in key_lines[:10]:
+                print(line)
+            if len(key_lines) > 10:
+                print(f"  ... and {len(key_lines) - 10} more lines")
+            print(f"  *({n_add} added, {n_rem} removed)*")
+        _print_containment(d["text"], o[1], n[1], "mod copy")
         print()
-        for d, o, n in changed:
-            print(f"### {d['name']}")
-            print(f"- **Kind:** {d['kind']}")
-            print(f"- **Mod:** `{d['file']}:{d['line']}`")
-            print(f"- **Vanilla:** `{n[0]}`")
-            if _loads_after_vanilla(d["file"], n[0]):
-                print("- **Load order:** ⚠ mod file does not sort before the vanilla "
-                      "file — the mod definition may never apply (verify)")
-            if args.diff:
-                dl = diff_lines(o[1], n[1], d["name"])
-                if dl:
-                    print("```diff")
-                    sys.stdout.write("".join(dl))
-                    print("```")
-            else:
-                n_add, n_rem, key_lines = diff_summary(o[1], n[1])
-                for line in key_lines[:10]:
-                    print(line)
-                if len(key_lines) > 10:
-                    print(f"  ... and {len(key_lines) - 10} more lines")
-                print(f"  *({n_add} added, {n_rem} removed)*")
-            _print_containment(d["text"], o[1], n[1], "mod copy")
-            print()
+
+    if stale_changed:
+        print(f"## Changed Shadowed Definitions — mod GUI override is suppressing "
+              f"vanilla changes ({len(stale_changed)})")
+        print()
+        for d, o, n in stale_changed:
+            _print_changed_def(d, o, n)
+
+    if reconciled_changed:
+        print(f"## Changed Shadowed Definitions — mod copy already reconciled "
+              f"({len(reconciled_changed)})")
+        print()
+        print("Vanilla changed these definitions and the mod's shadow copy already "
+              "carries the change — informational, no action needed (verify in game "
+              "if desired).")
+        print()
+        for d, o, n in reconciled_changed:
+            _print_changed_def(d, o, n)
 
     if replaced:
         print(f"## Same-Path File Replacements — vanilla file changed underneath "
@@ -1133,14 +1321,18 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
             print(f"- file:{rel} — replaces same-path vanilla file (unchanged)")
         print()
 
-    if not changed and not replaced and not new_coll:
-        print("**All GUI overrides are current with vanilla.**")
+    if not stale_changed and not replaced and not new_coll:
+        if reconciled_changed:
+            print("**All GUI overrides are current with vanilla** "
+                  f"({len(reconciled_changed)} changed but already reconciled).")
+        else:
+            print("**All GUI overrides are current with vanilla.**")
     else:
         print("---")
-        print(f"**Action needed:** {len(changed)} shadowed definitions drifted, "
+        print(f"**Action needed:** {len(stale_changed)} shadowed definitions drifted, "
               f"{len(replaced)} replaced files changed, "
               f"{len(new_coll)} new collisions.")
-        if not args.diff and changed:
+        if not args.diff and stale_changed:
             print("Run with `--diff` for full unified diffs.")
     print()
     print("_Implicit GUI overrides: the first-loaded definition of a template/type "
@@ -1369,6 +1561,11 @@ def main():
                          "same-path .gui file replacements")
     ap.add_argument("--full", action="store_true",
                     help="Widen window: audit from the oldest tracked commit to new")
+    ap.add_argument("--since-fork", action="store_true",
+                    help="GUI audit: measure each override's drift from the "
+                         "nearest tracked vanilla version (its fork point) "
+                         "rather than a fixed old commit — suppresses phantom "
+                         "findings for vanilla history the mod already carries")
     ap.add_argument("--block",
                     help="Audit a single block name only")
     ap.add_argument("--category",
@@ -1426,9 +1623,11 @@ def main():
     if args.full:
         old_hash, old_msg = commits[-1]
     if args.old:
-        old_hash, old_msg = args.old, ""
+        old_msg = resolve_ref(vanilla_repo, args.old, commits, "old")
+        old_hash = args.old
     if args.new:
-        new_hash, new_msg = args.new, ""
+        new_msg = resolve_ref(vanilla_repo, args.new, commits, "new")
+        new_hash = args.new
 
     if args.deps:
         run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg)
