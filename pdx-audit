@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Diff mod overrides and referenced tokens against vanilla patch changes.
 
-Two audits, both driven by the vanilla-tracker bare git repo:
+Four audits (run one, or all at once with --all), all driven by the
+vanilla-tracker bare git repo:
 
   Override audit (default): finds every INJECT:/REPLACE:/TRY_INJECT:/TRY_REPLACE: directive
   in the mod, locates the target block in vanilla at two commits (old, new), and
   reports what vanilla changed. For changed REPLACE blocks it also checks the
   mod's replacement text and reports whether it already contains vanilla's new
   lines (reconciled) or is missing them (stale). REPLACE blocks vanilla changed
-  are highest priority — the mod may be silently suppressing those improvements.
+  are highest priority; the mod may be silently suppressing those improvements.
 
   Dependency audit (--deps): extracts every `token =` identifier the mod's
   scripts assign, then flags any that vanilla used at the old commit but no
@@ -17,14 +18,20 @@ Two audits, both driven by the vanilla-tracker bare git repo:
   the mod writes that vanilla dropped. Suggests rename candidates. Findings are
   suspects to verify with pdx-syntax, not confirmed breakage.
 
-  GUI audit (--gui): finds implicit GUI overrides — mod .gui template/type
+  GUI audit (--gui): finds implicit GUI overrides: mod .gui template/type
   definitions that shadow a same-name vanilla definition (first-loaded file
   wins, hence the aaa_ prefix convention), plus mod .gui files that replace a
-  vanilla file at the same relative path — and reports which shadowed
+  vanilla file at the same relative path, and reports which shadowed
   definitions vanilla changed between the two commits. For changed definitions
   it also checks whether the mod's copy already contains vanilla's new lines.
   Load order is approximated by case-insensitive path sort; findings are
   suspects to verify in game.
+
+  Localization audit (--loc): finds loc keys the mod redefines whose vanilla
+  value changed or was removed between the two commits. Matched by
+  (language, key), not by filename, since keys are not unique across languages
+  and vanilla moves them between files. A mod's own new keys are counted as
+  mod-only, not overrides.
 
 Requires a vanilla-tracker bare git repo. Searches for it at:
   1. --vanilla-repo <path> argument
@@ -32,17 +39,19 @@ Requires a vanilla-tracker bare git repo. Searches for it at:
   3. PDX_VANILLA_REPO environment variable
 
 The --deps vanilla vocabulary is cached per tracker commit under
-<vanilla-tracker>/cache/ — keyed by commit hash, so entries never go stale.
+<vanilla-tracker>/cache/, keyed by commit hash, so entries never go stale.
 On every run a sample of live game files ($PDX_GAME_ROOT or the default
 install) is hashed against the newest tracked commit; a mismatch means the
 game patched but the tracker was not updated, and a warning is printed.
 
 Usage:
     pdx-audit                              # changed override blocks only
-    pdx-audit --all                        # include unchanged
+    pdx-audit --all                        # run every audit in one pass
+    pdx-audit --include-unchanged          # also list unchanged blocks/keys
     pdx-audit --diff                       # show unified diffs
     pdx-audit --deps                       # dependency audit (dropped tokens)
     pdx-audit --gui                        # GUI override audit (implicit shadowing)
+    pdx-audit --loc                        # localization audit (overridden keys)
     pdx-audit --full                       # widen window to oldest tracked commit
     pdx-audit --block farming_village
     pdx-audit --old abc1234 --new def5678
@@ -137,7 +146,7 @@ def resolve_ref(vanilla_repo, ref, commits, side):
     """Validate a user-supplied --old/--new value (version tag or commit hash)
     against the tracker. Returns the version label ('1.3.10 Pavia') for display,
     or "" if the ref resolves but isn't a tracked commit. Aborts loudly with a
-    'did you mean' hint when the ref matches nothing — otherwise an unresolvable
+    'did you mean' hint when the ref matches nothing; otherwise an unresolvable
     version silently extracts an empty tree and every block looks 'changed'."""
     resolved = git(vanilla_repo, "rev-parse", "--verify", "--quiet",
                    f"{ref}^{{commit}}").strip()
@@ -168,7 +177,7 @@ STALE_SENTINEL_DIRS = ("main_menu/localization/english", "in_game/gui")
 def warn_if_tracker_stale(vanilla_repo, newest_hash, sample_size=40):
     """Hash a spread sample of live game files against the newest tracked
     commit's blobs. Mismatches mean the game patched after the last tracker
-    snapshot — every audit window is then missing the real newest version.
+    snapshot; every audit window is then missing the real newest version.
     English localization churns every patch, so the sample is reliable.
     Warn-only heuristic; silent when the game install is not found."""
     game_root = Path(os.environ.get("PDX_GAME_ROOT", str(DEFAULT_GAME_ROOT)))
@@ -194,7 +203,7 @@ def warn_if_tracker_stale(vanilla_repo, newest_hash, sample_size=40):
             if h != sha:
                 stale += 1
     if stale:
-        print(f"Warning: vanilla-tracker looks OUT OF DATE — {stale}/{checked} "
+        print(f"Warning: vanilla-tracker looks OUT OF DATE: {stale}/{checked} "
               f"sampled game files differ from the newest tracked commit. "
               f"Run the tracker's update script, then re-audit.",
               file=sys.stderr)
@@ -264,7 +273,7 @@ def find_overrides(mod_root):
 def _git_archive(vanilla_repo, commit, paths=None, timeout=60):
     """Tar bytes for `paths` (whole tree if None) at `commit`. When the batched
     call fails (e.g. one path does not exist at that commit), falls back to one
-    archive per path and concatenates them — the result must be parsed with
+    archive per path and concatenates them; the result must be parsed with
     ignore_zeros=True or every archive after the first is silently lost."""
     cmd = ["git", f"--git-dir={vanilla_repo}", "archive", "--format=tar", commit]
     if paths:
@@ -336,7 +345,7 @@ def build_index(vanilla_repo, commit, categories, progress_label=""):
 
 def diff_lines(old_text, new_text, label="block"):
     if old_text is None:
-        return [f"+++ (new block — did not exist in old vanilla)\n"]
+        return [f"+++ (new block, did not exist in old vanilla)\n"]
     if new_text is None:
         return [f"--- (block removed from vanilla)\n"]
     a = old_text.strip().splitlines(keepends=True)
@@ -458,8 +467,8 @@ def _explode_norms(text):
 def _containment(mod_text, old_text, new_text):
     """Compare a mod block against vanilla's old→new change by normalized-line
     containment. Returns (missing, kept):
-      missing — vanilla-added code lines absent from the mod block
-      kept    — code lines vanilla removed outright that the mod still carries
+      missing: vanilla-added code lines absent from the mod block
+      kept: code lines vanilla removed outright that the mod still carries
                 (lines still present anywhere in new vanilla text are moves,
                 not removals, and are not flagged; bare-brace lines skipped)
     Brace formatting is normalized on both sides (short `{ }` blocks exploded
@@ -642,7 +651,7 @@ def replace_reconciliation(mod_root, ov, old_text, new_text):
 def inject_overlap(mod_root, ov, old_text, new_text):
     """For a changed INJECT target: keys set by both the mod's INJECT block and
     vanilla's changed lines. An overlap means vanilla touched the same key the
-    mod overrides — the highest-priority kind of INJECT drift. No overlap does
+    mod overrides; the highest-priority kind of INJECT drift. No overlap does
     NOT mean safe: surrounding context changes can still matter.
     Returns (status, keys); status 'unknown' when there is nothing to compare."""
     if old_text is None or new_text is None:
@@ -706,7 +715,7 @@ VOCAB_CACHE_VERSION = 1
 
 
 def _vocab_cache_path(vanilla_repo, commit):
-    """Cache file for a commit's vocabulary, keyed by the full commit hash —
+    """Cache file for a commit's vocabulary, keyed by the full commit hash;
     commit content is immutable, so entries never go stale. The version bumps
     when the tokenizer changes."""
     full = git(vanilla_repo, "rev-parse", commit).strip()
@@ -768,7 +777,7 @@ def build_vocab(vanilla_repo, commit, label=""):
 
 def rename_candidates(token, old_vocab, new_vocab, limit=5):
     """Tokens new to vanilla@new (absent at old) that share a stem with the
-    dropped token — likely rename targets. Ranked by shared-prefix length;
+    dropped token: likely rename targets. Ranked by shared-prefix length;
     stems shorter than 5 chars are noise, not renames."""
     cands = []
     for t, c in new_vocab.items():
@@ -808,8 +817,8 @@ def run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg)
         print(f"*{old_msg} → {new_msg}*")
     print()
     print(f"**{len(usage)}** referenced identifiers checked against vanilla vocabulary.")
-    print(f"- **{len(dropped)}** used by the mod but dropped by vanilla "
-          f"— verify (likely renamed/removed)")
+    print(f"- **{len(dropped)}** used by the mod but dropped by vanilla; "
+          f"verify (likely renamed/removed)")
     print()
 
     if not dropped:
@@ -878,9 +887,9 @@ def parse_gui_defs(text):
     """Extract template/local_template/types/type definitions from .gui content.
     Line-granular: headers sharing a line with a second definition are missed,
     and a definition's text may include a trailing brace that closed its parent
-    on the same line — both are stable across commits, so comparisons hold.
+    on the same line; both are stable across commits, so comparisons hold.
     Returns (defs, clean). clean=False flags brace anomalies vanilla actually
-    ships — a stray extra closer (engine-tolerated; accounting resyncs at 0) or
+    ships: a stray extra closer (engine-tolerated; accounting resyncs at 0) or
     a block left open at EOF (its definition is dropped). Emitted defs closed
     properly and are trustworthy either way."""
     lines = text.split("\n")
@@ -936,11 +945,11 @@ def mod_gui_files(mod_root):
 def build_gui_vanilla(vanilla_repo, commit, modules, label=""):
     """Parse all vanilla .gui under the given modules' gui/ dirs at `commit`.
     Returns (def_idx, file_idx, bad):
-      def_idx  — (module, kind, name) -> (vfile, text) for template/type;
+      def_idx: (module, kind, name) -> (vfile, text) for template/type;
                  on duplicate names the first file in path-sorted order wins,
                  approximating first-loaded-wins
-      file_idx — vfile -> full text (for same-path replacement checks)
-      bad      — vfiles with brace anomalies (defs still indexed best-effort)"""
+      file_idx: vfile -> full text (for same-path replacement checks)
+      bad: vfiles with brace anomalies (defs still indexed best-effort)"""
     dirs = [f"{m}/gui" for m in sorted(modules)]
     if label:
         print(f"  {label}: extracting {len(dirs)} gui directories...",
@@ -981,11 +990,57 @@ def build_gui_vanilla(vanilla_repo, commit, modules, label=""):
     return def_idx, file_idx, bad
 
 
+GUI_CACHE_VERSION = 1
+
+
+def _gui_cache_path(vanilla_repo, commit, modules):
+    """Cache file for a commit's parsed GUI index, keyed by the full commit hash
+    and the module set. Commit content is immutable, so entries never go stale;
+    the version bumps when the parser or index shape changes."""
+    full = git(vanilla_repo, "rev-parse", commit).strip()
+    if not full:
+        return None
+    mod_key = hashlib.sha1(",".join(sorted(modules)).encode()).hexdigest()[:12]
+    return Path(vanilla_repo).parent / "cache" / \
+        f"gui-v{GUI_CACHE_VERSION}-{full}-{mod_key}.json"
+
+
+def build_gui_vanilla_cached(vanilla_repo, commit, modules, label=""):
+    """build_gui_vanilla with a per-commit disk cache. Fork detection reads the
+    GUI index at every tracked commit; without caching that whole-history scan
+    would fall on every audit, so the parsed index is memoized under
+    <vanilla-tracker>/cache/ keyed by the immutable commit hash."""
+    cache = _gui_cache_path(vanilla_repo, commit, modules)
+    if cache and cache.is_file():
+        try:
+            data = json.loads(cache.read_text())
+            def_idx = {tuple(k): (v[0], v[1]) for k, v in data["defs"]}
+            if label:
+                print(f"  {label}: gui index from cache "
+                      f"({len(def_idx)} defs).", file=sys.stderr)
+            return def_idx, data["files"], data["bad"]
+        except (OSError, ValueError, KeyError, IndexError):
+            pass
+    def_idx, file_idx, bad = build_gui_vanilla(vanilla_repo, commit, modules, label)
+    if cache:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "defs": [[list(k), [v[0], v[1]]] for k, v in def_idx.items()],
+                "files": file_idx,
+                "bad": bad,
+            }
+            cache.write_text(json.dumps(payload))
+        except OSError:
+            pass
+    return def_idx, file_idx, bad
+
+
 def _loads_after_vanilla(mod_file, vfile):
     """True when the mod .gui file does not sort before the vanilla file
     defining the same name. First-loaded definition wins and load order follows
     path sort (hence the aaa_ prefix convention), so a mod file sorting after
-    vanilla's probably never applies. Heuristic — verify in game."""
+    vanilla's probably never applies. Heuristic; verify in game."""
     return mod_file.lower() >= vfile.lower()
 
 
@@ -1031,57 +1086,123 @@ def _text_distance(a, b):
     return add + rem
 
 
+FORK_PIN_RE = re.compile(r"#\s*pdx-audit\s+fork-point\s*:\s*(\S+)", re.IGNORECASE)
+
+
+def parse_fork_pin(text, max_lines=20):
+    """Return the version token from a '# pdx-audit fork-point: <version>'
+    comment near the top of a mod .gui file, or None. Only the first few lines
+    are scanned so the marker cannot be picked up from deep inside the file."""
+    for line in text.splitlines()[:max_lines]:
+        m = FORK_PIN_RE.search(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def resolve_pin_commit(vanilla_repo, token, commits):
+    """Resolve a fork-point pin token (version tag or commit hash) to a tracked
+    (hash, msg) pair, or None when it matches no snapshot."""
+    resolved = git(vanilla_repo, "rev-parse", "--verify", "--quiet",
+                   f"{token}^{{commit}}").strip()
+    if resolved:
+        for h, msg in commits:
+            if resolved.startswith(h) or h.startswith(resolved):
+                return (h, msg)
+    for h, msg in commits:
+        if msg.split() and msg.split()[0] == token:
+            return (h, msg)
+    return None
+
+
 def build_fork_baselines(vanilla_repo, commits, modules, mdefs, mod_file_texts):
     """Per-file fork-point detection for the GUI audit.
 
     For each mod shadow definition and each same-path replacement file, pick the
-    vanilla commit whose version is *closest* to the mod's copy (fewest changed
-    lines) — that is the version the mod was forked from. Measuring drift from
-    the fork point forward, instead of from a fixed oldest commit, suppresses
-    phantom findings for vanilla changes the mod already incorporated (a wide
-    --full window otherwise reports the entire history of vanilla evolution).
+    baseline vanilla version to measure drift from. A file carrying a
+    '# pdx-audit fork-point: <version>' pin uses that version outright;
+    otherwise the tracked commit whose text is *closest* to the mod's copy
+    (fewest changed lines) is taken as the version the mod was forked from.
+    Measuring drift from the fork point forward, instead of from a fixed oldest
+    commit, avoids re-reporting vanilla changes the mod already copied in (a
+    wide --full window otherwise reports the entire history of vanilla changes,
+    most of which the copy already contains).
 
-    Returns (def_base, file_base):
-      def_base  — (module, kind, name) -> (vfile, text, fork_hash, fork_msg)
-      file_base — vfile -> (text, fork_hash, fork_msg)"""
+    Returns (def_base, file_base, pin_errors, pin_stale):
+      def_base: (module, kind, name) -> (vfile, text, fork_hash, fork_msg, pinned)
+      file_base: rel -> (text, fork_hash, fork_msg, pinned)
+      pin_errors: rel -> unresolvable pin token
+      pin_stale: rel -> (pinned_tag, detected_tag) when a pin no longer matches
+                   the file's contents"""
     all_idx = {}
     for i, (h, _msg) in enumerate(commits):
-        di, fi, _ = build_gui_vanilla(
+        di, fi, _ = build_gui_vanilla_cached(
             vanilla_repo, h, modules,
             f"fork scan {i + 1}/{len(commits)} ({h[:7]})")
         all_idx[h] = (di, fi)
+
+    pins, pin_errors = {}, {}
+    for rel, text in mod_file_texts.items():
+        token = parse_fork_pin(text)
+        if not token:
+            continue
+        hit = resolve_pin_commit(vanilla_repo, token, commits)
+        if hit:
+            pins[rel] = hit
+        else:
+            pin_errors[rel] = token
+
+    def _closest(target, getter):
+        best = None
+        for h, msg in commits:
+            t = getter(all_idx[h])
+            if t is None:
+                continue
+            dist = _text_distance(target, t)
+            if best is None or dist < best[0]:
+                best = (dist, h, msg, t)
+        return best
 
     def_base = {}
     for d in mdefs:
         key = (d["module"], d["kind"], d["name"])
         if key in def_base:
             continue
-        best = None
-        for h, msg in commits:
-            v = all_idx[h][0].get(key)
-            if not v:
-                continue
-            dist = _text_distance(d["text"], v[1])
-            if best is None or dist < best[0]:
-                best = (dist, h, msg, v)
+        pin = pins.get(d.get("file"))
+        if pin:
+            ph, pmsg = pin
+            v = all_idx[ph][0].get(key)
+            if v:
+                def_base[key] = (v[0], v[1], ph, pmsg, True)
+            continue
+        best = _closest(d["text"], lambda idx, k=key: (idx[0].get(k) or (None, None))[1])
         if best:
-            _dist, h, msg, v = best
-            def_base[key] = (v[0], v[1], h, msg)
+            _dist, h, msg, _t = best
+            v = all_idx[h][0].get(key)
+            def_base[key] = (v[0], v[1], h, msg, False)
 
     file_base = {}
+    pin_stale = {}
     for rel, mtext in mod_file_texts.items():
-        best = None
-        for h, msg in commits:
-            t = all_idx[h][1].get(rel)
-            if t is None:
-                continue
-            dist = _text_distance(mtext, t)
-            if best is None or dist < best[0]:
-                best = (dist, h, msg, t)
+        pin = pins.get(rel)
+        if pin:
+            ph, pmsg = pin
+            t = all_idx[ph][1].get(rel)
+            if t is not None:
+                file_base[rel] = (t, ph, pmsg, True)
+                # A pin is authoritative, but detect whether the file's contents
+                # have moved on from it (e.g. a mod updated to a newer patch
+                # without updating the pin) and flag the pin as possibly stale.
+                best = _closest(mtext, lambda idx, r=rel: idx[1].get(r))
+                if best and best[1] != ph and best[0] < _text_distance(mtext, t):
+                    pin_stale[rel] = (pmsg.split()[0] if pmsg else "?",
+                                      best[2].split()[0] if best[2] else "?")
+            continue
+        best = _closest(mtext, lambda idx, r=rel: idx[1].get(r))
         if best:
             _dist, h, msg, t = best
-            file_base[rel] = (t, h, msg)
-    return def_base, file_base
+            file_base[rel] = (t, h, msg, False)
+    return def_base, file_base, pin_errors, pin_stale
 
 
 def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args):
@@ -1095,7 +1216,7 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
     for rel, text in files:
         defs, clean = parse_gui_defs(text)
         if not clean:
-            print(f"Warning: unbalanced braces in mod file {rel} — "
+            print(f"Warning: unbalanced braces in mod file {rel}; "
                   f"definitions parsed best-effort", file=sys.stderr)
         module = rel.split("/", 1)[0]
         for d in defs:
@@ -1111,9 +1232,9 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
     modules = sorted({rel.split("/", 1)[0] for rel, _ in files})
     print(f"Scanning {len(mdefs)} GUI definitions in {len(files)} mod .gui files...",
           file=sys.stderr)
-    old_idx, old_files, bad_old = build_gui_vanilla(
+    old_idx, old_files, bad_old = build_gui_vanilla_cached(
         vanilla_repo, old_hash, modules, f"old ({old_hash[:7]})")
-    new_idx, new_files, bad_new = build_gui_vanilla(
+    new_idx, new_files, bad_new = build_gui_vanilla_cached(
         vanilla_repo, new_hash, modules, f"new ({new_hash[:7]})")
     if not new_idx and not new_files:
         print("Could not read vanilla .gui files (archive failed).", file=sys.stderr)
@@ -1123,14 +1244,24 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
               f"best-effort (old: {len(bad_old)}, new: {len(bad_new)})",
               file=sys.stderr)
 
-    # Fork-point baselines: per-def / per-file nearest tracked vanilla version,
-    # used as 'old' instead of the fixed old_hash so drift is measured from the
-    # version each file was forked from (suppresses phantom findings).
-    fork_defs, fork_files = {}, {}
-    if getattr(args, "since_fork", False):
+    # Fork-point baselines are the default: each override is compared against the
+    # tracked vanilla version it was forked from (per-file pin or nearest match),
+    # so drift is measured from that point forward. An explicit fixed window
+    # (--full / --old / --new) opts out and compares against old_hash instead.
+    fixed_window = bool(args.full or args.old or args.new)
+    fork_defs, fork_files, pin_errors, pin_stale = {}, {}, {}, {}
+    if not fixed_window:
         mod_file_texts = {rel: text for rel, text in files}
-        fork_defs, fork_files = build_fork_baselines(
+        fork_defs, fork_files, pin_errors, pin_stale = build_fork_baselines(
             vanilla_repo, get_commits(vanilla_repo), modules, mdefs, mod_file_texts)
+        for rel, token in sorted(pin_errors.items()):
+            print(f"Warning: {rel} pins fork-point '{token}', which matches no "
+                  f"tracked snapshot; falling back to auto-detection.",
+                  file=sys.stderr)
+        for rel, (pinned_tag, detected_tag) in sorted(pin_stale.items()):
+            print(f"Warning: {rel} pins fork-point {pinned_tag}, but its contents "
+                  f"look closer to {detected_tag}; the pin may be stale "
+                  f"(--stamp-fork-points --refresh updates it).", file=sys.stderr)
 
     # Files that replace a vanilla file at the same path are audited at file
     # level below; their definitions are replacements, not shadows.
@@ -1183,16 +1314,29 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         else:
             same_path_unchanged.append(rel)
 
-    if fork_defs or fork_files:
-        print(f"# GUI Override Audit: per-file fork point → {new_hash[:7]} "
-              f"(--since-fork)")
-        print(f"*each override compared against the nearest tracked vanilla "
-              f"version → {new_msg}*")
+    if not fixed_window:
+        print(f"# GUI Override Audit: per-file fork point → {new_hash[:7]}")
+        print(f"*each override compared against the vanilla version it was forked "
+              f"from → {new_msg}*")
     else:
-        print(f"# GUI Override Audit: {old_hash[:7]} → {new_hash[:7]}")
+        print(f"# GUI Override Audit: {old_hash[:7]} → {new_hash[:7]} (fixed window)")
         if old_msg or new_msg:
             print(f"*{old_msg} → {new_msg}*")
     print()
+
+    if fork_files:
+        print("## Detected Fork Points")
+        print()
+        print("The version each replaced file was measured against. `pinned` means "
+              "the file carries a `# pdx-audit fork-point:` comment; the rest are "
+              "auto-detected as the closest tracked version. Pin a file to lock its "
+              "baseline (see `--stamp-fork-points`).")
+        print()
+        for rel in sorted(fork_files):
+            _t, _h, fmsg, pinned = fork_files[rel]
+            tag = fmsg.split()[0] if fmsg else "?"
+            print(f"- `{rel}`: {tag}" + ("  *(pinned)*" if pinned else ""))
+        print()
     shadow_defs = [d for d in mdefs if d["file"] not in same_path]
     n_tmpl = sum(1 for d in shadow_defs if d["kind"] == "template")
     n_type = len(shadow_defs) - n_tmpl
@@ -1206,12 +1350,12 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
           f"{n_type} type) in **{len(files)}** mod .gui files"
           + ("; " + "; ".join(extras) if extras else ""))
     print(f"- **{len(stale_changed)}** shadowed vanilla definitions changed and not "
-          f"reconciled — action needed")
+          f"reconciled: action needed")
     if reconciled_changed:
         print(f"- **{len(reconciled_changed)}** shadowed definitions vanilla changed "
               f"but the mod copy already reconciled")
     print(f"- **{len(replaced)}** same-path file replacements where vanilla's file "
-          f"changed — action needed")
+          f"changed: action needed")
     print(f"- **{len(new_coll)}** new name collisions (vanilla added a same-name definition)")
     print(f"- **{len(van_removed)}** shadowed definitions removed from vanilla")
     print(f"- **{len(unchanged)}** unchanged shadows, **{mod_only}** mod-only definitions")
@@ -1227,7 +1371,7 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
             print(f"- **Forked from:** {fb[2][:7]} ({fb[3]})")
         if _loads_after_vanilla(d["file"], n[0]):
             print("- **Load order:** ⚠ mod file does not sort before the vanilla "
-                  "file — the mod definition may never apply (verify)")
+                  "file; the mod definition may never apply (verify)")
         if args.diff:
             dl = diff_lines(o[1], n[1], d["name"])
             if dl:
@@ -1245,25 +1389,25 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         print()
 
     if stale_changed:
-        print(f"## Changed Shadowed Definitions — mod GUI override is suppressing "
+        print(f"## Changed Shadowed Definitions: mod GUI override is suppressing "
               f"vanilla changes ({len(stale_changed)})")
         print()
         for d, o, n in stale_changed:
             _print_changed_def(d, o, n)
 
     if reconciled_changed:
-        print(f"## Changed Shadowed Definitions — mod copy already reconciled "
+        print(f"## Changed Shadowed Definitions: mod copy already reconciled "
               f"({len(reconciled_changed)})")
         print()
         print("Vanilla changed these definitions and the mod's shadow copy already "
-              "carries the change — informational, no action needed (verify in game "
+              "carries the change: informational, no action needed (verify in game "
               "if desired).")
         print()
         for d, o, n in reconciled_changed:
             _print_changed_def(d, o, n)
 
     if replaced:
-        print(f"## Same-Path File Replacements — vanilla file changed underneath "
+        print(f"## Same-Path File Replacements: vanilla file changed underneath "
               f"({len(replaced)})")
         print()
         print("The mod file fully replaces the vanilla file at the same path, so "
@@ -1272,11 +1416,16 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         print()
         for rel, ot, nt in replaced:
             print(f"### {rel}")
+            fb = fork_files.get(rel)
+            if fb:
+                tag = fb[2].split()[0] if fb[2] else "?"
+                print(f"- **Forked from:** {fb[1][:7]} ({tag})"
+                      + ("  *(pinned)*" if fb[3] else ""))
             if ot is None:
-                print("  *(vanilla added this file — the mod file now overrides "
+                print("  *(vanilla added this file; the mod file now overrides "
                       "a file that did not exist before)*")
             elif nt is None:
-                print("  *(vanilla removed this file — the mod copy is now the only one)*")
+                print("  *(vanilla removed this file; the mod copy is now the only one)*")
             else:
                 ch, ad, rm = _def_level_changes(ot, nt)
                 def _fmt(ks):
@@ -1293,14 +1442,14 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
             print()
 
     if new_coll:
-        print(f"## New Name Collisions — vanilla now defines a name the mod also "
+        print(f"## New Name Collisions: vanilla now defines a name the mod also "
               f"defines ({len(new_coll)})")
         print()
         for d, n in new_coll:
             order = (" (⚠ vanilla may load first)"
                      if _loads_after_vanilla(d["file"], n[0])
                      else " (mod loads first)")
-            print(f"- **{d['kind']}:{d['name']}** — mod `{d['file']}:{d['line']}` "
+            print(f"- **{d['kind']}:{d['name']}**, mod `{d['file']}:{d['line']}` "
                   f"vs vanilla `{n[0]}`{order}")
         print()
 
@@ -1308,17 +1457,17 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         print(f"## Shadowed Definitions Removed from Vanilla ({len(van_removed)})")
         print()
         for d, o in van_removed:
-            print(f"- **{d['kind']}:{d['name']}** — mod `{d['file']}:{d['line']}` "
+            print(f"- **{d['kind']}:{d['name']}**, mod `{d['file']}:{d['line']}` "
                   f"(was in `{o[0]}`); the mod copy is now the only definition")
         print()
 
-    if args.all and (unchanged or same_path_unchanged):
+    if args.include_unchanged and (unchanged or same_path_unchanged):
         print(f"## Unchanged ({len(unchanged) + len(same_path_unchanged)})")
         print()
         for d, n in unchanged:
-            print(f"- {d['kind']}:{d['name']} — shadows `{n[0]}`")
+            print(f"- {d['kind']}:{d['name']}, shadows `{n[0]}`")
         for rel in same_path_unchanged:
-            print(f"- file:{rel} — replaces same-path vanilla file (unchanged)")
+            print(f"- file:{rel}, replaces same-path vanilla file (unchanged)")
         print()
 
     if not stale_changed and not replaced and not new_coll:
@@ -1371,7 +1520,7 @@ def print_section(title, items, show_diff, is_replace, mod_root=None):
         else:
             n_add, n_rem, key = diff_summary(old_text, new_text)
             if old_text is None:
-                print("  *(new block — did not exist pre-patch)*")
+                print("  *(new block, did not exist pre-patch)*")
             elif new_text is None:
                 print("  *(removed from vanilla)*")
             else:
@@ -1425,7 +1574,7 @@ def print_section(title, items, show_diff, is_replace, mod_root=None):
                           f"INJECT also sets: {shown}{more}")
                 else:
                     print("  **Inject overlap:** changed lines do not set keys "
-                          "this INJECT sets — context may still matter, review "
+                          "this INJECT sets; context may still matter, review "
                           "the change")
         print()
 
@@ -1545,97 +1694,288 @@ def do_snapshot(repo: Path, tag: str, patch_name: str,
     print(f"Tracked versions (newest first): {recent}")
 
 
-def main():
-    ap = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    ap.add_argument("--all", action="store_true",
-                    help="Include unchanged blocks in output")
-    ap.add_argument("--diff", action="store_true",
-                    help="Show full unified diffs for changed blocks")
-    ap.add_argument("--deps", action="store_true",
-                    help="Dependency audit: flag referenced tokens vanilla dropped")
-    ap.add_argument("--gui", action="store_true",
-                    help="GUI audit: implicit template/type shadowing and "
-                         "same-path .gui file replacements")
-    ap.add_argument("--full", action="store_true",
-                    help="Widen window: audit from the oldest tracked commit to new")
-    ap.add_argument("--since-fork", action="store_true",
-                    help="GUI audit: measure each override's drift from the "
-                         "nearest tracked vanilla version (its fork point) "
-                         "rather than a fixed old commit — suppresses phantom "
-                         "findings for vanilla history the mod already carries")
-    ap.add_argument("--block",
-                    help="Audit a single block name only")
-    ap.add_argument("--category",
-                    help="Filter to a specific category directory")
-    ap.add_argument("--old",
-                    help="Old vanilla commit hash (default: second-most-recent)")
-    ap.add_argument("--new",
-                    help="New vanilla commit hash (default: most-recent)")
-    ap.add_argument("--list-commits", action="store_true",
-                    help="List available vanilla-tracker commits and exit")
-    ap.add_argument("--mod-root",
-                    help="Mod root directory (default: auto-detect via .metadata/)")
-    ap.add_argument("--vanilla-repo",
-                    help="Path to vanilla-tracker bare git repo")
-    ap.add_argument("--snapshot", metavar="TAG",
-                    help="Snapshot the current vanilla install into the "
-                         "tracker as version TAG (creates the tracker repo "
-                         "on first use), then exit")
-    ap.add_argument("--patch-name", default="Pavia",
-                    help="Patch name used in the snapshot commit message "
-                         "(default: Pavia)")
-    ap.add_argument("--game-root", metavar="DIR",
-                    help="Game 'game' directory to snapshot from (default: "
-                         "$PDX_GAME_ROOT or the Steam install). Point at an "
-                         "extracted old-version copy to back-populate history")
-    args = ap.parse_args()
+def _stamp_add(path, tag):
+    """Insert a fork-point comment as the first line, preserving a leading BOM."""
+    raw = path.read_bytes()
+    bom = b""
+    if raw.startswith(b"\xef\xbb\xbf"):
+        bom, raw = raw[:3], raw[3:]
+    line = f"# pdx-audit fork-point: {tag}\n".encode("utf-8")
+    path.write_bytes(bom + line + raw)
 
-    if args.snapshot:
-        repo = resolve_tracker_path(args.mod_root, args.vanilla_repo)
-        do_snapshot(repo, args.snapshot, args.patch_name, args.game_root)
-        sys.exit(0)
 
-    mod_root = find_mod_root(args.mod_root)
-    vanilla_repo = find_vanilla_repo(mod_root, args.vanilla_repo)
+def _stamp_update(path, tag):
+    """Rewrite the existing fork-point comment in place, preserving a leading
+    BOM and everything else about the file."""
+    raw = path.read_bytes()
+    bom = b""
+    if raw.startswith(b"\xef\xbb\xbf"):
+        bom, raw = raw[:3], raw[3:]
+    text = raw.decode("utf-8")
+    new_text, n = FORK_PIN_RE.subn(f"# pdx-audit fork-point: {tag}", text, count=1)
+    if n:
+        path.write_bytes(bom + new_text.encode("utf-8"))
 
-    commits = get_commits(vanilla_repo)
-    if not commits:
-        print("No commits in vanilla-tracker.", file=sys.stderr)
-        sys.exit(1)
 
-    warn_if_tracker_stale(vanilla_repo, commits[0][0])
+def run_stamp_fork_points(mod_root, vanilla_repo, commits, refresh=False):
+    """Detect each same-path replacement file's fork point and offer to write a
+    '# pdx-audit fork-point: <version>' comment at the top of it. Shows the full
+    plan and requires interactive confirmation before touching any file, because
+    it modifies the mod's own source .gui files. With refresh=True it also
+    rewrites pins whose version no longer matches the file's contents."""
+    files = mod_gui_files(mod_root)
+    if not files:
+        print("No mod .gui files found.", file=sys.stderr)
+        return
+    modules = sorted({rel.split("/", 1)[0] for rel, _ in files})
+    mod_file_texts = {rel: text for rel, text in files}
+    print("Detecting fork points...", file=sys.stderr)
+    _def_base, file_base, _pin_err, pin_stale = build_fork_baselines(
+        vanilla_repo, commits, modules, [], mod_file_texts)
 
-    if args.list_commits:
-        print("Available vanilla-tracker commits:")
-        for h, msg in commits:
-            print(f"  {h}  {msg}")
-        sys.exit(0)
+    adds, updates, stale_left, kept = [], [], [], []
+    for rel in sorted(file_base):
+        _t, _h, fmsg, pinned = file_base[rel]
+        tag = fmsg.split()[0] if fmsg else None
+        if pinned:
+            if rel in pin_stale:
+                old_tag, new_tag = pin_stale[rel]
+                (updates if refresh else stale_left).append((rel, old_tag, new_tag))
+            else:
+                kept.append(rel)
+        elif tag:
+            adds.append((rel, tag))
 
-    if len(commits) < 2:
-        print("Need at least 2 commits in vanilla-tracker.", file=sys.stderr)
-        sys.exit(1)
-
-    new_hash, new_msg = commits[0]
-    old_hash, old_msg = commits[1]
-    if args.full:
-        old_hash, old_msg = commits[-1]
-    if args.old:
-        old_msg = resolve_ref(vanilla_repo, args.old, commits, "old")
-        old_hash = args.old
-    if args.new:
-        new_msg = resolve_ref(vanilla_repo, args.new, commits, "new")
-        new_hash = args.new
-
-    if args.deps:
-        run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg)
-    if args.gui:
-        run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args)
-    if args.deps or args.gui:
+    if kept:
+        print(f"Already pinned and current (left untouched): {len(kept)}")
+    if stale_left:
+        print(f"Pins that look stale ({len(stale_left)}): re-run with --refresh "
+              f"to update:")
+        for rel, old_tag, new_tag in stale_left:
+            print(f"  - {rel}: pinned {old_tag}, looks like {new_tag}")
+    if not adds and not updates:
+        print("No fork-point comments to write. Nothing to do.")
         return
 
+    print()
+    print("⚠  This will MODIFY the following files in your mod:")
+    print()
+    for rel, tag in adds:
+        print(f"  {rel}")
+        print(f"      add:    # pdx-audit fork-point: {tag}")
+    for rel, old_tag, new_tag in updates:
+        print(f"  {rel}")
+        print(f"      change: {old_tag} -> # pdx-audit fork-point: {new_tag}")
+    print()
+    print(f"{len(adds) + len(updates)} file(s) will be changed "
+          f"({len(adds)} added, {len(updates)} updated). This writes to your mod's "
+          f"source .gui files.")
+
+    if not sys.stdin.isatty():
+        print("Refusing to modify files without an interactive confirmation. "
+              "Run this in a terminal.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        answer = input("Proceed? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer not in ("y", "yes"):
+        print("Aborted. No files were modified.")
+        return
+
+    written = 0
+    for rel, tag in adds:
+        try:
+            _stamp_add(mod_root / rel, tag)
+            written += 1
+        except OSError as e:
+            print(f"  skip {rel}: {e}", file=sys.stderr)
+    for rel, _old_tag, new_tag in updates:
+        try:
+            _stamp_update(mod_root / rel, new_tag)
+            written += 1
+        except OSError as e:
+            print(f"  skip {rel}: {e}", file=sys.stderr)
+    print(f"Done. Modified {written} file(s).")
+
+
+# ── localization audit ───────────────────────────────────────────────────
+# Loc overrides are key-based: a mod redefines a vanilla key (in any of its
+# .yml files) and load order decides the winner. Keys are not globally unique;
+# the same key exists per language (l_english, l_french, ...) with different
+# values, so the audit unit is (language, key), matched by name across files,
+# never by filename.
+
+LOC_LANG_RE = re.compile(r"^﻿?\s*l_([a-z_]+):\s*(?:#.*)?$")
+LOC_KEY_RE = re.compile(r'^\s+([A-Za-z0-9_.\-]+):\s*\d*\s*"(.*)"')
+
+
+def parse_loc(text):
+    """(language, key) -> value for one Paradox .yml. Language comes from the
+    'l_<lang>:' header; entries are 'KEY:[num] "value"'. Tolerant of blank and
+    comment lines; the value is captured to the last quote on the line."""
+    lang = None
+    out = {}
+    for line in text.splitlines():
+        lm = LOC_LANG_RE.match(line)
+        if lm:
+            lang = lm.group(1)
+            continue
+        km = LOC_KEY_RE.match(line)
+        if km and lang:
+            out[(lang, km.group(1))] = km.group(2)
+    return out
+
+
+def mod_loc_files(mod_root):
+    """[(rel_path, text), ...] for the mod's .yml files under a localization/ dir."""
+    out = []
+    for fp in sorted(mod_root.rglob("*.yml")):
+        rel = fp.relative_to(mod_root)
+        if not rel.parts or rel.parts[0] not in MODULE_ROOTS \
+                or "localization" not in rel.parts:
+            continue
+        try:
+            out.append((str(rel), fp.read_text(encoding="utf-8-sig")))
+        except Exception:
+            continue
+    return out
+
+
+def build_loc_vanilla(vanilla_repo, commit, wanted, label=""):
+    """(language, key) -> value at `commit`, restricted to the `wanted` keys the
+    mod defines. Scans all vanilla .yml but records only wanted keys, so the
+    result stays small. Files whose language the mod does not use are skipped."""
+    langs = {lang for lang, _ in wanted}
+    if label:
+        print(f"  {label}: reading vanilla localization...",
+              end="", file=sys.stderr, flush=True)
+    raw = _git_archive(vanilla_repo, commit, ["*.yml"], timeout=180)
+    result = {}
+    if not raw:
+        if label:
+            print(" failed!", file=sys.stderr)
+        return result
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), ignore_zeros=True) as tf:
+            for m in tf.getmembers():
+                if not m.isfile() or not m.name.endswith(".yml"):
+                    continue
+                if langs and not any(f"_l_{lang}." in m.name or f"/{lang}/" in m.name
+                                     for lang in langs):
+                    continue
+                f = tf.extractfile(m)
+                if f is None:
+                    continue
+                content = f.read().decode("utf-8-sig", errors="replace")
+                for k, v in parse_loc(content).items():
+                    if k in wanted and k not in result:
+                        result[k] = v
+    except tarfile.TarError:
+        if label:
+            print(" tar error!", file=sys.stderr)
+        return result
+    if label:
+        print(f" {len(result)}/{len(wanted)} matched.", file=sys.stderr)
+    return result
+
+
+def run_loc_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args):
+    """Key-based localization audit: for each loc key the mod redefines, report
+    whether vanilla changed that key's value or removed it between snapshots."""
+    files = mod_loc_files(mod_root)
+    if not files:
+        print("No mod .yml localization files found.", file=sys.stderr)
+        return
+    mod_keys = {}
+    for rel, text in files:
+        for k, v in parse_loc(text).items():
+            mod_keys.setdefault(k, (v, rel))
+    if args.block:
+        mod_keys = {k: v for k, v in mod_keys.items() if k[1] == args.block}
+    if not mod_keys:
+        print("No localization keys defined by the mod.", file=sys.stderr)
+        return
+    wanted = set(mod_keys)
+    print(f"Scanning {len(wanted)} localization keys the mod defines...",
+          file=sys.stderr)
+    old_v = build_loc_vanilla(vanilla_repo, old_hash, wanted, f"old ({old_hash[:7]})")
+    new_v = build_loc_vanilla(vanilla_repo, new_hash, wanted, f"new ({new_hash[:7]})")
+
+    changed, removed, new_coll, unchanged, mod_only = [], [], [], [], 0
+    for k in sorted(wanted):
+        ov, nv = old_v.get(k), new_v.get(k)
+        modval, modfile = mod_keys[k]
+        if ov is None and nv is None:
+            mod_only += 1
+        elif ov is not None and nv is None:
+            removed.append((k, modfile))
+        elif ov is None and nv is not None:
+            new_coll.append((k, nv, modfile))
+        elif ov != nv:
+            changed.append((k, ov, nv, modval, modfile))
+        else:
+            unchanged.append(k)
+
+    print(f"# Localization Audit: {old_hash[:7]} → {new_hash[:7]}")
+    if old_msg or new_msg:
+        print(f"*{old_msg} → {new_msg}*")
+    print()
+    print(f"**{len(wanted)}** localization keys the mod overrides")
+    print(f"- **{len(changed)}** vanilla changed the string: your override may be "
+          f"masking a reworded value")
+    print(f"- **{len(removed)}** vanilla removed the key: override orphaned")
+    print(f"- **{len(new_coll)}** vanilla newly added a key the mod also defines")
+    print(f"- **{len(unchanged)}** unchanged, **{mod_only}** mod-only (not overrides)")
+    print()
+
+    if changed:
+        print(f"## Changed Vanilla Strings ({len(changed)})")
+        print()
+        print("Vanilla changed these values; your override still shows its own "
+              "text, so any rewording or correction vanilla made is suppressed.")
+        print()
+        for (lang, key), ov, nv, modval, modfile in changed:
+            print(f"### {key} ({lang})")
+            print(f"- **Mod:** `{modfile}` = \"{modval}\"")
+            print(f"- **Vanilla old:** \"{ov}\"")
+            print(f"- **Vanilla new:** \"{nv}\"")
+            print()
+
+    if removed:
+        print(f"## Keys Removed from Vanilla ({len(removed)})")
+        print()
+        for (lang, key), modfile in removed:
+            print(f"- **{key}** ({lang}), `{modfile}`; the mod key no longer "
+                  f"overrides anything")
+        print()
+
+    if new_coll:
+        print(f"## New Name Collisions ({len(new_coll)})")
+        print()
+        print("Vanilla added a key the mod already defines; the mod's value wins "
+              "or loses by load order (verify).")
+        print()
+        for (lang, key), nv, modfile in new_coll:
+            print(f"- **{key}** ({lang}), mod `{modfile}` vs new vanilla \"{nv}\"")
+        print()
+
+    if args.include_unchanged and unchanged:
+        print(f"## Unchanged ({len(unchanged)})")
+        print()
+        for lang, key in unchanged:
+            print(f"- {key} ({lang})")
+        print()
+
+    if not changed and not removed and not new_coll:
+        print("**All overridden localization keys are current with vanilla.**")
+    else:
+        print("---")
+        print(f"**Action needed:** {len(changed)} changed strings, "
+              f"{len(removed)} orphaned keys, {len(new_coll)} new collisions.")
+
+
+def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args):
     print(f"Scanning overrides in {mod_root.name}...", file=sys.stderr)
     overrides = find_overrides(mod_root)
 
@@ -1645,7 +1985,7 @@ def main():
         overrides = [o for o in overrides if args.category in o["category"]]
     if not overrides:
         print("No matching overrides found.", file=sys.stderr)
-        sys.exit(0)
+        return
 
     print(f"Found {len(overrides)} override directives.", file=sys.stderr)
 
@@ -1711,8 +2051,8 @@ def main():
     n_replace = sum(1 for t, _ in seen if t in ("REPLACE", "TRY_REPLACE"))
     n_inject = len(seen) - n_replace
     print(f"**{len(seen)}** unique overrides scanned ({n_replace} REPLACE-type, {n_inject} INJECT-type)")
-    print(f"- **{n_changed}** vanilla blocks changed — action needed")
-    print(f"- **{len(removed)}** vanilla blocks removed — override orphaned")
+    print(f"- **{n_changed}** vanilla blocks changed: action needed")
+    print(f"- **{len(removed)}** vanilla blocks removed: override orphaned")
     print(f"- **{len(not_found)}** not found in vanilla (mod-only or nested)")
     print(f"- **{len(unchanged)}** unchanged")
     if changed_replace:
@@ -1724,18 +2064,18 @@ def main():
         print("## Removed from Vanilla (orphaned overrides)")
         print()
         for ov, old_e, _ in removed:
-            print(f"- **{ov['type']}:{ov['block']}** — "
+            print(f"- **{ov['type']}:{ov['block']}**, "
                   f"`{ov['file']}:{ov['line']}` "
                   f"(was in `{old_e[0]}`)")
         print()
 
     print_section(
-        "Changed REPLACE Blocks — mod is suppressing new vanilla content",
+        "Changed REPLACE Blocks: mod is suppressing new vanilla content",
         changed_replace, args.diff, is_replace=True, mod_root=mod_root,
     )
 
     print_section(
-        "Changed INJECT Targets — injection context changed",
+        "Changed INJECT Targets: injection context changed",
         changed_inject, args.diff, is_replace=False, mod_root=mod_root,
     )
 
@@ -1751,7 +2091,7 @@ def main():
                   "(may be mod-only blocks, nested overrides, or category mismatches).")
             print()
             for ov in hard_misses:
-                print(f"- {ov['type']}:{ov['block']} — `{ov['file']}:{ov['line']}`")
+                print(f"- {ov['type']}:{ov['block']}, `{ov['file']}:{ov['line']}`")
             print()
 
         if try_injects:
@@ -1761,11 +2101,11 @@ def main():
                 print(f"- {ov['type']}:{ov['block']} at `{ov['file']}:{ov['line']}`")
             print()
 
-    if args.all and unchanged:
+    if args.include_unchanged and unchanged:
         print(f"## Unchanged ({len(unchanged)})")
         print()
         for ov, _, new_e in unchanged:
-            print(f"- {ov['type']}:{ov['block']} — `{new_e[0]}`")
+            print(f"- {ov['type']}:{ov['block']}, `{new_e[0]}`")
         print()
 
     if n_changed == 0 and not removed:
@@ -1778,6 +2118,129 @@ def main():
               f"{len(removed)} orphaned.")
         if not args.diff and n_changed > 0:
             print("Run with `--diff` for full unified diffs.")
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("--all", dest="run_all", action="store_true",
+                    help="Run every audit (override, deps, GUI, loc) in one pass")
+    ap.add_argument("--include-unchanged", action="store_true",
+                    help="Include unchanged blocks/keys in output")
+    ap.add_argument("--diff", action="store_true",
+                    help="Show full unified diffs for changed blocks")
+    ap.add_argument("--deps", action="store_true",
+                    help="Dependency audit: flag referenced tokens vanilla dropped")
+    ap.add_argument("--gui", action="store_true",
+                    help="GUI audit: implicit template/type shadowing and "
+                         "same-path .gui file replacements")
+    ap.add_argument("--loc", action="store_true",
+                    help="Localization audit: flag loc keys the mod overrides "
+                         "whose vanilla value changed or was removed")
+    ap.add_argument("--full", action="store_true",
+                    help="Fixed window from the oldest tracked commit to new "
+                         "(GUI audit: opts out of the default fork-relative "
+                         "baseline)")
+    ap.add_argument("--since-fork", action="store_true",
+                    help="No-op: the GUI audit is fork-relative by default now. "
+                         "Kept so existing commands keep working")
+    ap.add_argument("--stamp-fork-points", action="store_true",
+                    help="Detect each mod .gui file's fork point and write a "
+                         "'# pdx-audit fork-point:' comment at the top of the "
+                         "file. Shows the plan and asks for confirmation before "
+                         "modifying any files")
+    ap.add_argument("--refresh", action="store_true",
+                    help="With --stamp-fork-points, also rewrite existing pins "
+                         "whose version no longer matches the file's contents")
+    ap.add_argument("--block",
+                    help="Audit a single block name only")
+    ap.add_argument("--category",
+                    help="Filter to a specific category directory")
+    ap.add_argument("--old",
+                    help="Old vanilla commit hash (default: second-most-recent)")
+    ap.add_argument("--new",
+                    help="New vanilla commit hash (default: most-recent)")
+    ap.add_argument("--list-commits", action="store_true",
+                    help="List available vanilla-tracker commits and exit")
+    ap.add_argument("--mod-root",
+                    help="Mod root directory (default: auto-detect via .metadata/)")
+    ap.add_argument("--vanilla-repo",
+                    help="Path to vanilla-tracker bare git repo")
+    ap.add_argument("--snapshot", metavar="TAG",
+                    help="Snapshot the current vanilla install into the "
+                         "tracker as version TAG (creates the tracker repo "
+                         "on first use), then exit")
+    ap.add_argument("--patch-name", default="Pavia",
+                    help="Patch name used in the snapshot commit message "
+                         "(default: Pavia)")
+    ap.add_argument("--game-root", metavar="DIR",
+                    help="Game 'game' directory to snapshot from (default: "
+                         "$PDX_GAME_ROOT or the Steam install). Point at an "
+                         "extracted old-version copy to back-populate history")
+    args = ap.parse_args()
+
+    if args.snapshot:
+        repo = resolve_tracker_path(args.mod_root, args.vanilla_repo)
+        do_snapshot(repo, args.snapshot, args.patch_name, args.game_root)
+        sys.exit(0)
+
+    mod_root = find_mod_root(args.mod_root)
+    vanilla_repo = find_vanilla_repo(mod_root, args.vanilla_repo)
+
+    commits = get_commits(vanilla_repo)
+    if not commits:
+        print("No commits in vanilla-tracker.", file=sys.stderr)
+        sys.exit(1)
+
+    warn_if_tracker_stale(vanilla_repo, commits[0][0])
+
+    if args.list_commits:
+        print("Available vanilla-tracker commits:")
+        for h, msg in commits:
+            print(f"  {h}  {msg}")
+        sys.exit(0)
+
+    if args.stamp_fork_points:
+        run_stamp_fork_points(mod_root, vanilla_repo, commits, refresh=args.refresh)
+        sys.exit(0)
+
+    if len(commits) < 2:
+        print("Need at least 2 commits in vanilla-tracker.", file=sys.stderr)
+        sys.exit(1)
+
+    new_hash, new_msg = commits[0]
+    old_hash, old_msg = commits[1]
+    if args.full:
+        old_hash, old_msg = commits[-1]
+    if args.old:
+        old_msg = resolve_ref(vanilla_repo, args.old, commits, "old")
+        old_hash = args.old
+    if args.new:
+        new_msg = resolve_ref(vanilla_repo, args.new, commits, "new")
+        new_hash = args.new
+
+    if args.run_all:
+        run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args)
+        print("\n")
+        run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg)
+        print("\n")
+        run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args)
+        print("\n")
+        run_loc_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args)
+        return
+
+    if args.deps:
+        run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg)
+    if args.gui:
+        run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args)
+    if args.loc:
+        run_loc_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args)
+    if args.deps or args.gui or args.loc:
+        return
+
+    run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args)
 
 
 if __name__ == "__main__":

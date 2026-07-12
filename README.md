@@ -1,12 +1,15 @@
 # pdx-audit
 
-Audits a Paradox mod against vanilla patch changes. When the game updates, mod overrides silently drift: a REPLACE block keeps overwriting a vanilla block that gained new lines, an INJECT targets a block that moved or vanished, and modifiers or triggers the mod references get renamed or removed. pdx-audit diffs the mod's override surface against two snapshots of vanilla and reports exactly what changed underneath it.
+pdx-audit tracks the changes vanilla makes to script, GUI, and localization blocks that your mod also overrides. When the game patches, your overrides can fall out of sync without any error: a REPLACE block keeps overwriting a vanilla block that gained new lines, an INJECT points at a block that moved, or a modifier the mod references gets renamed. pdx-audit finds those cases, sorts them by severity, and can print targeted diffs so you see exactly what changed.
 
-It runs three audits:
+It works by diffing your overrides against a local repository of vanilla snapshots. The tools to build and maintain that repository are included, so you only set it up once and add a snapshot each patch.
 
-- **Override audit** (default): finds every `INJECT:`/`REPLACE:`/`TRY_INJECT:`/`TRY_REPLACE:` directive in the mod, locates the target block in vanilla at the old and new snapshots, and reports what vanilla changed. Changed REPLACE and TRY_REPLACE blocks are classified as reconciled or STALE depending on whether the mod's replacement already contains vanilla's new lines. STALE findings are the highest priority output. A TRY_* directive whose target does not exist in vanilla is reported as expected and non-fatal rather than as a miss.
-- **Dependency audit** (`--deps`): flags `token =` identifiers the mod assigns that vanilla used at the old snapshot but dropped by the new one, meaning the token was likely renamed or removed. Suggests rename candidates.
-- **GUI audit** (`--gui`): finds mod GUI template/type definitions that implicitly shadow same-name vanilla definitions, plus same-path `.gui` file replacements, and reports which shadowed vanilla definitions changed.
+It runs four audits (or all of them at once with `--all`):
+
+- **Override audit** (default): finds every `INJECT:`/`REPLACE:`/`TRY_INJECT:`/`TRY_REPLACE:` directive in the mod, finds the matching vanilla block in the old and new snapshot, and reports what vanilla changed. REPLACE and TRY_REPLACE blocks are marked reconciled or STALE depending on whether your replacement already contains vanilla's new lines; STALE is the highest-priority result. A `TRY_*` directive whose target is absent from both snapshots is listed as expected rather than an error, since `TRY_` is meant for targets that may not be present (from another mod, or a conditional vanilla block). A target vanilla actually removed between the two snapshots is still flagged as an orphaned override, `TRY_` or not.
+- **Dependency audit** (`--deps`): flags tokens the mod assigns (`token = ...`) that vanilla used in the old snapshot but dropped in the new one, so they were probably renamed or removed. Suggests likely renames.
+- **GUI audit** (`--gui`): finds mod GUI templates or types that override a vanilla definition of the same name, plus same-path `.gui` file replacements, and reports which of those vanilla definitions changed.
+- **Localization audit** (`--loc`): finds loc keys the mod redefines whose vanilla value changed or was removed between snapshots. Matching is by `(language, key)`, not by filename, because loc keys are not unique across languages and vanilla moves them between files.
 
 ## Install
 
@@ -54,27 +57,36 @@ Back-populating is optional. Two snapshots (the patch you last verified your mod
 Run from anywhere inside a mod (root found via `.metadata/`):
 
 ```bash
-pdx-audit                     # override audit, newest two snapshots (the one-patch-back check; no hashes needed)
-pdx-audit --deps              # dependency audit
-pdx-audit --gui               # GUI shadowing audit
-pdx-audit --gui --since-fork  # GUI audit vs each override's fork point (recommended for wide audits)
-pdx-audit --full              # widen window to the oldest snapshot
-pdx-audit --diff              # include unified diffs for changed blocks
-pdx-audit --all               # include unchanged blocks in output
-pdx-audit --block farming_village    # audit a single block
-pdx-audit --category building_types  # filter to one category directory
-pdx-audit --old 1.3.8 --new 1.3.10   # explicit window; --old/--new take a version tag OR a commit hash
-pdx-audit --list-commits      # list tracked snapshots (pass a shown tag or hash to --old/--new)
-pdx-audit --snapshot 1.3.12   # record a new vanilla snapshot, then exit
+pdx-audit                     # the usual check: what did the last patch change under your overrides?
+pdx-audit --deps              # find modifiers/triggers the mod uses that vanilla renamed or removed
+pdx-audit --gui               # find vanilla GUI blocks that changed under your GUI overrides
+pdx-audit --loc               # find vanilla loc strings that changed under keys the mod overrides
+pdx-audit --all               # run every audit (override, deps, GUI, loc) in one pass
+pdx-audit --gui --stamp-fork-points  # write a fork-point comment atop each replaced GUI file (asks first)
+pdx-audit --full              # check against the oldest snapshot instead of just the last patch
+pdx-audit --diff              # show the actual line changes for each flagged block
+pdx-audit --include-unchanged # also list blocks/keys vanilla left unchanged
+pdx-audit --block farming_village    # audit just one block by name
+pdx-audit --category building_types  # audit just one category directory
+pdx-audit --old 1.3.8 --new 1.3.10   # pick the two versions to compare (tag or commit hash)
+pdx-audit --list-commits      # list the snapshots you can pass to --old/--new
+pdx-audit --snapshot 1.3.12   # record the current install as a new snapshot, then exit
 ```
 
 After a game patch, run the snapshot first, then all three audits. Bare `pdx-audit` compares the newest two snapshots: that is the one-patch-back check, and it needs no arguments or hashes. Use `--full` to reach the oldest snapshot, or `--old`/`--new` for any other window; both accept version tags (e.g. `--old 1.3.8 --new 1.3.10`) or commit hashes, listed by `--list-commits`.
 
-`--full` diffs every override against the *oldest* snapshot, so it reports the entire history of vanilla evolution — including changes the mod already incorporated (phantom findings) whenever an override was forked from a recent patch. `--gui --since-fork` fixes this: it detects each override's fork point (the tracked vanilla version its copy is closest to) and measures drift from there forward, so only genuinely-missed vanilla changes surface. Each finding is labelled with its fork point; a very old fork point (e.g. `pre-patch`) flags a heavily-diverged copy to verify by hand. Prefer `--since-fork` over `--full` for a wide GUI audit; the plain one-patch-back check does not need it.
+### How the GUI audit picks its baseline
 
-## Notes
+When you copy a whole GUI file to override it, you copy it from *some* game version, then edit it. The audit needs to know which version, so it can ask the right question: "has the game changed this file since the version I started from?" Anything the game changed *before* that point is already baked into your copy and is not worth reporting.
 
-- Findings are suspects, not confirmed breakage. Verify renames against the game's own documentation before porting.
-- On every run a sample of live game files is hashed and compared against the newest snapshot; a warning is printed when the game has patched but the tracker has no snapshot for it.
-- Results are cached under `<vanilla-tracker>/cache/`, keyed by commit hash, so cache entries never go stale.
-- The tracker contains the game's own script files. Share it privately (it is just a directory), but do not publish it to a public repo; that would be redistributing Paradox's copyrighted files.
+By default the GUI audit works this out per file: it compares your copy against every tracked snapshot and takes the closest one as your starting point (your "fork point"), then reports only what the game changed after it. The report lists the fork point it picked for each file, so the guess is never hidden. If it guesses wrong, pin the file: put a comment at the very top,
+
+```
+# pdx-audit fork-point: 1.3.8
+```
+
+and the audit uses that version instead. `--stamp-fork-points` writes those comments for you, showing the full list and asking before it touches any file.
+
+If a pinned file later drifts (you updated it to a newer patch but left the comment behind), the audit prints a one-line warning that the pin looks stale. `--stamp-fork-points --refresh` rewrites those stale pins, again showing each change and asking first.
+
+`--full` turns this off and compares every file against the *oldest* snapshot instead. That re-reports the game's entire history, including all the old changes your copy already contains, so it flags far more than you need to act on. It is occasionally useful for a from-scratch review, but the default per-file baseline is the one you want for a normal patch check.
