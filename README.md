@@ -13,11 +13,13 @@ It runs four audits (or all of them at once with `--all`):
 
 ## Install
 
-Self-contained Python script, no dependencies beyond git. Symlink it onto your PATH:
+Pure Python, no dependencies beyond git. Symlink the `pdx-audit` entry script onto your PATH; it resolves its own location and finds the `pdxaudit/` package next to it, so the symlink is all you need:
 
 ```bash
 ln -s "$(pwd)/pdx-audit" ~/.local/bin/pdx-audit
 ```
+
+Layout: `pdx-audit` is a thin entry point; the code lives in the `pdxaudit/` package (`tracker`, `overrides`, `gui`, `loc`, `report`, `cli`), with tests under `tests/` (run `python -m pytest`).
 
 ## Setting up the vanilla tracker
 
