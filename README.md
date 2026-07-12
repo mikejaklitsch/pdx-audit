@@ -59,11 +59,12 @@ Back-populating is optional. Two snapshots (the patch you last verified your mod
 Run from anywhere inside a mod (root found via `.metadata/`):
 
 ```bash
-pdx-audit                     # the usual check: what did the last patch change under your overrides?
+pdx-audit                     # run all four audits (override, deps, GUI, loc)
+pdx-audit --overrides         # just the override check: what changed under your INJECT/REPLACE blocks
 pdx-audit --deps              # find modifiers/triggers the mod uses that vanilla renamed or removed
 pdx-audit --gui               # find vanilla GUI blocks that changed under your GUI overrides
 pdx-audit --loc               # find vanilla loc strings that changed under keys the mod overrides
-pdx-audit --all               # run every audit (override, deps, GUI, loc) in one pass
+pdx-audit --deps --gui        # name any combination to run just those
 pdx-audit --gui --stamp-fork-points  # write a fork-point comment atop each replaced GUI file (asks first)
 pdx-audit --full              # check against the oldest snapshot instead of just the last patch
 pdx-audit --diff              # show the actual line changes for each flagged block
@@ -75,7 +76,7 @@ pdx-audit --list-commits      # list the snapshots you can pass to --old/--new
 pdx-audit --snapshot 1.3.12   # record the current install as a new snapshot, then exit
 ```
 
-After a game patch, run the snapshot first, then all three audits. Bare `pdx-audit` compares the newest two snapshots: that is the one-patch-back check, and it needs no arguments or hashes. Use `--full` to reach the oldest snapshot, or `--old`/`--new` for any other window; both accept version tags (e.g. `--old 1.3.8 --new 1.3.10`) or commit hashes, listed by `--list-commits`.
+After a game patch, run the snapshot first, then the audits. Bare `pdx-audit` runs all four against the newest two snapshots: that is the one-patch-back check, and it needs no arguments or hashes. (It is the slowest way to invoke the tool because it includes the localization scan; name `--overrides`, `--deps`, `--gui`, or `--loc` to run just what you need.) Use `--full` to reach the oldest snapshot, or `--old`/`--new` for any other window; both accept version tags (e.g. `--old 1.3.8 --new 1.3.10`) or commit hashes, listed by `--list-commits`.
 
 ### How the GUI audit picks its baseline
 

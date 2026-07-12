@@ -43,14 +43,15 @@ On every run a sample of live game files ($PDX_GAME_ROOT or the default
 install) is hashed against the newest tracked commit; a mismatch means the
 game patched but the tracker was not updated, and a warning is printed.
 
-Usage:
-    pdx-audit                              # changed override blocks only
-    pdx-audit --all                        # run every audit in one pass
-    pdx-audit --include-unchanged          # also list unchanged blocks/keys
-    pdx-audit --diff                       # show unified diffs
+Usage (no audit flag runs all four; name one or more to run just those):
+    pdx-audit                              # all audits (override, deps, GUI, loc)
+    pdx-audit --overrides                  # override blocks only (the quick check)
     pdx-audit --deps                       # dependency audit (dropped tokens)
     pdx-audit --gui                        # GUI override audit (implicit shadowing)
     pdx-audit --loc                        # localization audit (overridden keys)
+    pdx-audit --deps --gui                 # any combination runs just those
+    pdx-audit --include-unchanged          # also list unchanged blocks/keys
+    pdx-audit --diff                       # show unified diffs
     pdx-audit --full                       # widen window to oldest tracked commit
     pdx-audit --block farming_village
     pdx-audit --old abc1234 --new def5678
@@ -71,11 +72,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--all", dest="run_all", action="store_true",
-                    help="Run every audit (override, deps, GUI, loc) in one pass")
+                    help="Run every audit (the default when no audit is named)")
     ap.add_argument("--include-unchanged", action="store_true",
                     help="Include unchanged blocks/keys in output")
     ap.add_argument("--diff", action="store_true",
                     help="Show full unified diffs for changed blocks")
+    ap.add_argument("--overrides", action="store_true",
+                    help="Override audit only: INJECT/REPLACE blocks vs vanilla")
     ap.add_argument("--deps", action="store_true",
                     help="Dependency audit: flag referenced tokens vanilla dropped")
     ap.add_argument("--gui", action="store_true",
@@ -166,23 +169,24 @@ def main():
         new_msg = resolve_ref(vanilla_repo, args.new, commits, "new")
         new_hash = args.new
 
-    if args.run_all:
-        run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args)
-        print("\n")
-        run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg)
-        print("\n")
-        run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args)
-        print("\n")
-        run_loc_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args)
-        return
+    # No audit flag runs everything; naming one or more runs just those.
+    # --all is an explicit way to ask for the full set.
+    picked = [name for name, on in (
+        ("overrides", args.overrides), ("deps", args.deps),
+        ("gui", args.gui), ("loc", args.loc)) if on]
+    selected = picked if (picked and not args.run_all) else ["overrides", "deps", "gui", "loc"]
 
-    if args.deps:
-        run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg)
-    if args.gui:
-        run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args)
-    if args.loc:
-        run_loc_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args)
-    if args.deps or args.gui or args.loc:
-        return
-
-    run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args)
+    runners = {
+        "overrides": lambda: run_override_audit(
+            mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args),
+        "deps": lambda: run_deps_audit(
+            mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg),
+        "gui": lambda: run_gui_audit(
+            mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args),
+        "loc": lambda: run_loc_audit(
+            mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args),
+    }
+    for i, name in enumerate(selected):
+        if i:
+            print("\n")
+        runners[name]()
