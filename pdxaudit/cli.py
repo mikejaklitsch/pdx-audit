@@ -32,10 +32,11 @@ vanilla-tracker bare git repo:
   and vanilla moves them between files. A mod's own new keys are counted as
   mod-only, not overrides.
 
-Requires a vanilla-tracker bare git repo. Searches for it at:
+Requires a vanilla-tracker bare git repo, resolved by precedence:
   1. --vanilla-repo <path> argument
-  2. <mod-parent>/vanilla-tracker/repo.git
-  3. PDX_VANILLA_REPO environment variable
+  2. PDX_VANILLA_REPO environment variable
+  3. config file ("vanilla_repo"; see config.sample.json)
+  4. <mod-parent>/vanilla-tracker/repo.git (the convention)
 
 The --deps vanilla vocabulary is cached per tracker commit under
 <vanilla-tracker>/cache/, keyed by commit hash, so entries never go stale.

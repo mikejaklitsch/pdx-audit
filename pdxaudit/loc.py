@@ -6,6 +6,7 @@ import tarfile
 import io
 
 from .tracker import MODULE_ROOTS, _git_archive
+from .config import should_skip
 
 LOC_LANG_RE = re.compile(r"^\ufeff?\s*l_([a-z_]+):\s*(?:#.*)?$")
 
@@ -32,8 +33,8 @@ def mod_loc_files(mod_root):
     out = []
     for fp in sorted(mod_root.rglob("*.yml")):
         rel = fp.relative_to(mod_root)
-        if not rel.parts or rel.parts[0] not in MODULE_ROOTS \
-                or "localization" not in rel.parts:
+        if (not rel.parts or rel.parts[0] not in MODULE_ROOTS
+                or "localization" not in rel.parts or should_skip(rel)):
             continue
         try:
             out.append((str(rel), fp.read_text(encoding="utf-8-sig")))

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .report import diff_lines, diff_summary
 from .tracker import MODULE_ROOTS, _git_archive, get_commits, git
+from .config import should_skip
 
 def _norm_clean(line):
     """Whitespace / '='-spacing canonicalization for an already comment-free
@@ -166,7 +167,8 @@ def mod_gui_files(mod_root):
     out = []
     for fp in sorted(mod_root.rglob("*.gui")):
         rel = fp.relative_to(mod_root)
-        if len(rel.parts) < 3 or rel.parts[0] not in MODULE_ROOTS or rel.parts[1] != "gui":
+        if (len(rel.parts) < 3 or rel.parts[0] not in MODULE_ROOTS
+                or rel.parts[1] != "gui" or should_skip(rel)):
             continue
         try:
             out.append((str(rel), fp.read_text(encoding="utf-8-sig")))

@@ -19,7 +19,26 @@ Pure Python, no dependencies beyond git. Symlink the `pdx-audit` entry script on
 ln -s "$(pwd)/pdx-audit" ~/.local/bin/pdx-audit
 ```
 
-Layout: `pdx-audit` is a thin entry point; the code lives in the `pdxaudit/` package (`tracker`, `overrides`, `gui`, `loc`, `report`, `cli`), with tests under `tests/` (run `python -m pytest`).
+Layout: `pdx-audit` is a thin entry point; the code lives in the `pdxaudit/` package (`tracker`, `overrides`, `gui`, `loc`, `report`, `config`, `cli`), with tests under `tests/` (run `python -m pytest`).
+
+## Config file
+
+Machine-wide settings can live in a JSON config so you don't repeat flags. Copy `config.sample.json` to `config.json` and fill in your paths:
+
+```json
+{
+  "game_root": "/path/to/Steam/steamapps/common/Europa Universalis V/game",
+  "vanilla_repo": "/path/to/.dev-mods/vanilla-tracker/repo.git",
+  "skip_dirs": ["backup", "wip", "in_game/gui/experimental"],
+  "skip_files": ["*.bak", "*_disabled.txt"]
+}
+```
+
+- **`game_root`** / **`vanilla_repo`**: where the game install and the tracker live. Precedence is always CLI flag > environment variable (`$PDX_GAME_ROOT`, `$PDX_VANILLA_REPO`) > config file > built-in default.
+- **`skip_dirs`**: directories excluded from every scan. An entry matches a directory anywhere (`backup`) or a specific subtree (`in_game/gui/experimental`).
+- **`skip_files`**: filename globs excluded from every scan, matched against both the basename and the full path (`*.bak`, `in_game/common/tmp_*.txt`).
+
+The config file is looked up at `$PDX_AUDIT_CONFIG`, then `~/.config/pdx-audit.json`, then `config.json` next to the tool. `config.sample.json` is a template to copy from.
 
 ## Setting up the vanilla tracker
 

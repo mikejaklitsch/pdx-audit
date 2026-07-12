@@ -11,6 +11,7 @@ from collections import defaultdict
 
 from .report import diff_lines, diff_summary
 from .tracker import MODULE_ROOTS, _git_archive, git
+from .config import should_skip
 
 def parse_top_blocks(text):
     blocks = {}
@@ -46,7 +47,7 @@ def find_overrides(mod_root):
         if fp.suffix not in (".txt", ".gui"):
             continue
         rel = fp.relative_to(mod_root)
-        if rel.parts[0] not in MODULE_ROOTS:
+        if rel.parts[0] not in MODULE_ROOTS or should_skip(rel):
             continue
         try:
             text = fp.read_text(encoding="utf-8-sig")
@@ -326,7 +327,7 @@ def mod_referenced_tokens(mod_root):
     usage = defaultdict(list)
     for fp in sorted(mod_root.rglob("*.txt")):
         rel = fp.relative_to(mod_root)
-        if not rel.parts or rel.parts[0] not in MODULE_ROOTS:
+        if not rel.parts or rel.parts[0] not in MODULE_ROOTS or should_skip(rel):
             continue
         try:
             text = fp.read_text(encoding="utf-8-sig")

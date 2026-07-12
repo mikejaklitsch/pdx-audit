@@ -10,6 +10,8 @@ import hashlib
 import os
 from pathlib import Path
 
+from .config import cfg
+
 def find_mod_root(override: str | None = None) -> Path:
     if override:
         return Path(override).resolve()
@@ -33,20 +35,21 @@ def find_vanilla_repo(mod_root: Path, override: str | None = None) -> Path:
         print(f"Vanilla repo not found at {p}", file=sys.stderr)
         sys.exit(1)
 
+    # precedence: env > config > convention (<mod-parent>/vanilla-tracker)
+    for src in (os.environ.get("PDX_VANILLA_REPO"), cfg("vanilla_repo")):
+        if src:
+            p = Path(src).resolve()
+            if p.exists():
+                return p
+
     candidate = mod_root.parent / "vanilla-tracker" / "repo.git"
     if candidate.exists():
         return candidate
 
-    import os
-    env = os.environ.get("PDX_VANILLA_REPO")
-    if env:
-        p = Path(env).resolve()
-        if p.exists():
-            return p
-
     print("Error: vanilla-tracker repo not found. Searched:\n"
-          f"  {candidate}\n"
           "  $PDX_VANILLA_REPO\n"
+          "  config file (vanilla_repo)\n"
+          f"  {candidate}\n"
           "Use --vanilla-repo <path> to specify.", file=sys.stderr)
     sys.exit(1)
 
@@ -106,7 +109,8 @@ def warn_if_tracker_stale(vanilla_repo, newest_hash, sample_size=40):
     snapshot; every audit window is then missing the real newest version.
     English localization churns every patch, so the sample is reliable.
     Warn-only heuristic; silent when the game install is not found."""
-    game_root = Path(os.environ.get("PDX_GAME_ROOT", str(DEFAULT_GAME_ROOT)))
+    game_root = Path(os.environ.get("PDX_GAME_ROOT")
+                     or cfg("game_root") or str(DEFAULT_GAME_ROOT))
     if not game_root.is_dir():
         return
     checked = stale = 0
@@ -169,9 +173,9 @@ def resolve_tracker_path(mod_root_arg, vanilla_repo_arg) -> Path:
     find_vanilla_repo this does not require it to exist yet."""
     if vanilla_repo_arg:
         return Path(vanilla_repo_arg).resolve()
-    env = os.environ.get("PDX_VANILLA_REPO")
-    if env:
-        return Path(env).resolve()
+    for src in (os.environ.get("PDX_VANILLA_REPO"), cfg("vanilla_repo")):
+        if src:
+            return Path(src).resolve()
     mod_root = find_mod_root(mod_root_arg)
     return mod_root.parent / "vanilla-tracker" / "repo.git"
 
@@ -187,8 +191,8 @@ def do_snapshot(repo: Path, tag: str, patch_name: str,
     """Snapshot a vanilla install's .txt/.yml/.gui files into the tracker
     as one commit tagged with the game version. Creates the bare repo on
     first use, so a new machine needs no manual git setup."""
-    game_root = Path(game_root_arg or
-                     os.environ.get("PDX_GAME_ROOT", str(DEFAULT_GAME_ROOT)))
+    game_root = Path(game_root_arg or os.environ.get("PDX_GAME_ROOT")
+                     or cfg("game_root") or str(DEFAULT_GAME_ROOT))
     if not game_root.is_dir():
         print(f"Error: game directory not found: {game_root}\n"
               "Set $PDX_GAME_ROOT or pass --game-root pointing at the "

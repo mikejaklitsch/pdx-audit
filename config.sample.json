@@ -1,0 +1,7 @@
+{
+  "_note": "Copy this file to config.json and fill in the values you need. Every key is optional. Precedence for every setting: CLI flag > environment variable > this file > built-in default.",
+  "game_root": "/path/to/Steam/steamapps/common/Europa Universalis V/game",
+  "vanilla_repo": "/path/to/.dev-mods/vanilla-tracker/repo.git",
+  "skip_dirs": ["backup", "wip", "in_game/gui/experimental"],
+  "skip_files": ["*.bak", "*_disabled.txt"]
+}
