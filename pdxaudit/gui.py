@@ -460,9 +460,11 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         print("Could not read vanilla .gui files (archive failed).", file=sys.stderr)
         sys.exit(1)
     if bad_old or bad_new:
-        print(f"Warning: vanilla .gui files with brace anomalies, parsed "
-              f"best-effort (old: {len(bad_old)}, new: {len(bad_new)})",
-              file=sys.stderr)
+        bad_files = sorted(set(bad_old) | set(bad_new))
+        print(f"Warning: {len(bad_files)} vanilla .gui file(s) have unbalanced "
+              f"braces (vanilla's own); parsed best-effort:", file=sys.stderr)
+        for vf in bad_files:
+            print(f"  {vf}", file=sys.stderr)
 
     # Fork-point baselines are the default: each override is compared against the
     # tracked vanilla version it was forked from (per-file pin or nearest match),
