@@ -339,6 +339,28 @@ def mod_referenced_tokens(mod_root):
                 usage[m.group(1)].append(f"{rel}:{ln}")
     return usage
 
+RHS_IDENT = re.compile(r"^\s*[A-Za-z][A-Za-z0-9_]*\s*=\s*([A-Za-z][A-Za-z0-9_]*)\s*$")
+RHS_SKIP = {"yes", "no"}
+
+def mod_referenced_values(mod_root):
+    """value -> ['file:line', ...] for every `key = value` line in the mod's
+    .txt scripts whose value is a single bare identifier: a name the mod points
+    at, as opposed to a number, a block, or a boolean."""
+    usage = defaultdict(list)
+    for fp in sorted(mod_root.rglob("*.txt")):
+        rel = fp.relative_to(mod_root)
+        if not rel.parts or rel.parts[0] not in MODULE_ROOTS or should_skip(rel):
+            continue
+        try:
+            text = fp.read_text(encoding="utf-8-sig")
+        except Exception:
+            continue
+        for ln, raw in enumerate(text.split("\n"), 1):
+            m = RHS_IDENT.match(raw.split("#")[0])
+            if m and m.group(1) not in RHS_SKIP:
+                usage[m.group(1)].append(f"{rel}:{ln}")
+    return usage
+
 VOCAB_CACHE_VERSION = 1
 
 def _vocab_cache_path(vanilla_repo, commit):
@@ -420,8 +442,9 @@ def rename_candidates(token, old_vocab, new_vocab, limit=5):
     return [t for _, _, t in cands[:limit]]
 
 def run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg):
-    usage = mod_referenced_tokens(mod_root)
-    print(f"Scanning {len(usage)} referenced identifiers in {mod_root.name}...",
+    keys = mod_referenced_tokens(mod_root)
+    refs = mod_referenced_values(mod_root)
+    print(f"Scanning {len(keys)} keys and {len(refs)} references in {mod_root.name}...",
           file=sys.stderr)
     old_vocab = build_vocab(vanilla_repo, old_hash, f"old ({old_hash[:7]})")
     new_vocab = build_vocab(vanilla_repo, new_hash, f"new ({new_hash[:7]})")
@@ -429,50 +452,51 @@ def run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg)
         print("Could not read vanilla vocabulary (archive failed).", file=sys.stderr)
         sys.exit(1)
 
-    dropped = []
-    for tok, sites in usage.items():
-        o = old_vocab.get(tok, 0)
-        if o > 0 and new_vocab.get(tok, 0) == 0:
-            dropped.append((tok, o, sites))
-    dropped.sort(key=lambda x: -x[1])
+    def dropped(usage, skip=frozenset()):
+        out = [(name, old_vocab[name], sites)
+               for name, sites in usage.items()
+               if name not in skip and old_vocab.get(name, 0) > 0
+               and new_vocab.get(name, 0) == 0]
+        out.sort(key=lambda x: -x[1])
+        return out
+
+    dropped_keys = dropped(keys)
+    dropped_refs = dropped(refs, skip=set(keys))   # a name the mod also writes is a key
 
     summary = [f"# Dependency Audit: {old_hash[:7]} → {new_hash[:7]}"]
     if old_msg or new_msg:
         summary.append(f"*{old_msg} → {new_msg}*")
     summary += [
         "",
-        f"**{len(usage)}** referenced identifiers checked against vanilla vocabulary.",
-        f"- **{len(dropped)}** used by the mod but dropped by vanilla; "
-        f"verify (likely renamed/removed)",
+        f"Checked **{len(keys)}** keys and **{len(refs)}** references the mod uses "
+        f"against vanilla's vocabulary.",
+        f"- **{len(dropped_keys)}** keys the mod writes that vanilla dropped",
+        f"- **{len(dropped_refs)}** names the mod references that vanilla dropped",
         "",
     ]
     print("\n".join(summary))
 
-    if not dropped:
-        print("**No referenced vanilla tokens were dropped between these versions.**")
-        print()
-        print("_Checks `token =` assignments in the mod's .txt against vanilla usage. "
-              "A token vanilla merely stopped using (but is still engine-valid) would "
-              "also appear here, so treat hits as suspects and confirm with pdx-syntax._")
+    if not dropped_keys and not dropped_refs:
+        print("**No keys or references the mod uses were dropped between these versions.**")
         return
 
-    print("## Vanilla tokens the mod uses that vanilla dropped")
-    print()
-    for tok, o, sites in dropped:
-        cands = rename_candidates(tok, old_vocab, new_vocab)
-        more = f" (+{len(sites) - 1} more)" if len(sites) > 1 else ""
-        print(f"### {tok}")
-        print(f"- **Vanilla usage:** {o} → 0 between `{old_hash[:7]}` and `{new_hash[:7]}`")
-        print(f"- **Mod uses it at:** `{sites[0]}`{more}")
-        if cands:
-            print(f"- **Rename candidates (new in vanilla):** {', '.join(cands)}")
+    def section(title, items, verb):
+        if not items:
+            return
+        print(f"## {title}")
         print()
+        for name, o, sites in items:
+            cands = rename_candidates(name, old_vocab, new_vocab)
+            more = f" (+{len(sites) - 1} more)" if len(sites) > 1 else ""
+            print(f"### {name}")
+            print(f"- **Vanilla usage:** {o} → 0 between `{old_hash[:7]}` and `{new_hash[:7]}`")
+            print(f"- **Mod {verb} it at:** `{sites[0]}`{more}")
+            if cands:
+                print(f"- **Rename candidates (new in vanilla):** {', '.join(cands)}")
+            print()
 
-    print("---")
-    print("Suspects, not confirmed breakage: verify each with "
-          "`pdx-syntax modifier|effect|trigger <name>`. Modifier keys fail silently "
-          "(no error log), so they matter most; renamed effects/triggers also surface "
-          "as data errors in error.log.")
+    section("Keys the mod writes that vanilla dropped", dropped_keys, "writes")
+    section("Names the mod references that vanilla dropped", dropped_refs, "references")
 
 def print_section(title, items, show_diff, is_replace, mod_root=None):
     if not items:
@@ -689,13 +713,6 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
             for ov in try_injects:
                 print(f"- {ov['type']}:{ov['block']} at `{ov['file']}:{ov['line']}`")
             print()
-
-    if args.include_unchanged and unchanged:
-        print(f"## Unchanged ({len(unchanged)})")
-        print()
-        for ov, _, new_e in unchanged:
-            print(f"- {ov['type']}:{ov['block']}, `{new_e[0]}`")
-        print()
 
     if n_changed == 0 and not removed:
         print("**All overrides are current with vanilla.** No action needed.")

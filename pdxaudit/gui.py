@@ -270,7 +270,7 @@ def _loads_after_vanilla(mod_file, vfile):
     """True when the mod .gui file does not sort before the vanilla file
     defining the same name. First-loaded definition wins and load order follows
     path sort (hence the aaa_ prefix convention), so a mod file sorting after
-    vanilla's probably never applies. Heuristic; verify in game."""
+    vanilla's probably never applies."""
     return mod_file.lower() >= vfile.lower()
 
 def _def_level_changes(old_text, new_text):
@@ -523,7 +523,6 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         (stale_changed if (missing or kept) else reconciled_changed).append((d, o, n))
 
     replaced = []
-    same_path_unchanged = []
     for rel, _text in files:
         if fork_files:
             fb = fork_files.get(rel)
@@ -535,8 +534,6 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
             continue
         if ot is None or nt is None or ot.strip() != nt.strip():
             replaced.append((rel, ot, nt))
-        else:
-            same_path_unchanged.append(rel)
 
     if not fixed_window:
         header = [
@@ -603,7 +600,7 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
             print(f"- **Forked from:** {fb[2][:7]} ({fb[3]})")
         if _loads_after_vanilla(d["file"], n[0]):
             print("- **Load order:** ⚠ mod file does not sort before the vanilla "
-                  "file; the mod definition may never apply (verify)")
+                  "file; the mod definition may never apply")
         if args.diff:
             dl = diff_lines(o[1], n[1], d["name"])
             if dl:
@@ -632,8 +629,7 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
               f"({len(reconciled_changed)})")
         print()
         print("Vanilla changed these definitions and the mod's shadow copy already "
-              "carries the change: informational, no action needed (verify in game "
-              "if desired).")
+              "carries the change: informational, no action needed.")
         print()
         for d, o, n in reconciled_changed:
             _print_changed_def(d, o, n)
@@ -693,15 +689,6 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
                   f"(was in `{o[0]}`); the mod copy is now the only definition")
         print()
 
-    if args.include_unchanged and (unchanged or same_path_unchanged):
-        print(f"## Unchanged ({len(unchanged) + len(same_path_unchanged)})")
-        print()
-        for d, n in unchanged:
-            print(f"- {d['kind']}:{d['name']}, shadows `{n[0]}`")
-        for rel in same_path_unchanged:
-            print(f"- file:{rel}, replaces same-path vanilla file (unchanged)")
-        print()
-
     if not stale_changed and not replaced and not new_coll:
         if reconciled_changed:
             print("**All GUI overrides are current with vanilla** "
@@ -717,8 +704,7 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
             print("Run with `--diff` for full unified diffs.")
     print()
     print("_Implicit GUI overrides: the first-loaded definition of a template/type "
-          "name wins; load order is approximated by case-insensitive path sort. "
-          "Findings are suspects to verify in game._")
+          "name wins; load order follows a case-insensitive path sort._")
 
 def _stamp_add(path, tag):
     """Insert a fork-point comment as the first line, preserving a leading BOM."""

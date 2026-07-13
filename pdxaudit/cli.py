@@ -1,6 +1,6 @@
-"""Diff mod overrides and referenced tokens against vanilla patch changes.
+"""Diff mod overrides and referenced names against vanilla patch changes.
 
-Four audits (run one, or all at once with --all), all driven by the
+Four audits (name one to run it, or none to run all four), all driven by the
 vanilla-tracker bare git repo:
 
   Override audit (default): finds every INJECT:/REPLACE:/TRY_INJECT:/TRY_REPLACE: directive
@@ -10,12 +10,11 @@ vanilla-tracker bare git repo:
   lines (reconciled) or is missing them (stale). REPLACE blocks vanilla changed
   are highest priority; the mod may be silently suppressing those improvements.
 
-  Dependency audit (--deps): extracts every `token =` identifier the mod's
-  scripts assign, then flags any that vanilla used at the old commit but no
-  longer uses at the new commit (present-then-gone = likely renamed/removed).
-  Catches silent breakage the override audit cannot see, e.g. a modifier key
-  the mod writes that vanilla dropped. Suggests rename candidates. Findings are
-  suspects to verify with pdx-syntax, not confirmed breakage.
+  Dependency audit (--deps): collects the names the mod's scripts use, both the
+  key on the left of a statement and a single-identifier value on the right, then
+  flags any that vanilla used at the old commit but no longer uses at the new
+  commit (present-then-gone = likely renamed/removed). Reports dropped keys and
+  dropped references separately, with rename candidates.
 
   GUI audit (--gui): finds implicit GUI overrides: mod .gui template/type
   definitions that shadow a same-name vanilla definition (first-loaded file
@@ -23,8 +22,7 @@ vanilla-tracker bare git repo:
   vanilla file at the same relative path, and reports which shadowed
   definitions vanilla changed between the two commits. For changed definitions
   it also checks whether the mod's copy already contains vanilla's new lines.
-  Load order is approximated by case-insensitive path sort; findings are
-  suspects to verify in game.
+  Load order follows a case-insensitive path sort.
 
   Localization audit (--loc): finds loc keys the mod redefines whose vanilla
   value changed or was removed between the two commits. Matched by
@@ -47,11 +45,10 @@ game patched but the tracker was not updated, and a warning is printed.
 Usage (no audit flag runs all four; name one or more to run just those):
     pdx-audit                              # all audits (override, deps, GUI, loc)
     pdx-audit --overrides                  # override blocks only (the quick check)
-    pdx-audit --deps                       # dependency audit (dropped tokens)
+    pdx-audit --deps                       # dependency audit (dropped keys and references)
     pdx-audit --gui                        # GUI override audit (implicit shadowing)
     pdx-audit --loc                        # localization audit (overridden keys)
     pdx-audit --deps --gui                 # any combination runs just those
-    pdx-audit --include-unchanged          # also list unchanged blocks/keys
     pdx-audit --diff                       # show unified diffs
     pdx-audit --full                       # widen window to oldest tracked commit
     pdx-audit --block farming_village
@@ -72,16 +69,12 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--all", dest="run_all", action="store_true",
-                    help="Run every audit (the default when no audit is named)")
-    ap.add_argument("--include-unchanged", action="store_true",
-                    help="Include unchanged blocks/keys in output")
     ap.add_argument("--diff", action="store_true",
                     help="Show full unified diffs for changed blocks")
     ap.add_argument("--overrides", action="store_true",
                     help="Override audit only: INJECT/REPLACE blocks vs vanilla")
     ap.add_argument("--deps", action="store_true",
-                    help="Dependency audit: flag referenced tokens vanilla dropped")
+                    help="Dependency audit: flag keys and names the mod uses that vanilla dropped")
     ap.add_argument("--gui", action="store_true",
                     help="GUI audit: implicit template/type shadowing and "
                          "same-path .gui file replacements")
@@ -92,9 +85,6 @@ def main():
                     help="Fixed window from the oldest tracked commit to new "
                          "(GUI audit: opts out of the default fork-relative "
                          "baseline)")
-    ap.add_argument("--since-fork", action="store_true",
-                    help="No-op: the GUI audit is fork-relative by default now. "
-                         "Kept so existing commands keep working")
     ap.add_argument("--stamp-fork-points", action="store_true",
                     help="Detect each mod .gui file's fork point and write a "
                          "'# pdx-audit fork-point:' comment at the top of the "
@@ -171,11 +161,10 @@ def main():
         new_hash = args.new
 
     # No audit flag runs everything; naming one or more runs just those.
-    # --all is an explicit way to ask for the full set.
     picked = [name for name, on in (
         ("overrides", args.overrides), ("deps", args.deps),
         ("gui", args.gui), ("loc", args.loc)) if on]
-    selected = picked if (picked and not args.run_all) else ["overrides", "deps", "gui", "loc"]
+    selected = picked if picked else ["overrides", "deps", "gui", "loc"]
 
     runners = {
         "overrides": lambda: run_override_audit(

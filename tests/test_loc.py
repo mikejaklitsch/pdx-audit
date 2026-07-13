@@ -24,7 +24,7 @@ def test_parse_loc_keys_are_language_scoped():
     assert ("english", "KEY_A") not in parsed
 
 
-def _run_loc(monkeypatch, mod_text, old, new, include_unchanged=True):
+def _run_loc(monkeypatch, mod_text, old, new):
     monkeypatch.setattr(loc, "mod_loc_files",
                         lambda mr: [("main_menu/localization/english/t_l_english.yml", mod_text)])
 
@@ -32,7 +32,7 @@ def _run_loc(monkeypatch, mod_text, old, new, include_unchanged=True):
         d = old if commit == "OLD" else new
         return {k: v for k, v in d.items() if k in wanted}
     monkeypatch.setattr(loc, "build_loc_vanilla", fake_build)
-    args = types.SimpleNamespace(block=None, include_unchanged=include_unchanged)
+    args = types.SimpleNamespace(block=None)
     buf = io.StringIO()
     with redirect_stdout(buf):
         loc.run_loc_audit("/mod", "repo", "OLD", "1.2 Old", "NEW", "1.3 New", args)
@@ -59,7 +59,7 @@ def test_all_five_branches(monkeypatch):
     assert '"A"' in out and '"B"' in out
     assert "KEY_REMOVED" in out and "Keys Removed from Vanilla" in out
     assert "KEY_COLLISION" in out and "New Name Collisions" in out
-    assert "KEY_UNCHANGED" in out       # include_unchanged=True
+    assert "KEY_UNCHANGED" not in out   # unchanged keys show only in the summary tally
 
 
 def test_clean_when_nothing_drifted(monkeypatch):

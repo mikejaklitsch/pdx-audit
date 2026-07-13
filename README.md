@@ -1,29 +1,78 @@
 # pdx-audit
 
-pdx-audit tracks the changes vanilla makes to script, GUI, and localization blocks that your mod also overrides. When the game patches, your overrides can fall out of sync without any error: a REPLACE block keeps overwriting a vanilla block that gained new lines, an INJECT points at a block that moved, or a modifier the mod references gets renamed. pdx-audit finds those cases, sorts them by severity, and can print targeted diffs so you see exactly what changed.
+When the game patches, your mod's overrides can silently fall out of sync: a REPLACE keeps overwriting a vanilla block that gained new lines, an INJECT points at a block that moved, a modifier you reference gets renamed. Nothing errors, so the mod just quietly does the wrong thing.
 
-It works by diffing your overrides against a local repository of vanilla snapshots. The tools to build and maintain that repository are included, so you only set it up once and add a snapshot each patch.
+pdx-audit finds these cases by diffing your overrides against a local history of vanilla snapshots, sorts what it finds by severity, and can print the exact line changes. The tools to build that history are included, so you set it up once and add a snapshot after each patch.
 
-It runs four audits (or all of them at once with `--all`):
+## The four audits
 
-- **Override audit** (default): finds every `INJECT:`/`REPLACE:`/`TRY_INJECT:`/`TRY_REPLACE:` directive in the mod, finds the matching vanilla block in the old and new snapshot, and reports what vanilla changed. REPLACE and TRY_REPLACE blocks are marked reconciled or STALE depending on whether your replacement already contains vanilla's new lines; STALE is the highest-priority result. A `TRY_*` directive whose target is absent from both snapshots is listed as expected rather than an error, since `TRY_` is meant for targets that may not be present (from another mod, or a conditional vanilla block). A target vanilla actually removed between the two snapshots is still flagged as an orphaned override, `TRY_` or not.
-- **Dependency audit** (`--deps`): flags tokens the mod assigns (`token = ...`) that vanilla used in the old snapshot but dropped in the new one, so they were probably renamed or removed. Suggests likely renames.
-- **GUI audit** (`--gui`): finds mod GUI templates or types that override a vanilla definition of the same name, plus same-path `.gui` file replacements, and reports which of those vanilla definitions changed.
-- **Localization audit** (`--loc`): finds loc keys the mod redefines whose vanilla value changed or was removed between snapshots. Matching is by `(language, key)`, not by filename, because loc keys are not unique across languages and vanilla moves them between files.
+With no flag, all four audits run. Name one or more to run only those.
 
-## Install
+- **Override** (`--overrides`): reports what vanilla changed under each `INJECT:`/`REPLACE:`/`TRY_INJECT:`/`TRY_REPLACE:` directive. A REPLACE that no longer contains vanilla's new lines is marked STALE, the highest-priority finding.
+- **Dependency** (`--deps`): flags names your script uses that vanilla dropped between the two snapshots, both the keys you write on the left of a statement and the names you reference as a value on the right, like a building or an applied modifier. A name vanilla stopped using was probably renamed or removed, and the audit lists likely renames for each.
+- **GUI** (`--gui`): finds GUI templates, types, and whole `.gui` files the mod overrides, then reports which of them vanilla changed.
+- **Localization** (`--loc`): finds localization keys the mod redefines whose vanilla value changed or was removed, matching by `(language, key)` rather than by filename.
 
-Pure Python, no dependencies beyond git. Symlink the `pdx-audit` entry script onto your PATH; it resolves its own location and finds the `pdxaudit/` package next to it, so the symlink is all you need:
+The mechanics behind each audit are described in [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
+
+## Running it
+
+pdx-audit is pure Python and needs only git. Run it as `./pdx-audit` from the repo, or put it on your PATH to use the bare `pdx-audit` that the examples below assume (for example, symlink it into `~/.local/bin`). The code lives in the `pdxaudit/` package, and the tests run with `python -m pytest`.
+
+## Usage
+
+Run pdx-audit from anywhere inside a mod; it finds the mod root through `.metadata/`, or you can set it with `--mod-root`. The first run needs a vanilla tracker, which is a one-time setup covered below. After a game patch, take a snapshot first, then run the audits.
 
 ```bash
-ln -s "$(pwd)/pdx-audit" ~/.local/bin/pdx-audit
+pdx-audit                     # run all four audits
+pdx-audit --overrides         # just the override check
+pdx-audit --deps              # keys vanilla renamed or removed
+pdx-audit --gui               # vanilla GUI blocks that changed under your overrides
+pdx-audit --loc               # vanilla loc strings that changed under keys you override
+pdx-audit --deps --gui        # any combination runs just those
+
+pdx-audit --diff              # show the actual line changes
+pdx-audit --block farming_village    # one block by name
+pdx-audit --category building_types  # one category directory
+pdx-audit --full              # compare against the oldest snapshot, not just last patch
+pdx-audit --old 1.3.8 --new 1.3.10   # pick the two versions (tag or commit hash)
+pdx-audit --list-commits      # list snapshots you can pass to --old/--new
+pdx-audit --snapshot 1.3.12   # record the current install as a new snapshot, then exit
 ```
 
-Layout: `pdx-audit` is a thin entry point; the code lives in the `pdxaudit/` package (`tracker`, `overrides`, `gui`, `loc`, `report`, `config`, `cli`), with tests under `tests/` (run `python -m pytest`).
+Bare `pdx-audit` compares the newest two snapshots, which is the one-patch-back check and needs no arguments. It is also the slowest form, because it includes the localization scan, so name a single audit when you only need one.
+
+## The vanilla tracker
+
+The audits diff against a history of vanilla files kept in a bare git repo, with one commit per game version. pdx-audit builds and maintains that repo for you:
+
+```bash
+pdx-audit --snapshot 1.3.10
+```
+
+The first run creates the tracker and commits the current install's `.txt`/`.yml`/`.gui` files. Run it again after each patch to grow the history. The audits need at least two snapshots, and if the install has not changed, nothing is committed.
+
+The tracker is located on each run by the following precedence:
+
+1. `--vanilla-repo <path>`
+2. `$PDX_VANILLA_REPO`
+3. config file (`vanilla_repo`)
+4. `<mod-parent>/vanilla-tracker/repo.git`
+
+The install to snapshot is found the same way, in the order `--game-root`, `$PDX_GAME_ROOT`, config `game_root`, then a Steam default. `--patch-name` sets the patch name in the commit message, which defaults to `Pavia`.
+
+### Getting a second snapshot
+
+A tracker started today holds only the current patch, and the audits need at least two. You can add older history in any of these ways:
+
+- **Walk Steam back through patches.** In the game's Properties, on the Betas tab, select an older version, let Steam update, then run `pdx-audit --snapshot <version>`. Repeat oldest first up to the current patch. Order matters, because the audits treat git order as patch order, and the tool refuses an out-of-order snapshot so a missed step fails loudly instead of corrupting the history.
+- **Snapshot an extracted copy.** Point `--game-root` at any old build you kept or downloaded with DepotDownloader, which fetches a specific historical build you own. Only the `.txt`/`.yml`/`.gui` files matter.
+
+Snapshots are cheap, derived data, so if the history ever gets tangled you can delete `repo.git` and rebuild it oldest first.
 
 ## Config file
 
-Machine-wide settings can live in a JSON config so you don't repeat flags. Copy `config.sample.json` to `config.json` and fill in your paths:
+To avoid repeating paths on the command line, copy `config.sample.json` to `config.json` and fill in the values you use:
 
 ```json
 {
@@ -34,81 +83,21 @@ Machine-wide settings can live in a JSON config so you don't repeat flags. Copy 
 }
 ```
 
-- **`game_root`** / **`vanilla_repo`**: where the game install and the tracker live. Precedence is always CLI flag > environment variable (`$PDX_GAME_ROOT`, `$PDX_VANILLA_REPO`) > config file > built-in default.
-- **`skip_dirs`**: directories excluded from every scan. An entry matches a directory anywhere (`backup`) or a specific subtree (`in_game/gui/experimental`).
-- **`skip_files`**: filename globs excluded from every scan, matched against both the basename and the full path (`*.bak`, `in_game/common/tmp_*.txt`).
+- **`skip_dirs`**: lists directories to exclude from every scan. An entry matches that directory anywhere (`backup`) or one specific subtree (`in_game/gui/experimental`).
+- **`skip_files`**: lists filename globs to exclude from every scan, matched against both the basename and the full path.
 
-The config file is looked up at `$PDX_AUDIT_CONFIG`, then `~/.config/pdx-audit.json`, then `config.json` next to the tool. `config.sample.json` is a template to copy from.
+Every setting follows the same precedence: a CLI flag overrides an environment variable, which overrides the config file, which overrides the built-in default. The config file is looked up at `$PDX_AUDIT_CONFIG`, then `~/.config/pdx-audit.json`, then `config.json` next to the tool.
 
-## Setting up the vanilla tracker
+## GUI baseline (fork points)
 
-The audits need a history of vanilla game files to diff against. That history lives in a bare git repo (the "vanilla tracker") where each commit is one game version. pdx-audit creates and maintains it for you:
+When you copy a whole `.gui` file to override it, you copy it from some game version and then edit it. The GUI audit reports only what vanilla changed after that point, so it needs to know which version you started from. By default it works this out for each file, comparing your copy against every snapshot and taking the closest as the fork point, which it prints for each file.
 
-```bash
-pdx-audit --snapshot 1.3.10
-```
-
-The first run creates the tracker repo at `<mod-parent>/vanilla-tracker/repo.git` and commits the current vanilla install's `.txt`/`.yml`/`.gui` files, tagged with the version you pass. Run it again after every game patch to grow the history. Audits need at least two snapshots. If the install did not change, nothing is committed.
-
-The vanilla install is located via `--game-root` or `$PDX_GAME_ROOT` (point either at the game's `game/` directory) with a Steam default. `--patch-name` sets the patch name in the commit message. The tracker is discovered per invocation at:
-
-1. `--vanilla-repo <path>` if passed
-2. `<mod-parent>/vanilla-tracker/repo.git`
-3. `$PDX_VANILLA_REPO`
-
-## Back-populating history
-
-A tracker started today has only the current patch, and audits need at least two snapshots. If prior patches are relevant to your workflow, walk your Steam install through them oldest first and snapshot each one:
-
-1. In Steam, open the game's Properties, Betas tab, and select the oldest version you care about. Paradox keeps previous patches selectable there.
-2. Let Steam update, then run `pdx-audit --snapshot <version>`.
-3. Select the next version, update, snapshot again. Repeat until you are back on the current patch.
-
-Each snapshot reads the live install, so nothing needs to be copied. Order matters because the audits treat git order as patch order; the tool refuses an out-of-order version, so a missed step fails loudly instead of corrupting the history. If you do end up needing an older version after tracking a newer one, delete `repo.git` and rebuild in order. Snapshots are cheap, derived data.
-
-When rolling the install back and forth is not practical:
-
-- `--game-root /path/to/copy/game` snapshots any extracted copy of a version, for example a backup you kept, or an old build downloaded with DepotDownloader (an open-source tool that logs into Steam with your own account and downloads a specific historical build of a game you own, without touching your live install). Only the `.txt`/`.yml`/`.gui` files matter.
-- Copying someone's existing `vanilla-tracker/` directory next to your mods gives you their full history with no snapshotting at all; it is self-contained.
-
-Back-populating is optional. Two snapshots (the patch you last verified your mod against and the current one) cover the default audit; deeper history only widens what `--full` can see.
-
-## Usage
-
-Run from anywhere inside a mod (root found via `.metadata/`):
-
-```bash
-pdx-audit                     # run all four audits (override, deps, GUI, loc)
-pdx-audit --overrides         # just the override check: what changed under your INJECT/REPLACE blocks
-pdx-audit --deps              # find modifiers/triggers the mod uses that vanilla renamed or removed
-pdx-audit --gui               # find vanilla GUI blocks that changed under your GUI overrides
-pdx-audit --loc               # find vanilla loc strings that changed under keys the mod overrides
-pdx-audit --deps --gui        # name any combination to run just those
-pdx-audit --gui --stamp-fork-points  # write a fork-point comment atop each replaced GUI file (asks first)
-pdx-audit --full              # check against the oldest snapshot instead of just the last patch
-pdx-audit --diff              # show the actual line changes for each flagged block
-pdx-audit --include-unchanged # also list blocks/keys vanilla left unchanged
-pdx-audit --block farming_village    # audit just one block by name
-pdx-audit --category building_types  # audit just one category directory
-pdx-audit --old 1.3.8 --new 1.3.10   # pick the two versions to compare (tag or commit hash)
-pdx-audit --list-commits      # list the snapshots you can pass to --old/--new
-pdx-audit --snapshot 1.3.12   # record the current install as a new snapshot, then exit
-```
-
-After a game patch, run the snapshot first, then the audits. Bare `pdx-audit` runs all four against the newest two snapshots: that is the one-patch-back check, and it needs no arguments or hashes. (It is the slowest way to invoke the tool because it includes the localization scan; name `--overrides`, `--deps`, `--gui`, or `--loc` to run just what you need.) Use `--full` to reach the oldest snapshot, or `--old`/`--new` for any other window; both accept version tags (e.g. `--old 1.3.8 --new 1.3.10`) or commit hashes, listed by `--list-commits`.
-
-### How the GUI audit picks its baseline
-
-When you copy a whole GUI file to override it, you copy it from *some* game version, then edit it. The audit needs to know which version, so it can ask the right question: "has the game changed this file since the version I started from?" Anything the game changed *before* that point is already baked into your copy and is not worth reporting.
-
-By default the GUI audit works this out per file: it compares your copy against every tracked snapshot and takes the closest one as your starting point (your "fork point"), then reports only what the game changed after it. The report lists the fork point it picked for each file, so the guess is never hidden. If it guesses wrong, pin the file: put a comment at the very top,
+To set the fork point yourself, pin the file with a comment on its first line:
 
 ```
 # pdx-audit fork-point: 1.3.8
 ```
 
-and the audit uses that version instead. `--stamp-fork-points` writes those comments for you, showing the full list and asking before it touches any file.
+`--stamp-fork-points` can write these comments for you, but it is niche: the fork point is detected fresh each run, so an unpinned file already tracks vanilla. You pin a file only when you do not intend to keep it in sync with vanilla but still want to see what vanilla changes. `--full` turns detection off and measures every file against the oldest snapshot, which re-reports history your copy already contains, so the per-file default is the one you want for a normal patch check.
 
-If a pinned file later drifts (you updated it to a newer patch but left the comment behind), the audit prints a one-line warning that the pin looks stale. `--stamp-fork-points --refresh` rewrites those stale pins, again showing each change and asking first.
-
-`--full` turns this off and compares every file against the *oldest* snapshot instead. That re-reports the game's entire history, including all the old changes your copy already contains, so it flags far more than you need to act on. It is occasionally useful for a from-scratch review, but the default per-file baseline is the one you want for a normal patch check.
+The full baseline logic is described in [HOW_IT_WORKS.md](HOW_IT_WORKS.md#9-fork-points).

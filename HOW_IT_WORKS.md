@@ -142,13 +142,11 @@ This is the default run. For each `INJECT`/`REPLACE`/`TRY_*` directive:
 
 ## 6. Dependency audit
 
-Run with `--deps`. This one does not look at blocks; it looks at identifiers.
+Run with `--deps`. This audit does not look at blocks; it looks at the names your script uses.
 
-The mod assigns many tokens: `modifier = some_modifier`, `trigger = some_trigger`, and so on. If vanilla used a token in the old snapshot but no longer defines it in the new one, the token was probably renamed or removed, and the mod's reference is now dead.
+Paradox script is built from `key = value` statements, and this audit reads both the key on the left and, when the value on the right is a single name, that value too. It collects the names vanilla uses across its own script at each snapshot, then flags any name your mod uses that vanilla used at the old snapshot but no longer uses at the new one. A name that was present and is now gone was most likely renamed or removed, which leaves your line pointing at something the game no longer defines.
 
-The audit builds a vocabulary of every `token =` identifier vanilla defines at each snapshot, then flags identifiers the mod uses that vanilla dropped between old and new. For each dropped token it offers rename candidates by ranking the new snapshot's vocabulary by shared prefix length. This is the audit that would have caught the 1.3 batch of `_cost` to `_efficiency` modifier renames before they showed up as runtime errors.
-
-Findings are suspects. A token can legitimately disappear from vanilla's vocabulary while still being a valid engine builtin; confirm with `pdx-syntax`.
+It reports two kinds of finding separately, because they mean different things. A dropped key is a statement you write that vanilla no longer uses, such as a scripted trigger you invoke as `old_trigger = yes`. A dropped reference is a name you point at as a value, such as a building in `has_building = building_farm` or a modifier applied by name, that vanilla no longer defines. For each one it lists likely renames, ranked by how much of the name they share.
 
 ---
 
@@ -179,13 +177,7 @@ The actionable one is **changed**: vanilla altered a string and your override st
 
 ### Worked example
 
-Your mod defines, in `english`, `BUILDING_FARM_DESC: "A farm."` Vanilla changes its own value from "A farm." to "A farm. Produces grain." between the two snapshots. The audit reports `BUILDING_FARM_DESC (english)` as changed, showing your value, vanilla's old value, and vanilla's new value, so you can see exactly what vanilla added and choose whether to fold it in. A key you invented that vanilla has never had (say `SUL_MY_FEATURE`) is counted as mod-only and never flagged.
-
-### A note on scope
-
-Most keys a large mod defines are its own new strings, not overrides. In one real run a mod defined ~4800 keys but only 67 of them matched a vanilla key; those 67 are the real override surface and the rest are mod-only. The audit only scans vanilla for the languages your mod actually ships, so an English-only mod is quick; a mod that ships all fifteen languages pays to read all fifteen.
-
----
+Your mod defines, in `english`, `BUILDING_FARM_DESC: "A farm."` Vanilla changes its own value from "A farm." to "A farm. Produces grain." between the two snapshots. The audit reports `BUILDING_FARM_DESC (english)` as changed, showing your value, vanilla's old value, and vanilla's new value, so you can see exactly what vanilla added and choose whether to fold it in. A key you invented that vanilla has never had (say `MYMOD_FEATURE`) is counted as mod-only and never flagged.
 
 ## 8. GUI audit
 
@@ -203,7 +195,7 @@ For a whole replaced file the only sensible question is textual: **did vanilla's
 
 ### The baseline problem, concretely
 
-Suppose you copied `map_markers.gui` from version 1.2.2 and edited it. The tracker goes back to 1.2.0. If the audit compares vanilla's 1.2.0 version against the newest version, it reports *every* change vanilla made to that file across its entire history, including everything between 1.2.0 and 1.2.2 that you already have because you copied from 1.2.2. That is a flood of findings with nothing to fix.
+Suppose you copied `some_window.gui` from version 1.2.2 and edited it. The tracker goes back to 1.2.0. If the audit compares vanilla's 1.2.0 version against the newest version, it reports *every* change vanilla made to that file across its entire history, including everything between 1.2.0 and 1.2.2 that you already have because you copied from 1.2.2. That is a flood of findings with nothing to fix.
 
 The fix is not a cleverer diff. It is to compare against the version you actually started from.
 
@@ -211,35 +203,33 @@ The fix is not a cleverer diff. It is to compare against the version you actuall
 
 ## 9. Fork points
 
-A **fork point** is the game version a given override was copied from: the version your file most closely resembles before your own edits. Measuring drift from the fork point forward reports only what vanilla changed *after* you branched, which is exactly the actionable set.
+A **fork point** is the game version a given override was copied from: the version your file most closely resembles before your own edits. Measuring drift from the fork point forward reports only what vanilla changed *after* you branched.
 
 ### How the fork point is detected
 
 For each mod file (and each shadowed definition), the audit compares your copy against every tracked snapshot and scores the difference as the number of changed lines (added plus removed under a normalized line diff). The snapshot with the smallest difference is taken as the fork point.
 
-Using the real detection on this mod's files:
+Suppose the audit resolves your replaced files like this:
 
 ```
-economy_lateralview.gui  -> 1.3.10       (you started from current; nothing to report)
-hud_topbar.gui           -> 1.3.10       (same)
-location_window.gui      -> 1.3.2-beta   (older start; vanilla changed it since -> flagged)
-map_markers.gui          -> 1.2.2        (older start -> flagged)
-map_markers_city.gui     -> 1.2.5        (older start -> flagged)
+file_a.gui  -> 1.3.10 (newest)   started from the current version; nothing to report
+file_b.gui  -> 1.3.2             an older start; vanilla changed it since, so it is flagged
+file_c.gui  -> 1.2.2             an older start; flagged
 ```
 
-The first two resolve to the newest version, so there is no "after" to report and they drop out. The other three resolve to older versions, so vanilla's later changes to them surface. This is why the default GUI audit reports three replaced files where a fixed oldest-baseline run reports five: the two extra are files you already have up to date.
+A file that resolves to the newest version has no "after" to report and drops out. A file that resolves to an older version surfaces vanilla's later changes to it. This is why the default GUI audit reports fewer files than a fixed oldest-baseline run: the files you already have up to date are left out.
 
 The report always prints the detected fork point per file, so the inference is visible, never hidden. A fork point several patches back is a hint that your copy has diverged a lot and may be worth a manual look.
 
 ### Pinning a fork point
 
-Detection is a heuristic. If it guesses wrong, override it with a comment at the very top of the GUI file:
+You can set the fork point yourself with a comment at the very top of the GUI file:
 
 ```
 # pdx-audit fork-point: 1.3.8
 ```
 
-When present, the audit uses that version as the baseline for the file (and for the definitions in it) instead of guessing. The token can be a version tag or a commit hash. If it matches no tracked snapshot, the audit warns and falls back to auto-detection rather than failing.
+When present, the audit uses that version as the baseline for the file (and for the definitions in it) instead of detecting one. The value can be a version tag or a commit hash. If it matches no tracked snapshot, the audit warns and falls back to auto-detection rather than failing.
 
 ### Stale pins
 
@@ -248,7 +238,7 @@ A pin is authoritative, which means a wrong pin is obeyed. If you pin a file to 
 To catch this, the audit still runs detection even on pinned files, purely to compare. If a file's contents look clearly closer to a different version than the one it pins, it prints a single-line warning:
 
 ```
-Warning: map_markers.gui pins fork-point 1.3.10, but its contents look
+Warning: some_window.gui pins fork-point 1.3.10, but its contents look
   closer to 1.2.2; the pin may be stale (--stamp-fork-points --refresh updates it).
 ```
 
@@ -274,6 +264,8 @@ The first GUI audit after a new snapshot pays to read that snapshot once; every 
 ## 11. The stamp command
 
 `--stamp-fork-points` writes the detected fork point into each replaced GUI file as a `# pdx-audit fork-point:` comment, so the baseline is locked in and visible in the file itself rather than re-inferred each run.
+
+Pinning is niche. Because the audit detects the fork point fresh on every run, an unpinned file already tracks vanilla as you update it, so most files never need a pin. A pin earns its place when a file is not meant to keep tracking vanilla but you still want to watch vanilla's changes against a fixed baseline: it holds that baseline in place across updates, and the audit warns if the file later drifts away from it (section 9).
 
 Because it modifies the mod's own source files, it is deliberately cautious:
 

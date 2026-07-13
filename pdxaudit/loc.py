@@ -156,17 +156,10 @@ def run_loc_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         print(f"## New Name Collisions ({len(new_coll)})")
         print()
         print("Vanilla added a key the mod already defines; the mod's value wins "
-              "or loses by load order (verify).")
+              "or loses by load order.")
         print()
         for (lang, key), nv, modfile in new_coll:
             print(f"- **{key}** ({lang}), mod `{modfile}` vs new vanilla \"{nv}\"")
-        print()
-
-    if args.include_unchanged and unchanged:
-        print(f"## Unchanged ({len(unchanged)})")
-        print()
-        for lang, key in unchanged:
-            print(f"- {key} ({lang})")
         print()
 
     if not changed and not removed and not new_coll:
