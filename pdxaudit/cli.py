@@ -56,13 +56,17 @@ Usage (no audit flag runs all four; name one or more to run just those):
     pdx-audit --mod-root /path/to/mod
 """
 
+import io
 import sys
 import argparse
+from contextlib import redirect_stdout
 
 from .gui import run_gui_audit, run_stamp_fork_points
 from .loc import run_loc_audit
 from .overrides import run_deps_audit, run_override_audit
-from .tracker import do_snapshot, find_mod_root, find_vanilla_repo, get_commits, resolve_ref, resolve_tracker_path, warn_if_tracker_stale
+from .report import ColorWriter, color_enabled, render_triage
+from .htmlreport import render_report
+from .tracker import do_snapshot, find_mod_root, find_vanilla_repo, get_commits, prune_cache, resolve_ref, resolve_tracker_path, warn_if_tracker_stale
 
 def main():
     ap = argparse.ArgumentParser(
@@ -71,6 +75,16 @@ def main():
     )
     ap.add_argument("--diff", action="store_true",
                     help="Show full unified diffs for changed blocks")
+    ap.add_argument("--summary", action="store_true",
+                    help="Print only the cross-audit summary, not the per-audit "
+                         "detail (keeps large mods readable)")
+    ap.add_argument("--display", nargs="?", const="pdx-audit-report.html",
+                    metavar="FILE",
+                    help="Write an interactive HTML report to FILE (default "
+                         "pdx-audit-report.html), grouped by file with a "
+                         "reconciliation view per override")
+    ap.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+                    help="Colorize output: auto (a terminal only), always, or never")
     ap.add_argument("--overrides", action="store_true",
                     help="Override audit only: INJECT/REPLACE blocks vs vanilla")
     ap.add_argument("--deps", action="store_true",
@@ -120,6 +134,9 @@ def main():
                          "extracted old-version copy to back-populate history")
     args = ap.parse_args()
 
+    if color_enabled(args.color):
+        sys.stdout = ColorWriter(sys.stdout)
+
     if args.snapshot:
         repo = resolve_tracker_path(args.mod_root, args.vanilla_repo)
         do_snapshot(repo, args.snapshot, args.patch_name, args.game_root)
@@ -134,6 +151,7 @@ def main():
         sys.exit(1)
 
     warn_if_tracker_stale(vanilla_repo, commits[0][0])
+    prune_cache(vanilla_repo)
 
     if args.list_commits:
         print("Available vanilla-tracker commits:")
@@ -176,7 +194,30 @@ def main():
         "loc": lambda: run_loc_audit(
             mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args),
     }
-    for i, name in enumerate(selected):
-        if i:
-            print("\n")
-        runners[name]()
+    # Run each audit with its detailed output captured, so the cross-audit
+    # triage summary can be assembled from every audit's findings and printed
+    # first, above the detail. Progress still streams live to stderr. Capturing
+    # into a plain buffer means the detail is colourised once, on the way out
+    # through stdout, exactly like the triage block.
+    results = []  # (name, detail_text, findings)
+    for name in selected:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            findings = runners[name]() or []
+        results.append((name, buf.getvalue(), findings))
+
+    all_findings = [f for _, _, fs in results for f in fs]
+    print(render_triage(all_findings, old_msg, new_msg, selected,
+                        detail_shown=not (args.summary or args.display),
+                        report=bool(args.display)))
+    if args.display:
+        html = render_report(all_findings, mod_root.name, old_msg, new_msg)
+        with open(args.display, "w", encoding="utf-8") as fh:
+            fh.write(html)
+        print(f"\nInteractive report written to {args.display}")
+    elif not args.summary:
+        for name, detail, _ in results:
+            if detail.strip():
+                print("\n")
+                sys.stdout.write(detail)
+    sys.stdout.flush()

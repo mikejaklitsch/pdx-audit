@@ -75,6 +75,30 @@ def get_commits(vanilla_repo):
         result.append((parts[0], parts[1] if len(parts) > 1 else ""))
     return result
 
+_CACHE_HASH_RE = re.compile(r"-([0-9a-f]{40})[-.]")
+
+def prune_cache(vanilla_repo):
+    """Delete cache files for commits no longer in the tracker. Every cache file
+    (vocab, gui, block index) is named with the full commit hash it was built
+    from, and commit content is immutable, so a cache never goes stale; the only
+    way one becomes garbage is the commit itself leaving the tracker, when the
+    history is rebuilt or a snapshot is dropped. This prunes exactly those,
+    matching only our own cache-file prefixes, so it can never touch anything
+    else. Cheap and safe to call on every run."""
+    cache_dir = Path(vanilla_repo).parent / "cache"
+    if not cache_dir.is_dir():
+        return
+    live = set(git(vanilla_repo, "rev-list", "--all").split())
+    if not live:
+        return  # empty result means the git call failed; do not delete blindly
+    for fp in cache_dir.glob("*.json"):
+        m = _CACHE_HASH_RE.search(fp.name)
+        if m and m.group(1) not in live:
+            try:
+                fp.unlink()
+            except OSError:
+                pass
+
 def resolve_ref(vanilla_repo, ref, commits, side):
     """Validate a user-supplied --old/--new value (version tag or commit hash)
     against the tracker. Returns the version label ('1.3.10 Pavia') for display,

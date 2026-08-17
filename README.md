@@ -31,16 +31,25 @@ pdx-audit --gui               # vanilla GUI blocks that changed under your overr
 pdx-audit --loc               # vanilla loc strings that changed under keys you override
 pdx-audit --deps --gui        # any combination runs just those
 
+pdx-audit --summary           # the ranked summary only, no per-audit detail
+pdx-audit --display           # write an interactive HTML report (files, reconciliation view)
 pdx-audit --diff              # show the actual line changes
 pdx-audit --block farming_village    # one block by name
 pdx-audit --category building_types  # one category directory
 pdx-audit --full              # compare against the oldest snapshot, not just last patch
 pdx-audit --old 1.3.8 --new 1.3.10   # pick the two versions (tag or commit hash)
+pdx-audit --color never       # plain output; auto colours a terminal, never a pipe
 pdx-audit --list-commits      # list snapshots you can pass to --old/--new
 pdx-audit --snapshot 1.3.12   # record the current install as a new snapshot, then exit
 ```
 
 Bare `pdx-audit` compares the newest two snapshots, which is the one-patch-back check and needs no arguments. It is also the slowest form, because it includes the localization scan, so name a single audit when you only need one.
+
+## Reading the output
+
+Every run opens with a summary that ranks findings across all four audits by how much they need attention: **broken** (the override cannot take effect, such as a REPLACE of a block vanilla no longer defines), **stale** (it takes effect but hides content vanilla added), and **review** (it may have drifted and a human has to judge). Findings are grouped by class, so each class states what it is and the one fix for it once, then lists the affected items. The per-audit detail follows below the summary, and `--summary` prints the summary alone. On a terminal the summary and detail are colourised; piped or redirected output stays plain Markdown.
+
+`--display` writes a self-contained HTML report instead: findings grouped by the file they live in, each file expandable to its findings. For a changed override it carries a reconciliation view of your own block against vanilla, marking your own additions, the lines where you already match a vanilla change, vanilla's new lines placed where they belong, and what vanilla removed, each with the path to the block it sits in.
 
 ## The vanilla tracker
 

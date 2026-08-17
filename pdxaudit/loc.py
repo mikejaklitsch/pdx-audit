@@ -5,6 +5,7 @@ import sys
 import tarfile
 import io
 
+from .report import Finding
 from .tracker import MODULE_ROOTS, _git_archive
 from .config import should_skip
 
@@ -85,7 +86,7 @@ def run_loc_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
     files = mod_loc_files(mod_root)
     if not files:
         print("No mod .yml localization files found.", file=sys.stderr)
-        return
+        return []
     mod_keys = {}
     for rel, text in files:
         for k, v in parse_loc(text).items():
@@ -94,7 +95,7 @@ def run_loc_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         mod_keys = {k: v for k, v in mod_keys.items() if k[1] == args.block}
     if not mod_keys:
         print("No localization keys defined by the mod.", file=sys.stderr)
-        return
+        return []
     wanted = set(mod_keys)
     print(f"Scanning {len(wanted)} localization keys the mod defines...",
           file=sys.stderr)
@@ -168,3 +169,12 @@ def run_loc_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         print("---")
         print(f"**Action needed:** {len(changed)} changed strings, "
               f"{len(removed)} orphaned keys, {len(new_coll)} new collisions.")
+
+    findings = []
+    for (lang, key), _ov, _nv, _modval, modfile in changed:
+        findings.append(Finding("loc_changed", key, modfile, lang))
+    for (lang, key), modfile in removed:
+        findings.append(Finding("loc_removed", key, modfile, lang))
+    for (lang, key), _nv, modfile in new_coll:
+        findings.append(Finding("loc_collision", key, modfile, lang))
+    return findings

@@ -24,8 +24,13 @@ VANILLA_OLD = {
         "some_building = {\n\tcost = 100\n\tlegacy_mod = 1\n}\n",
     "in_game/common/buildings/farm.txt":
         "building_farm = {\n\tcost = 50\n}\n",
+    # `bar` is defined here so a mod file sorting AFTER vanilla.gui shadows it
+    # to no effect (the dead-shadow case); `my_value` is a script value, not a
+    # top-level block, so a REPLACE of it exercises the not-found bucketing.
     "in_game/gui/vanilla.gui":
-        "template foo = {\n\tsize = { 10 10 }\n}\n",
+        "template foo = {\n\tsize = { 10 10 }\n}\n"
+        "template bar = {\n\tx = 1\n}\n",
+    "in_game/common/script_values/v.txt": "my_value = 5\n",
     "in_game/localization/english/v_l_english.yml":
         'l_english:\n KEY_A:0 "old text"\n',
 }
@@ -35,7 +40,9 @@ VANILLA_NEW = {
     "in_game/common/buildings/farm.txt":
         "building_granary = {\n\tcost = 50\n}\n",
     "in_game/gui/vanilla.gui":
-        "template foo = {\n\tsize = { 20 20 }\n}\n",
+        "template foo = {\n\tsize = { 20 20 }\n}\n"
+        "template bar = {\n\tx = 1\n}\n",
+    "in_game/common/script_values/v.txt": "my_value = 5\n",
     "in_game/localization/english/v_l_english.yml":
         'l_english:\n KEY_A:0 "new text"\n',
 }
@@ -47,6 +54,10 @@ MOD = {
         "some_rule = {\n\thas_building = building_farm\n}\n",
     "in_game/gui/aaa_mod.gui":
         "template foo = {\n\tsize = { 10 10 }\n}\n",
+    # zzz_mod.gui sorts after vanilla.gui, so its `bar` shadow never applies.
+    "in_game/gui/zzz_mod.gui":
+        "template bar = {\n\tx = 1\n}\n",
+    "in_game/common/script_values/m2.txt": "REPLACE:my_value = 5\n",
     "in_game/localization/english/m_l_english.yml":
         'l_english:\n KEY_A:0 "mod text"\n',
 }

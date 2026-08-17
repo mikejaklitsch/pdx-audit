@@ -6,10 +6,11 @@ import difflib
 import tarfile
 import io
 import json
+import hashlib
 from pathlib import Path
 from collections import defaultdict
 
-from .report import diff_lines, diff_summary
+from .report import diff_lines, diff_summary, Finding
 from .tracker import MODULE_ROOTS, _git_archive, git
 from .config import should_skip
 
@@ -107,6 +108,48 @@ def build_index(vanilla_repo, commit, categories, progress_label=""):
         print(f" {len(idx)} blocks indexed.", file=sys.stderr)
     return idx
 
+BLOCK_CACHE_VERSION = 1
+
+def _block_cache_path(vanilla_repo, commit, categories):
+    """Cache file for a commit's block index, keyed by the full commit hash and
+    the set of categories indexed. Commit content is immutable, so entries never
+    go stale; the version bumps when the parser or index shape changes."""
+    full = git(vanilla_repo, "rev-parse", commit).strip()
+    if not full:
+        return None
+    cat_key = hashlib.sha1(",".join(sorted(set(categories))).encode()).hexdigest()[:12]
+    return Path(vanilla_repo).parent / "cache" / \
+        f"blocks-v{BLOCK_CACHE_VERSION}-{full}-{cat_key}.json"
+
+def build_index_cached(vanilla_repo, commit, categories, progress_label=""):
+    """build_index with a per-commit disk cache. A plain override run and a
+    later --diff run over the same overrides extract the same vanilla blocks; the
+    parsed index is memoized under <vanilla-tracker>/cache/ keyed by the
+    immutable commit hash so the second run reuses the first's work. Old entries
+    are pruned by prune_cache once their commit leaves the tracker."""
+    cache = _block_cache_path(vanilla_repo, commit, categories)
+    if cache and cache.is_file():
+        try:
+            data = json.loads(cache.read_text())
+            idx = {tuple(k): (v[0], v[1]) for k, v in data}
+            if progress_label:
+                print(f"  {progress_label}: block index from cache "
+                      f"({len(idx)} blocks).", file=sys.stderr)
+            return idx
+        except (OSError, ValueError, KeyError, IndexError):
+            pass
+    idx = build_index(vanilla_repo, commit, categories, progress_label)
+    if cache and idx:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            payload = [[list(k), [v[0], v[1]]] for k, v in idx.items()]
+            tmp = cache.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload))
+            tmp.replace(cache)
+        except OSError:
+            pass
+    return idx
+
 def _brace_extract(lines, start):
     """Return the block text starting at line index `start`, brace-matched.
     None if the braces never balance."""
@@ -172,13 +215,15 @@ def _block_key(prefix):
     m = re.search(r"([A-Za-z0-9_:.]+)\s*$", prefix)  # bare token / weight key
     return m.group(1) if m else "*"
 
-def _enclosing_keys(lines):
-    """For each line, the innermost enclosing block key (None at block top).
-    Approximate but comment-aware; precise enough to classify a line's context."""
+def _enclosing_paths(lines):
+    """For each line, the tuple of enclosing block keys, outermost to innermost
+    (empty at block top). Keeps the whole stack, not just the innermost key, so a
+    changed line can be shown with the path to the sub-block it sits in. Comment-
+    aware; approximate but precise enough to place and classify a line."""
     stack, out = [], []
     for raw in lines:
         code = raw.split("#")[0]
-        out.append(stack[-1] if stack else None)
+        out.append(tuple(stack))
         first_open = code.find("{")
         if first_open == -1:
             for _ in range(code.count("}")):
@@ -200,19 +245,27 @@ def _enclosing_keys(lines):
     return out
 
 def _changed_line_ctxs(old_text, new_text):
-    """Changed lines tagged with their enclosing block key.
-    Returns (added, removed): lists of (norm_line, enclosing_key)."""
+    """Changed lines tagged with their enclosing block path.
+    Returns (added, removed): lists of (norm_line, path_tuple)."""
     a, b = old_text.split("\n"), new_text.split("\n")
-    ak, bk = _enclosing_keys(a), _enclosing_keys(b)
+    ap, bp = _enclosing_paths(a), _enclosing_paths(b)
     an, bn = [_norm(x) for x in a], [_norm(x) for x in b]
     sm = difflib.SequenceMatcher(None, an, bn, autojunk=False)
     added, removed = [], []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag in ("replace", "delete"):
-            removed += [(an[i], ak[i]) for i in range(i1, i2) if an[i]]
+            removed += [(an[i], ap[i]) for i in range(i1, i2) if an[i]]
         if tag in ("replace", "insert"):
-            added += [(bn[j], bk[j]) for j in range(j1, j2) if bn[j]]
+            added += [(bn[j], bp[j]) for j in range(j1, j2) if bn[j]]
     return added, removed
+
+def _breadcrumb(path, norm):
+    """A changed line shown with the path to the sub-block it sits in, so a bare
+    `estate_building_input` reads as `possible_production_methods[estate_building_input]`
+    rather than a token with no home. The outermost element (the override block
+    itself) is dropped; '*' marks an anonymous block."""
+    rel = list(path[1:])
+    return f"{' > '.join(rel)}[{norm}]" if rel else norm
 
 def _classify_ctx(key, cat_order_free):
     """'order_free' | 'flow' | 'unknown' for a changed line's enclosing block."""
@@ -248,30 +301,32 @@ def replace_reconciliation(mod_root, ov, old_text, new_text):
     cat = _order_free_category(ov["file"])
     added, removed = _changed_line_ctxs(old_text, new_text)
     missing, kept, inexact, review = [], [], [], []
-    for n, key in added:
+    for n, path in added:
+        bc = _breadcrumb(path, n)
         if n not in mod_norms:
-            if n not in missing:
-                missing.append(n)
+            if bc not in missing:
+                missing.append(bc)
             continue
-        cls = _classify_ctx(key, cat)
-        if cls == "flow" and n not in inexact:
-            inexact.append(n)
-        elif cls == "unknown" and n not in review:
-            review.append(n)
-    for n, key in removed:
+        cls = _classify_ctx(path[-1] if path else None, cat)
+        if cls == "flow" and bc not in inexact:
+            inexact.append(bc)
+        elif cls == "unknown" and bc not in review:
+            review.append(bc)
+    for n, path in removed:
         if not n.strip("{} ") or n in new_norms:  # brace-only, or moved not removed
             continue
         if n not in mod_norms:  # correctly dropped
             continue
-        cls = _classify_ctx(key, cat)
+        bc = _breadcrumb(path, n)
+        cls = _classify_ctx(path[-1] if path else None, cat)
         if cls == "order_free":
-            if n not in kept:
-                kept.append(n)
+            if bc not in kept:
+                kept.append(bc)
         elif cls == "flow":
-            if n not in inexact:
-                inexact.append(n)
-        elif n not in review:
-            review.append(n)
+            if bc not in inexact:
+                inexact.append(bc)
+        elif bc not in review:
+            review.append(bc)
     if missing or kept:
         state = "stale"
     elif review:
@@ -282,34 +337,193 @@ def replace_reconciliation(mod_root, ov, old_text, new_text):
         state = "exact"
     return state, {"missing": missing, "kept": kept, "inexact": inexact, "review": review}
 
+def _top_level_children(block_text):
+    """{key: text} for the direct children of a `name = { ... }` block. Handles
+    scalar children (`k = v`) and block children (`k = { ... }`); the block text
+    includes the header line, and children are the depth-1 assignments. Repeated
+    keys are concatenated. This is what an INJECT actually adds at the injection
+    point, and the only level at which a vanilla change can collide with it: a
+    key nested inside the mod's own added effect (a scope such as `location`) is
+    not an injection point, and a same-named vanilla change deep in the block is
+    unrelated."""
+    lines = block_text.split("\n")
+    out = {}
+    depth = 0
+    opened = False
+    key = start = None
+    for i, raw in enumerate(lines):
+        code = raw.split("#")[0]
+        o, c = code.count("{"), code.count("}")
+        if not opened:
+            if o:                        # the block's own opening brace
+                opened = True
+                depth += o - c
+            continue
+        if depth == 1 and key is None:
+            m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_.:]*)\s*=", code)
+            if m:
+                key, start = m.group(1), i
+        depth += o - c
+        if key is not None and depth <= 1:   # child ended on this line
+            text = "\n".join(lines[start:i + 1])
+            out[key] = out[key] + "\n" + text if key in out else text
+            key = start = None
+    return out
+
 def inject_overlap(mod_root, ov, old_text, new_text):
-    """For a changed INJECT target: keys set by both the mod's INJECT block and
-    vanilla's changed lines. An overlap means vanilla touched the same key the
-    mod overrides; the highest-priority kind of INJECT drift. No overlap does
-    NOT mean safe: surrounding context changes can still matter.
-    Returns (status, keys); status 'unknown' when there is nothing to compare."""
+    """Injection-point collisions for a changed INJECT target. An INJECT appends
+    its lines as DIRECT children of the vanilla block, so only the mod's
+    direct-child keys are injection points, and only vanilla's own top-level
+    children can collide with them. Keys nested inside the mod's added effect,
+    and same-named changes deep in vanilla, are unrelated and never matched.
+    Returns (status, overlaps): overlaps is a list of (key, old_child, new_child)
+    for each injected key vanilla added, removed, or changed at the top level;
+    an empty list means vanilla left the injection point alone. status 'unknown'
+    when there is nothing to compare."""
     if old_text is None or new_text is None:
         return "unknown", []
     block = extract_mod_block(mod_root, ov)
     if block is None:
         return "unknown", []
-    mod_keys = set()
-    for line in block.split("\n")[1:]:  # skip the INJECT: directive line
-        m = IDENT_ASSIGN.match(line.split("#")[0])
-        if m:
-            mod_keys.add(m.group(1))
+    mod_keys = set(_top_level_children(block))
     if not mod_keys:
         return "unknown", []
-    a = old_text.strip().splitlines()
-    b = new_text.strip().splitlines()
-    changed_keys = set()
-    for l in difflib.unified_diff(a, b, n=0):
-        if ((l.startswith("+") and not l.startswith("+++"))
-                or (l.startswith("-") and not l.startswith("---"))):
-            m = IDENT_ASSIGN.match(l[1:].split("#")[0])
-            if m:
-                changed_keys.add(m.group(1))
-    return "ok", sorted(mod_keys & changed_keys)
+    old_children = _top_level_children(old_text)
+    new_children = _top_level_children(new_text)
+    overlaps = []
+    for k in sorted(mod_keys):
+        ov_old, ov_new = old_children.get(k), new_children.get(k)
+        if ov_old is None and ov_new is None:
+            continue                     # vanilla has no top-level key by this name
+        if (ov_old or "").strip() != (ov_new or "").strip():
+            overlaps.append((k, ov_old, ov_new))
+    return "ok", overlaps
+
+# --- rich report payload for --display -------------------------------------
+
+def _parse_bc(bc):
+    """A breadcrumb ('possible_production_methods[estate_building_input]' or a
+    bare top-level line) back into (rel_path_tuple, norm_line)."""
+    m = re.match(r"^(.*)\[(.*)\]$", bc)
+    if m:
+        return tuple(p for p in m.group(1).split(" > ") if p), m.group(2)
+    return (), bc
+
+def _content_norms(text):
+    return {n for n in (_norm(l) for l in (text or "").split("\n")) if n.strip("{} ")}
+
+def build_patch(mod_block, missing, old_text, new_text):
+    """A 3-way view of the mod block against vanilla old and new. Returns
+    (rows, absent, removed_note). Each row is a mod line tagged:
+      'context' shared with current vanilla (or structural: header, blank, brace)
+      'tracks'  the mod already matches vanilla's newer value (adopted a change)
+      'mine'    the mod's own line, in neither vanilla old nor new
+      'removed' a line vanilla dropped that the mod still carries
+    plus 'add' rows: vanilla-new lines the mod lacks, ghosted in at their target
+    sub-block. `absent` is missing lines whose target sub-block is not in the mod
+    copy (each with vanilla's version and a like-named mod block if any);
+    `removed_note` is vanilla's removed lines the mod never had, for reference."""
+    src = mod_block.split("\n")
+    paths = _enclosing_paths(src)
+    rel = [tuple(p[1:]) for p in paths]
+    norms = [_norm(l) for l in src]
+    old_n, new_n = _content_norms(old_text), _content_norms(new_text)
+    have_vanilla = bool(old_n or new_n)
+    existing = set(rel)
+    mod_children = _top_level_children(mod_block)
+    van_children = _top_level_children(new_text) if new_text else {}
+
+    miss_by_path, absent_raw = {}, []
+    for bc in missing:
+        pth, nm = _parse_bc(bc)
+        if pth and pth not in existing:
+            absent_raw.append(bc)
+        else:
+            miss_by_path.setdefault(pth, []).append(nm)
+
+    insert_at = {}
+    for pth, adds in miss_by_path.items():
+        anchors = [i for i in range(len(src))
+                   if rel[i] == pth and norms[i].strip("{} ")]
+        if anchors:
+            insert_at.setdefault(max(anchors), []).extend(adds)
+        else:
+            absent_raw.extend((" > ".join(pth) + "[" + a + "]") if pth else a
+                              for a in adds)
+
+    rows = []
+    for i, line in enumerate(src):
+        nm = norms[i]
+        in_new, in_old = nm in new_n, nm in old_n
+        if i == 0 or not nm.strip("{} ") or not have_vanilla or (in_new and in_old):
+            cls = "context"
+        elif in_new:
+            cls = "tracks"
+        elif in_old:
+            cls = "removed"
+        else:
+            cls = "mine"
+        rows.append({"t": line, "c": cls})
+        for a in insert_at.get(i, []):
+            indent = re.match(r"\s*", src[i]).group(0)
+            rows.append({"t": indent + a, "c": "add"})
+
+    def _related(name):
+        toks = set(name.split("_"))
+        for c in mod_children:
+            if c != name and len(toks & set(c.split("_"))) >= 2:
+                return c
+        return None
+    absent = []
+    for bc in absent_raw:
+        pth, _nm = _parse_bc(bc)
+        top = pth[0] if pth else None
+        absent.append({"line": bc, "block": top,
+                       "vanilla": van_children.get(top, "") if top else "",
+                       "related": _related(top) if top else None})
+
+    old_lines = (old_text or "").split("\n")
+    old_paths = _enclosing_paths(old_lines)
+    old_bc = {}
+    for i, l in enumerate(old_lines):
+        nm = _norm(l)
+        if nm.strip("{} "):
+            old_bc.setdefault(nm, _breadcrumb(old_paths[i], nm))
+    mod_n = {n for n in norms if n.strip("{} ")}
+    mod_lhs = {n.split(" = ", 1)[0] for n in mod_n if " = " in n}
+    removed_note = []
+    for n in sorted(old_n - new_n - mod_n):
+        key = n.split(" = ", 1)[0] if " = " in n else None
+        if key and key in mod_lhs:
+            continue
+        removed_note.append(old_bc.get(n, n))
+    return rows, absent, removed_note
+
+def override_report_data(mod_root, ov, is_replace, old_text, new_text, vanilla_file):
+    """The --display payload for one changed REPLACE/INJECT finding: vanilla's
+    diff, the mod block as a 3-way patch, and the gap (missing/kept for REPLACE,
+    injection-point overlaps for INJECT)."""
+    n_add, n_rem, _ = diff_summary(old_text, new_text)
+    data = {
+        "type": "REPLACE" if is_replace else "INJECT",
+        "vanilla_file": vanilla_file,
+        "n_add": n_add, "n_rem": n_rem,
+        "diff": "".join(diff_lines(old_text, new_text, ov["block"])).rstrip("\n"),
+        "missing": [], "kept": [], "overlap": [],
+    }
+    if is_replace:
+        _state, det = replace_reconciliation(mod_root, ov, old_text, new_text)
+        data["missing"], data["kept"] = det.get("missing", []), det.get("kept", [])
+        missing_for_patch = data["missing"]
+    else:
+        _status, overlaps = inject_overlap(mod_root, ov, old_text, new_text)
+        data["overlap"] = [{"key": k, "old": o or "", "new": n or ""}
+                           for k, o, n in overlaps]
+        missing_for_patch = []
+    mod_block = extract_mod_block(mod_root, ov) or ""
+    data["patch"], data["absent"], data["removed_note"] = build_patch(
+        mod_block, missing_for_patch, old_text, new_text)
+    return data
 
 IDENT_ASSIGN = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*=")
 
@@ -478,7 +692,7 @@ def run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg)
 
     if not dropped_keys and not dropped_refs:
         print("**No keys or references the mod uses were dropped between these versions.**")
-        return
+        return []
 
     def section(title, items, verb):
         if not items:
@@ -498,11 +712,62 @@ def run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg)
     section("Keys the mod writes that vanilla dropped", dropped_keys, "writes")
     section("Names the mod references that vanilla dropped", dropped_refs, "references")
 
+    findings = []
+    for name, _o, sites in dropped_keys:
+        cands = rename_candidates(name, old_vocab, new_vocab)
+        findings.append(Finding("deps_key_dropped", name, sites[0],
+                                f"maybe {cands[0]}?" if cands else ""))
+    for name, _o, sites in dropped_refs:
+        cands = rename_candidates(name, old_vocab, new_vocab)
+        findings.append(Finding("deps_ref_dropped", name, sites[0],
+                                f"maybe {cands[0]}?" if cands else ""))
+    return findings
+
+def names_defined_in_vanilla(vanilla_repo, commit, categories, names):
+    """Subset of `names` that appear as an assignment target ('name =') anywhere
+    in vanilla's .txt files under `categories` at `commit`, even when not as a
+    top-level block. Lets the audit separate a target genuinely absent from
+    vanilla (probably renamed or removed) from one the block matcher simply
+    could not see, such as a script value or a nested definition. This is a
+    name-existence check, not a structural parse."""
+    names = set(names)
+    if not names:
+        return set()
+    raw = _git_archive(vanilla_repo, commit, sorted(set(categories)))
+    if not raw:
+        return set()
+    pats = {n: re.compile(rf"(?m)^\s*{re.escape(n)}\s*=") for n in names}
+    found = set()
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), ignore_zeros=True) as tf:
+            for member in tf.getmembers():
+                if not member.isfile() or not member.name.endswith(".txt"):
+                    continue
+                f = tf.extractfile(member)
+                if f is None:
+                    continue
+                content = f.read().decode("utf-8-sig", errors="replace")
+                for n in list(names - found):
+                    if pats[n].search(content):
+                        found.add(n)
+                if found == names:
+                    break
+    except tarfile.TarError:
+        return found
+    return found
+
 def print_section(title, items, show_diff, is_replace, mod_root=None):
     if not items:
         return
     tag = "REPLACE" if is_replace else "INJECT"
     print(f"## {title} ({len(items)} {tag})")
+    print()
+    gloss = ("REPLACE swaps the whole vanilla block for your copy, so anything "
+             "vanilla later adds to that block is dropped unless you copy it in."
+             if is_replace else
+             "INJECT adds your lines into the vanilla block; if vanilla reshaped "
+             "that block, your lines can land in the wrong place.")
+    print(f"_{gloss}_")
     print()
 
     for ov, old_entry, new_entry in items:
@@ -522,7 +787,7 @@ def print_section(title, items, show_diff, is_replace, mod_root=None):
             d = diff_lines(old_text, new_text, ov["block"])
             if d:
                 print("```diff")
-                sys.stdout.write("".join(d))
+                print("".join(d).rstrip("\n"))
                 print("```")
         else:
             n_add, n_rem, key = diff_summary(old_text, new_text)
@@ -572,17 +837,17 @@ def print_section(title, items, show_diff, is_replace, mod_root=None):
                         _lines(bucket)
 
         if not is_replace and mod_root is not None:
-            status, keys = inject_overlap(mod_root, ov, old_text, new_text)
-            if status == "ok":
-                if keys:
-                    shown = ", ".join(f"`{k}`" for k in keys[:8])
-                    more = f" (+{len(keys) - 8} more)" if len(keys) > 8 else ""
-                    print(f"  **Inject overlap:** ⚠ vanilla changed keys this "
-                          f"INJECT also sets: {shown}{more}")
-                else:
-                    print("  **Inject overlap:** changed lines do not set keys "
-                          "this INJECT sets; context may still matter, review "
-                          "the change")
+            status, overlaps = inject_overlap(mod_root, ov, old_text, new_text)
+            if status == "ok" and overlaps:
+                shown = ", ".join(f"`{k}`" for k, _, _ in overlaps[:8])
+                more = f" (+{len(overlaps) - 8} more)" if len(overlaps) > 8 else ""
+                print(f"  **Injection-point collision:** ⚠ vanilla also defines or "
+                      f"changed top-level {shown}{more}, the level this INJECT adds "
+                      f"to; check for a duplicate or conflict")
+            elif status == "ok":
+                print("  **Injection point untouched:** vanilla changed other parts "
+                      "of this block, not the keys this INJECT adds; the injection "
+                      "still lands the same way")
         print()
 
 def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args):
@@ -595,14 +860,14 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
         overrides = [o for o in overrides if args.category in o["category"]]
     if not overrides:
         print("No matching overrides found.", file=sys.stderr)
-        return
+        return []
 
     print(f"Found {len(overrides)} override directives.", file=sys.stderr)
 
     categories = list({o["category"] for o in overrides})
 
-    old_idx = build_index(vanilla_repo, old_hash, categories, f"old ({old_hash[:7]})")
-    new_idx = build_index(vanilla_repo, new_hash, categories, f"new ({new_hash[:7]})")
+    old_idx = build_index_cached(vanilla_repo, old_hash, categories, f"old ({old_hash[:7]})")
+    new_idx = build_index_cached(vanilla_repo, new_hash, categories, f"new ({new_hash[:7]})")
 
     removed = []
     changed_replace = []
@@ -692,18 +957,45 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
         changed_inject, args.diff, is_replace=False, mod_root=mod_root,
     )
 
+    try_injects, defined_elsewhere, absent = [], [], []
     if not_found:
         try_types = ("TRY_INJECT", "TRY_REPLACE")
         try_injects = [o for o in not_found if o["type"] in try_types]
         hard_misses = [o for o in not_found if o["type"] not in try_types]
 
         if hard_misses:
-            print(f"## Not Found in Vanilla ({len(hard_misses)})")
+            # A hard miss is only alarming if the name is truly gone from vanilla.
+            # A name that exists but not as a top-level block (a script value, a
+            # nested definition) is a matcher limit, not a broken override, so
+            # keep the two apart instead of lumping them under one scary heading.
+            present = names_defined_in_vanilla(
+                vanilla_repo, new_hash,
+                {o["category"] for o in hard_misses},
+                {o["block"] for o in hard_misses})
+            defined_elsewhere = [o for o in hard_misses if o["block"] in present]
+            absent = [o for o in hard_misses if o["block"] not in present]
+
+        if absent:
+            print(f"## Not Found in Vanilla ({len(absent)})")
             print()
-            print("These targets don't exist as top-level blocks in vanilla "
-                  "(may be mod-only blocks, nested overrides, or category mismatches).")
+            print("No block, script value, or other `name =` definition by these "
+                  "names exists in vanilla at the new version. The target was "
+                  "probably renamed or removed, or the block is mod-only.")
             print()
-            for ov in hard_misses:
+            for ov in absent:
+                print(f"- {ov['type']}:{ov['block']}, `{ov['file']}:{ov['line']}`")
+            print()
+
+        if defined_elsewhere:
+            print(f"## Defined in Vanilla, but Not as a Top-Level Block "
+                  f"({len(defined_elsewhere)})")
+            print()
+            print("These names exist in vanilla but not as a top-level "
+                  "`name = {{ ... }}` block (most often a script value or a nested "
+                  "definition), so the block audit cannot compare them. This is a "
+                  "limit of the matcher, not a broken override.")
+            print()
+            for ov in defined_elsewhere:
                 print(f"- {ov['type']}:{ov['block']}, `{ov['file']}:{ov['line']}`")
             print()
 
@@ -714,7 +1006,7 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
                 print(f"- {ov['type']}:{ov['block']} at `{ov['file']}:{ov['line']}`")
             print()
 
-    if n_changed == 0 and not removed:
+    if n_changed == 0 and not removed and not absent:
         print("**All overrides are current with vanilla.** No action needed.")
     else:
         print("---")
@@ -724,3 +1016,44 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
               f"{len(removed)} orphaned.")
         if not args.diff and n_changed > 0:
             print("Run with `--diff` for full unified diffs.")
+
+    # Findings for the cross-audit triage (the detail above is unchanged).
+    # Each finding is one item tagged with its problem class; the class supplies
+    # the shared wording and remedy in report.KIND.
+    want = getattr(args, "display", None)   # attach rich payload only for --display
+    findings = []
+    for ov, _oe, _ne in removed:
+        findings.append(Finding("override_orphaned", ov["block"],
+                                f"{ov['file']}:{ov['line']}"))
+    for (ov, oe, ne), state in zip(changed_replace, replace_states):
+        loc = f"{ov['file']}:{ov['line']}"
+        kind = ("override_replace_stale" if state == "stale"
+                else "override_replace_review" if state in ("review", "inexact")
+                else "override_replace_reconciled")
+        data = (override_report_data(mod_root, ov, True, oe[1] if oe else None,
+                                     ne[1] if ne else None, (ne or oe)[0])
+                if want else None)
+        findings.append(Finding(kind, ov["block"], loc, "", data))
+    for ov, oe, ne in changed_inject:
+        loc = f"{ov['file']}:{ov['line']}"
+        status, overlaps = inject_overlap(mod_root, ov, oe[1] if oe else None,
+                                          ne[1] if ne else None)
+        data = (override_report_data(mod_root, ov, False, oe[1] if oe else None,
+                                     ne[1] if ne else None, (ne or oe)[0])
+                if want else None)
+        if status == "ok" and overlaps:
+            shown = ", ".join(k for k, _, _ in overlaps[:3]) + (
+                " ..." if len(overlaps) > 3 else "")
+            findings.append(Finding("override_inject_overlap", ov["block"], loc,
+                                    f"top-level {shown}", data))
+        else:
+            # vanilla changed the block but not the keys this INJECT adds: the
+            # injection still lands the same way, so this is informational.
+            findings.append(Finding("override_inject_context", ov["block"], loc, "", data))
+    for ov in absent:
+        findings.append(Finding("override_absent", ov["block"],
+                                f"{ov['file']}:{ov['line']}"))
+    for ov in defined_elsewhere:
+        findings.append(Finding("override_nonblock", ov["block"],
+                                f"{ov['file']}:{ov['line']}"))
+    return findings

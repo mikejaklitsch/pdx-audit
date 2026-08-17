@@ -9,7 +9,7 @@ import json
 import hashlib
 from pathlib import Path
 
-from .report import diff_lines, diff_summary
+from .report import diff_lines, diff_summary, Finding
 from .tracker import MODULE_ROOTS, _git_archive, get_commits, git
 from .config import should_skip
 
@@ -266,13 +266,6 @@ def build_gui_vanilla_cached(vanilla_repo, commit, modules, label=""):
             pass
     return def_idx, file_idx, bad
 
-def _loads_after_vanilla(mod_file, vfile):
-    """True when the mod .gui file does not sort before the vanilla file
-    defining the same name. First-loaded definition wins and load order follows
-    path sort (hence the aaa_ prefix convention), so a mod file sorting after
-    vanilla's probably never applies."""
-    return mod_file.lower() >= vfile.lower()
-
 def _def_level_changes(old_text, new_text):
     """Definition names that changed/appeared/disappeared between two versions
     of one .gui file."""
@@ -431,7 +424,7 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
     files = mod_gui_files(mod_root)
     if not files:
         print("No mod .gui files found.", file=sys.stderr)
-        sys.exit(0)
+        return []
 
     mdefs = []
     skipped = 0  # file-scoped kinds: local_template, types containers
@@ -562,6 +555,7 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
             print(f"- `{rel}`: {tag}" + ("  *(pinned)*" if pinned else ""))
         print()
     shadow_defs = [d for d in mdefs if d["file"] not in same_path]
+
     n_tmpl = sum(1 for d in shadow_defs if d["kind"] == "template")
     n_type = len(shadow_defs) - n_tmpl
     extras = []
@@ -598,14 +592,11 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         fb = fork_defs.get((d["module"], d["kind"], d["name"]))
         if fb:
             print(f"- **Forked from:** {fb[2][:7]} ({fb[3]})")
-        if _loads_after_vanilla(d["file"], n[0]):
-            print("- **Load order:** ⚠ mod file does not sort before the vanilla "
-                  "file; the mod definition may never apply")
         if args.diff:
             dl = diff_lines(o[1], n[1], d["name"])
             if dl:
                 print("```diff")
-                sys.stdout.write("".join(dl))
+                print("".join(dl).rstrip("\n"))
                 print("```")
         else:
             n_add, n_rem, key_lines = diff_summary(o[1], n[1])
@@ -674,11 +665,8 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
               f"defines ({len(new_coll)})")
         print()
         for d, n in new_coll:
-            order = (" (⚠ vanilla may load first)"
-                     if _loads_after_vanilla(d["file"], n[0])
-                     else " (mod loads first)")
             print(f"- **{d['kind']}:{d['name']}**, mod `{d['file']}:{d['line']}` "
-                  f"vs vanilla `{n[0]}`{order}")
+                  f"vs vanilla `{n[0]}`")
         print()
 
     if van_removed:
@@ -697,14 +685,40 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
             print("**All GUI overrides are current with vanilla.**")
     else:
         print("---")
-        print(f"**Action needed:** {len(stale_changed)} shadowed definitions drifted, "
+        print(f"**Action needed:** "
+              f"{len(stale_changed)} shadowed definitions drifted, "
               f"{len(replaced)} replaced files changed, "
               f"{len(new_coll)} new collisions.")
         if not args.diff and stale_changed:
             print("Run with `--diff` for full unified diffs.")
     print()
-    print("_Implicit GUI overrides: the first-loaded definition of a template/type "
-          "name wins; load order follows a case-insensitive path sort._")
+    print("_Implicit GUI overrides: a mod template/type definition shadows the "
+          "vanilla definition of the same name. The mod loads after vanilla, so "
+          "the override applies; this reports where vanilla then changed underneath "
+          "it._")
+
+    # Findings for the cross-audit triage. The class (report.KIND) supplies the
+    # shared wording and remedy; each finding carries just its item and target.
+    findings = []
+    for d, _o, _n in stale_changed:
+        findings.append(Finding("gui_shadow_stale", d["name"],
+                                f"{d['file']}:{d['line']}"))
+    for rel, ot, nt in replaced:
+        if ot is None or nt is None:
+            findings.append(Finding("gui_file_review", rel, rel,
+                                    "vanilla added" if ot is None else "vanilla removed"))
+        else:
+            findings.append(Finding("gui_file_replaced", rel, rel))
+    for d, _o in van_removed:
+        findings.append(Finding("gui_van_removed", d["name"],
+                                f"{d['file']}:{d['line']}"))
+    for d, n in new_coll:
+        findings.append(Finding("gui_new_collision", d["name"],
+                                f"{d['file']}:{d['line']}"))
+    for d, _o, _n in reconciled_changed:
+        findings.append(Finding("gui_reconciled", d["name"],
+                                f"{d['file']}:{d['line']}"))
+    return findings
 
 def _stamp_add(path, tag):
     """Insert a fork-point comment as the first line, preserving a leading BOM."""
