@@ -10,22 +10,15 @@ import hashlib
 import os
 from pathlib import Path
 
+from pdx_utilities.git import git, git_archive
+from pdx_utilities.paths import (find_mod_root_or_exit, vanilla_root,
+                                  DEFAULT_VANILLA_ROOT)
+from pdx_utilities.constants import SCAN_TOPDIRS as MODULE_ROOTS  # noqa: F401
+
 from .config import cfg
 
 def find_mod_root(override: str | None = None) -> Path:
-    if override:
-        return Path(override).resolve()
-    p = Path.cwd().resolve()
-    while True:
-        if (p / ".metadata").is_dir():
-            return p
-        parent = p.parent
-        if parent == p:
-            break
-        p = parent
-    print("Error: could not find mod root (.metadata/ directory). "
-          "Run from inside a mod directory or use --mod-root.", file=sys.stderr)
-    sys.exit(1)
+    return find_mod_root_or_exit(override=override)
 
 def find_vanilla_repo(mod_root: Path, override: str | None = None) -> Path:
     if override:
@@ -35,7 +28,6 @@ def find_vanilla_repo(mod_root: Path, override: str | None = None) -> Path:
         print(f"Vanilla repo not found at {p}", file=sys.stderr)
         sys.exit(1)
 
-    # precedence: env > config > convention (<mod-parent>/vanilla-tracker)
     for src in (os.environ.get("PDX_VANILLA_REPO"), cfg("vanilla_repo")):
         if src:
             p = Path(src).resolve()
@@ -53,19 +45,7 @@ def find_vanilla_repo(mod_root: Path, override: str | None = None) -> Path:
           "Use --vanilla-repo <path> to specify.", file=sys.stderr)
     sys.exit(1)
 
-def git(vanilla_repo, *args):
-    try:
-        r = subprocess.run(
-            ["git", f"--git-dir={vanilla_repo}"] + list(args),
-            capture_output=True, text=True, timeout=30,
-        )
-        return r.stdout if r.returncode == 0 else ""
-    except subprocess.TimeoutExpired:
-        return ""
-
 def get_commits(vanilla_repo):
-    # Full history: one commit per game version, and --full trusts commits[-1]
-    # to be the oldest tracked snapshot.
     log = git(vanilla_repo, "log", "--oneline", "--no-decorate")
     result = []
     for line in log.strip().split("\n"):
@@ -78,19 +58,13 @@ def get_commits(vanilla_repo):
 _CACHE_HASH_RE = re.compile(r"-([0-9a-f]{40})[-.]")
 
 def prune_cache(vanilla_repo):
-    """Delete cache files for commits no longer in the tracker. Every cache file
-    (vocab, gui, block index) is named with the full commit hash it was built
-    from, and commit content is immutable, so a cache never goes stale; the only
-    way one becomes garbage is the commit itself leaving the tracker, when the
-    history is rebuilt or a snapshot is dropped. This prunes exactly those,
-    matching only our own cache-file prefixes, so it can never touch anything
-    else. Cheap and safe to call on every run."""
+    """Delete cache files for commits no longer in the tracker."""
     cache_dir = Path(vanilla_repo).parent / "cache"
     if not cache_dir.is_dir():
         return
     live = set(git(vanilla_repo, "rev-list", "--all").split())
     if not live:
-        return  # empty result means the git call failed; do not delete blindly
+        return
     for fp in cache_dir.glob("*.json"):
         m = _CACHE_HASH_RE.search(fp.name)
         if m and m.group(1) not in live:
@@ -100,11 +74,7 @@ def prune_cache(vanilla_repo):
                 pass
 
 def resolve_ref(vanilla_repo, ref, commits, side):
-    """Validate a user-supplied --old/--new value (version tag or commit hash)
-    against the tracker. Returns the version label ('1.3.10 Pavia') for display,
-    or "" if the ref resolves but isn't a tracked commit. Aborts loudly with a
-    'did you mean' hint when the ref matches nothing; otherwise an unresolvable
-    version silently extracts an empty tree and every block looks 'changed'."""
+    """Validate a user-supplied --old/--new value against the tracker."""
     resolved = git(vanilla_repo, "rev-parse", "--verify", "--quiet",
                    f"{ref}^{{commit}}").strip()
     if resolved:
@@ -122,17 +92,12 @@ def resolve_ref(vanilla_repo, ref, commits, side):
           f"{hint}", file=sys.stderr)
     sys.exit(1)
 
-DEFAULT_GAME_ROOT = Path(
-    "/mnt/d/Program Files (x86)/Steam/steamapps/common/Europa Universalis V/game")
+DEFAULT_GAME_ROOT = DEFAULT_VANILLA_ROOT
 
 STALE_SENTINEL_DIRS = ("main_menu/localization/english", "in_game/gui")
 
 def warn_if_tracker_stale(vanilla_repo, newest_hash, sample_size=40):
-    """Hash a spread sample of live game files against the newest tracked
-    commit's blobs. Mismatches mean the game patched after the last tracker
-    snapshot; every audit window is then missing the real newest version.
-    English localization churns every patch, so the sample is reliable.
-    Warn-only heuristic; silent when the game install is not found."""
+    """Warn if game files differ from the newest tracked commit."""
     game_root = Path(os.environ.get("PDX_GAME_ROOT")
                      or cfg("game_root") or str(DEFAULT_GAME_ROOT))
     if not game_root.is_dir():
@@ -162,39 +127,12 @@ def warn_if_tracker_stale(vanilla_repo, newest_hash, sample_size=40):
               f"Run the tracker's update script, then re-audit.",
               file=sys.stderr)
 
-MODULE_ROOTS = ("in_game", "main_menu", "loading_screen")
-
 def _git_archive(vanilla_repo, commit, paths=None, timeout=60):
-    """Tar bytes for `paths` (whole tree if None) at `commit`. When the batched
-    call fails (e.g. one path does not exist at that commit), falls back to one
-    archive per path and concatenates them; the result must be parsed with
-    ignore_zeros=True or every archive after the first is silently lost."""
-    cmd = ["git", f"--git-dir={vanilla_repo}", "archive", "--format=tar", commit]
-    if paths:
-        cmd += ["--"] + list(paths)
-    try:
-        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return b""
-    if r.returncode == 0:
-        return r.stdout
-    if not paths:
-        return b""
-    out = b""
-    for p in paths:
-        cmd2 = ["git", f"--git-dir={vanilla_repo}",
-                "archive", "--format=tar", commit, "--", p]
-        try:
-            r2 = subprocess.run(cmd2, capture_output=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            continue
-        if r2.returncode == 0:
-            out += r2.stdout
-    return out
+    """Wrapper around shared git_archive with ignore_zeros note."""
+    return git_archive(vanilla_repo, commit, paths, timeout)
 
 def resolve_tracker_path(mod_root_arg, vanilla_repo_arg) -> Path:
-    """Where the tracker repo lives (or should live). Unlike
-    find_vanilla_repo this does not require it to exist yet."""
+    """Where the tracker repo lives (or should live)."""
     if vanilla_repo_arg:
         return Path(vanilla_repo_arg).resolve()
     for src in (os.environ.get("PDX_VANILLA_REPO"), cfg("vanilla_repo")):
@@ -204,17 +142,13 @@ def resolve_tracker_path(mod_root_arg, vanilla_repo_arg) -> Path:
     return mod_root.parent / "vanilla-tracker" / "repo.git"
 
 def _version_key(tag: str):
-    """Sort key for version-ish tags: numeric fields compare numerically,
-    and a suffix like '-beta' sorts below the plain release."""
     nums = tuple(int(n) for n in re.findall(r"\d+", tag))
     suffix = re.sub(r"[\d.]+", "", tag)
     return (nums, 0 if suffix else 1, suffix)
 
 def do_snapshot(repo: Path, tag: str, patch_name: str,
                 game_root_arg: str | None = None) -> None:
-    """Snapshot a vanilla install's .txt/.yml/.gui files into the tracker
-    as one commit tagged with the game version. Creates the bare repo on
-    first use, so a new machine needs no manual git setup."""
+    """Snapshot a vanilla install's .txt/.yml/.gui files into the tracker."""
     game_root = Path(game_root_arg or os.environ.get("PDX_GAME_ROOT")
                      or cfg("game_root") or str(DEFAULT_GAME_ROOT))
     if not game_root.is_dir():
@@ -238,9 +172,6 @@ def do_snapshot(repo: Path, tag: str, patch_name: str,
         print(f"Error: tag '{tag}' already exists in the tracker.", file=sys.stderr)
         sys.exit(1)
 
-    # Commits must be chronological (oldest patch first): the audits diff
-    # the newest two commits, so appending an OLDER version after a newer
-    # one inverts every audit window. Refuse rather than corrupt.
     existing = subprocess.run(
         ["git", "--git-dir", str(repo), "tag", "-l"],
         capture_output=True, text=True).stdout.split()
