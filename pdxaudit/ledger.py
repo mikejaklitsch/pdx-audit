@@ -20,7 +20,7 @@ NOT_DISMISSIBLE = frozenset({
 
 
 def empty_state():
-    return {"dismissed": {}, "open": {}, "reviewed_against": {}}
+    return {"dismissed": {}, "open": {}}
 
 
 def target_of(f):
@@ -141,17 +141,13 @@ def update_open(state, findings, new_tag):
 
 
 def bases_from_state(state, order):
-    """target -> version tag to measure from. `order` lists the tracked version
-    tags oldest first; tags this tracker does not know are ignored. A recorded
-    review (reviewed_against) wins; otherwise the oldest base any open finding
-    on that target was measured from."""
+    """target -> version tag to measure from: the oldest base any open finding on
+    that target was measured from. `order` lists the tracked version tags oldest
+    first; tags this tracker does not know are ignored."""
     pos = {t: i for i, t in enumerate(order)}
     bases = {}
     for entry in state.get("open", {}).values():
         t, b = entry.get("target"), entry.get("base")
         if t and b in pos and (t not in bases or pos[b] < pos[bases[t]]):
-            bases[t] = b
-    for t, b in state.get("reviewed_against", {}).items():
-        if b in pos:
             bases[t] = b
     return bases

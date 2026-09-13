@@ -1,7 +1,7 @@
 """The --display desktop app: run the audits, read the findings and act on them
 with buttons.
 
-Runs, snapshots, fork-point saves and orphaned-record removal call the command
+Runs, snapshots and orphaned-record removal call the command
 line in a background process, so they behave exactly as they do in a terminal.
 A run writes its findings to results.json in the per-user data folder, and the
 window reads them back. Dismiss and Restore change the findings record
@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import (QEvent, QPoint, QPointF, QProcess, QProcessEnvironment,
-                            QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, Signal)
+                            QPropertyAnimation, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics, QIcon, QPainter,
                            QPainterPath, QPalette, QPen, QPixmap)
 from PySide6.QtSvg import QSvgRenderer
@@ -52,12 +52,16 @@ TINT = {"stale": QColor(255, 154, 82, 43), "review": QColor(245, 214, 92, 36)}
 # so script coloured like the severity (orange keys on an orange row) stays readable.
 EMPH = {"stale": QColor(255, 255, 255, 34), "review": QColor(255, 255, 255, 34)}
 # Gutter characters say what happened to a line; the bar and tint say how urgent it is.
-SIGN = {"-": "−", "+": "+", "~": "~"}
-SIGN_MEANING = {"-": "yours, vanilla changed or deleted it",
-                "+": "vanilla's, missing from yours",
-                "~": "see its note"}
+SIGN = {"-": "−", "+": "+"}
+SIGN_MEANING = {"-": "vanilla removed this line",
+                "+": "vanilla added this line"}
 
 SANS, MONO = "Segoe UI", "Consolas"
+
+
+def _settings():
+    """The app's remembered preferences, kept per user by Qt."""
+    return QSettings("pdx-audit", "pdx-audit")
 _fonts_loaded = False
 
 ICONS = {
@@ -1124,10 +1128,9 @@ class MainWindow(QMainWindow):
         title.setStyleSheet(f"color: {C['text2']}; font-weight: 600; font-size: 11.5px;")
         lh.addWidget(title)
         self.legend_labels, self.sign_labels = {}, {}
-        for sev, text in (("stale", "vanilla changed this, your block doesn't have the change"),
-                          ("review", "you and vanilla both changed it")):
-            lab = QLabel(f'<span style="color:{C[sev]}; font-weight:700;">▍</span>'
-                         f'<span style="color:{C[sev]};">{sev}</span> · {_esc(text)}')
+        for sev, text in (("stale", "vanilla changed a block you also edited"),
+                          ("review", "vanilla changed a block you didn't edit")):
+            lab = QLabel(f'<span style="color:{C[sev]}; font-weight:700;">▍</span>&nbsp;{_esc(text)}')
             lab.setStyleSheet(f"color: {C['muted']}; font-size: 11.5px;")
             self.legend_labels[sev] = lab
             lh.addWidget(lab)
@@ -1139,6 +1142,17 @@ class MainWindow(QMainWindow):
             lh.addWidget(lab)
         lh.addStretch(1)
         v.addWidget(self.legend)
+
+        self.source_bar = QFrame(objectName="legend")
+        sh = QHBoxLayout(self.source_bar)
+        sh.setContentsMargins(22, 8, 22, 8)
+        self.expand_sources = QCheckBox("Expand source code")
+        self.expand_sources.setChecked(_settings().value("expand_sources", True, type=bool))
+        self.expand_sources.toggled.connect(self._expand_sources_toggled)
+        sh.addWidget(self.expand_sources)
+        sh.addStretch(1)
+        self.source_bar.hide()
+        v.addWidget(self.source_bar)
 
         self.body = QStackedWidget()
         self.block_view = BlockView()
@@ -1249,15 +1263,6 @@ class MainWindow(QMainWindow):
         self.snapshot_button.clicked.connect(self.take_snapshot)
         tv.addWidget(self.snapshot_button, 0, Qt.AlignmentFlag.AlignRight)
         side.addWidget(take)
-
-        fork, fv = self._card("GUI fork points", "Save the vanilla version each GUI copy was last synced "
-                                                 "to, so later runs measure from it.")
-        self.refresh_box = QCheckBox("Also update fork points already saved")
-        fv.addWidget(self.refresh_box)
-        self.fork_button = QPushButton("Save fork points")
-        self.fork_button.clicked.connect(self.save_fork_points)
-        fv.addWidget(self.fork_button, 0, Qt.AlignmentFlag.AlignRight)
-        side.addWidget(fork)
 
         orphans, ov = self._card("Orphaned records", "Findings records whose commit is on no branch of "
                                                     "this repository, for example after a rebase or a "
@@ -1483,7 +1488,7 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy, text=None):
         for w in (self.run_button, self.run_arrow, self.restore_button, self.snapshot_button,
-                  self.fork_button, self.orphan_button):
+                  self.orphan_button):
             w.setEnabled(not busy)
         self.stop_button.setVisible(busy)
         self.busy_bar.setVisible(busy)
@@ -1826,6 +1831,7 @@ class MainWindow(QMainWindow):
 
     def _show_record(self, rec, group=None):
         self.current = rec
+        self.source_bar.hide()
         if rec is None:
             self.meta_label.setText("")
             self.meta_id.setText("")
@@ -1864,20 +1870,16 @@ class MainWindow(QMainWindow):
             self.vanilla_label.setText(vanilla)
 
         if block is not None:
-            rows, footer = results.block_rows(self.payload, rec)
-            self.block_view.set_rows(rows, footer, rec["fid"])
-            self._show_legend(rows)
-            self.body.setCurrentWidget(self.block_view)
-            self.info.clear()
-        elif (rec.get("data") or {}).get("patch"):
-            rows = results.gui_rows(rec)
-            self.block_view.set_rows(rows, [], None)
+            rows = results.block_rows(block)
+            self.block_view.set_rows(rows, [], rec["fid"])
             self._show_legend(rows)
             self.body.setCurrentWidget(self.block_view)
             self.info.clear()
         elif (rec.get("data") or {}).get("sources"):
-            self.block_view.set_rows(results.source_rows(rec, self.mod_root), [], None)
+            self.block_view.set_rows(results.source_rows(rec, self.mod_root, self.expand_sources.isChecked()),
+                                     [], None)
             self.legend.hide()
+            self.source_bar.show()
             self.body.setCurrentWidget(self.block_view)
             self.info.clear()
         else:
@@ -1892,6 +1894,11 @@ class MainWindow(QMainWindow):
         self.dismiss_note.setText("" if rec["dismissible"] else
                                   "Duplicate definitions cannot be dismissed; fix them in the mod.")
         self._update_dismiss_state()
+
+    def _expand_sources_toggled(self, on):
+        _settings().setValue("expand_sources", on)
+        if self.current is not None:
+            self._show_record(self.current)
 
     def _show_legend(self, rows):
         """The legend lists only the marks and signs the block shows."""
@@ -1954,12 +1961,6 @@ class MainWindow(QMainWindow):
                 out.append(f'<p style="margin:0; padding:1px 8px; white-space:pre; {mono} color:{C["text"]};">'
                            f'{_esc(item)}</p>')
 
-        defs = data.get("defs") or {}
-        for key, title in (("changed", "Definitions vanilla changed"), ("added", "Definitions vanilla added"),
-                           ("removed", "Definitions vanilla removed")):
-            if defs.get(key):
-                heading(title)
-                lines(defs[key])
         if rec["audit"] == "dupes" and rec["detail"]:
             heading("Defined at")
             lines(rec["detail"].split("; "))
@@ -2036,17 +2037,6 @@ class MainWindow(QMainWindow):
                                                 self.snap_game.text() or str(Path.home()))
         if path:
             self.snap_game.setText(path)
-
-    def save_fork_points(self):
-        argv = ["--stamp-fork-points"] + (["--refresh"] if self.refresh_box.isChecked() else [])
-        self._start(argv, self._fork_points_done, "Detecting fork points…")
-
-    def _fork_points_done(self, code):
-        self.refresh_store_views()
-        if code != 0:
-            self._job_failed(f"Fork points were not saved: {self.last_line}")
-            return
-        self._status(self.last_line or "Fork points saved.")
 
     def remove_orphans(self):
         self.refresh_store_views(then=self._confirm_orphan_removal)

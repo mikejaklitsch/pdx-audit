@@ -4,10 +4,13 @@ from pdxaudit.report import Finding, render_triage
 from pdxaudit import ledger
 
 
-def _f(kind="override_replace_frozen", name="blk", loc="m.txt:1", detail="d",
+def _key(yours="cost = 1", vanilla="cost = 2", name="blk"):
+    return {"target": f"override:cat/{name}", "path": [], "yours": yours, "vanilla": vanilla}
+
+
+def _f(kind="override_vanilla_changed_mid", name="blk", loc="m.txt:1", detail="d",
        key=None, since=None, base=None):
-    key = key if key is not None else {"target": f"override:cat/{name}", "slot": "cost",
-                                       "old": "1", "new": "2", "mod": "1"}
+    key = key if key is not None else _key(name=name)
     return Finding(kind, name, loc, detail, None, key, since, base)
 
 
@@ -22,8 +25,8 @@ def test_fingerprint_ignores_location_and_detail():
 
 def test_fingerprint_changes_when_a_value_changes():
     a = _f()
-    b = _f(key={"target": "override:cat/blk", "slot": "cost", "old": "1", "new": "3", "mod": "1"})
-    c = _f(key={"target": "override:cat/blk", "slot": "cost", "old": "1", "new": "2", "mod": "5"})
+    b = _f(key=_key(vanilla="cost = 3"))
+    c = _f(key=_key(yours="cost = 5"))
     assert len({ledger.finding_id(x) for x in (a, b, c)}) == 3
 
 
@@ -49,7 +52,7 @@ def test_dismissed_finding_returns_when_value_changes():
     state = ledger.empty_state()
     f = _f()
     ledger.dismiss(state, [f], [ledger.finding_id(f)], None, "2026-09-12")
-    changed = _f(key={"target": "override:cat/blk", "slot": "cost", "old": "1", "new": "4", "mod": "1"})
+    changed = _f(key=_key(vanilla="cost = 4"))
     visible, hidden = ledger.split_dismissed([changed], state)
     assert visible == [changed] and hidden == 0
 
@@ -98,23 +101,20 @@ def test_open_findings_keep_first_seen_since_and_close_when_gone():
 
 def test_open_findings_default_since_is_new_tag_and_info_is_skipped():
     state = ledger.empty_state()
-    info = _f(kind="override_replace_merged", name="i")
+    info = _f(kind="override_inject_context", name="i")
     act = _f(name="a")
     ledger.update_open(state, [info, act], "1.3.11")
     assert list(state["open"]) == [ledger.finding_id(act)]
     assert state["open"][ledger.finding_id(act)]["since"] == "1.3.11"
 
 
-def test_bases_prefer_recorded_review_then_oldest_open_base():
+def test_bases_are_the_oldest_open_base_the_tracker_knows():
     state = ledger.empty_state()
-    state["reviewed_against"]["override:cat/r"] = "1.3.10"
-    state["open"]["1"] = {"target": "override:cat/o", "base": "1.3.8"}
-    state["open"]["2"] = {"target": "override:cat/o", "base": "1.3.4"}
-    state["open"]["3"] = {"target": "override:cat/r", "base": "1.2.0"}
+    state["open"]["1"] = {"target": "loc:english/A", "base": "1.3.8"}
+    state["open"]["2"] = {"target": "loc:english/A", "base": "1.3.4"}
+    state["open"]["3"] = {"target": "loc:english/B", "base": "0.9"}
     order = ["1.2.0", "1.3.4", "1.3.8", "1.3.10", "1.3.11"]   # oldest first
-    bases = ledger.bases_from_state(state, order)
-    assert bases["override:cat/r"] == "1.3.10"
-    assert bases["override:cat/o"] == "1.3.4"
+    assert ledger.bases_from_state(state, order) == {"loc:english/A": "1.3.4"}
 
 
 # --- triage rendering -------------------------------------------------------

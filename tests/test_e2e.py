@@ -1,6 +1,7 @@
 """End-to-end tests against a synthetic tracker (see the `world` fixture):
 the git layer plus each audit, driven the way the CLI drives them."""
 import io
+import types
 from contextlib import redirect_stdout
 
 from pdxaudit.tracker import get_commits, resolve_ref
@@ -30,7 +31,7 @@ def test_override_audit_flags_stale_replace(world):
     # vanilla added `upkeep = 5` and dropped `legacy_mod`; the mod's REPLACE
     # lacks the first and still carries the second
     assert "some_building" in out
-    assert "2 stale REPLACE lines" in out
+    assert "2 REPLACE changes to take or check" in out
     assert "upkeep = 5" in out and "legacy_mod = 1" in out
 
 
@@ -55,9 +56,9 @@ def test_deps_audit_flags_dropped_reference(world):
 def test_gui_audit_flags_stale_shadow(world):
     out = _out(run_gui_audit, world.mod, world.repo,
                world.old, "1.0.0", world.new, "1.1.0", world.args)
-    # vanilla changed template `foo`; the mod's shadow copy is behind
+    # vanilla changed template `foo`; the mod's shadow copy lacks the change
     assert "foo" in out
-    assert "1 shadowed definitions drifted" in out
+    assert "1 changes in 1 shadowed definitions" in out
 
 
 def test_loc_audit_flags_changed_string(world):
@@ -70,8 +71,9 @@ def test_loc_audit_flags_changed_string(world):
 
 
 def test_clean_when_mod_matches_new_vanilla(world):
-    # point old and new at the same commit: nothing changed underneath -> no findings
+    # a window of the new version alone has no history to attribute changes with
+    args = types.SimpleNamespace(**dict(vars(world.args), full=False, old="1.1.0"))
     out = _out(run_override_audit, world.mod, world.repo,
-               world.new, "1.1.0", world.new, "1.1.0", world.args)
+               world.new, "1.1.0", world.new, "1.1.0", args)
     assert "unique overrides scanned" in out
     assert "Action needed" not in out

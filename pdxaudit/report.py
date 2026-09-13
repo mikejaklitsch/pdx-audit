@@ -6,6 +6,8 @@ import sys
 import difflib
 from collections import namedtuple
 
+from .diff3 import CONFLICT_KINDS, VANILLA_KINDS
+
 def diff_lines(old_text, new_text, label="block"):
     if old_text is None:
         return [f"+++ (new block, did not exist in old vanilla)\n"]
@@ -78,10 +80,8 @@ _SEV_HEAD = {
 Finding = namedtuple("Finding", "kind name location detail data key since base")
 Finding.__new__.__defaults__ = ("", None, None, None, None)
 
-_BEHIND_FIX = "merge vanilla's change into your copy"
-
 # kind -> (severity, audit_tag, plural_label, shared_fix). The label reads after
-# a count ("3 values your REPLACE ..."); the fix is stated once for the class.
+# a count ("3 statements vanilla added ..."); the fix is stated once for the class.
 KIND = {
     "dupes_multiple_sources": (
         SEV_BROKEN, "dupes", "names defined or overridden in more than one place in the mod",
@@ -95,39 +95,62 @@ KIND = {
     "override_orphaned": (
         SEV_BROKEN, "override", "override targets a block vanilla no longer defines",
         "remove the override, or point it at the block vanilla replaced it with"),
-    "override_replace_frozen": (
-        SEV_STALE, "override", "values your REPLACE keeps at vanilla's old value after vanilla changed them",
-        "take vanilla's new value, or dismiss the finding if keeping the old one is deliberate"),
-    "override_replace_new_line": (
-        SEV_STALE, "override", "lines vanilla added that your REPLACE lacks",
-        "copy the line into your block, or dismiss the finding if leaving it out is deliberate"),
-    "override_replace_kept_removed": (
-        SEV_STALE, "override", "lines vanilla deleted that your REPLACE still carries unchanged",
-        "delete the line, or dismiss the finding if keeping it is deliberate"),
-    "gui_shadow_stale": (
-        SEV_STALE, "gui", "shadowed GUI definitions vanilla changed in this patch that your copy lacks",
-        _BEHIND_FIX),
-    "gui_shadow_behind": (
-        SEV_STALE, "gui", "shadowed GUI definitions still behind vanilla from an earlier patch",
-        _BEHIND_FIX),
-    "gui_file_replaced": (
-        SEV_STALE, "gui", "whole-file GUI replacements where vanilla changed the file in this patch",
-        "reconcile the changed definitions listed in the GUI detail"),
-    "gui_file_behind": (
-        SEV_STALE, "gui", "whole-file GUI replacements still behind vanilla from an earlier patch",
-        "reconcile the changed definitions listed in the GUI detail"),
+    "override_unreadable": (
+        SEV_BROKEN, "override", "REPLACE blocks whose braces never close",
+        "close the block so the game and the audit can read it"),
+}
+
+# Changes a copy lacks or conflicts with (see diff3). A vanilla change is high where
+# the block holding it also holds an edit of yours, and mid otherwise.
+_TAKE = "take vanilla's new value, or dismiss the finding if keeping the old one is deliberate"
+_ADD = "copy the statement in, or dismiss the finding if leaving it out is deliberate"
+_DELETE = "delete the statement, or dismiss the finding if keeping it is deliberate"
+_CHECK = "check your change still makes sense against vanilla's"
+_RESTORE = "check whether vanilla's new version belongs back in your copy"
+_BLOCK = "take vanilla's changes to the block, or dismiss the finding if keeping yours is deliberate"
+KIND.update({
+    "gui_block_changed_high": (
+        SEV_STALE, "gui", "GUI blocks vanilla changed in several places, beside or over an edit of yours", _BLOCK),
+    "gui_block_changed_mid": (
+        SEV_REVIEW, "gui", "GUI blocks vanilla changed in several places", _BLOCK),
+    "gui_vanilla_changed_high": (
+        SEV_STALE, "gui", "statements your GUI copy keeps at an old vanilla value, beside an edit of yours", _TAKE),
+    "gui_vanilla_added_high": (
+        SEV_STALE, "gui", "statements vanilla added that your GUI copy lacks, beside an edit of yours", _ADD),
+    "gui_vanilla_removed_high": (
+        SEV_STALE, "gui", "statements vanilla deleted that your GUI copy still carries, beside an edit of yours",
+        _DELETE),
+    "gui_both_changed_high": (
+        SEV_STALE, "gui", "statements you changed in your GUI copy that vanilla also changed or deleted", _CHECK),
+    "gui_removed_changed_high": (
+        SEV_STALE, "gui", "statements you deleted from your GUI copy that vanilla has since changed", _RESTORE),
+    "override_vanilla_changed_high": (
+        SEV_STALE, "override", "statements your REPLACE keeps at an old vanilla value, beside an edit of yours",
+        _TAKE),
+    "override_vanilla_added_high": (
+        SEV_STALE, "override", "statements vanilla added that your REPLACE lacks, beside an edit of yours", _ADD),
+    "override_vanilla_removed_high": (
+        SEV_STALE, "override", "statements vanilla deleted that your REPLACE still carries, beside an edit of yours",
+        _DELETE),
+    "override_both_changed_high": (
+        SEV_STALE, "override", "statements you changed in your REPLACE that vanilla also changed or deleted", _CHECK),
+    "override_removed_changed_high": (
+        SEV_STALE, "override", "statements you deleted from your REPLACE that vanilla has since changed", _RESTORE),
+    "gui_vanilla_changed_mid": (
+        SEV_REVIEW, "gui", "statements your GUI copy keeps at an old vanilla value", _TAKE),
+    "gui_vanilla_added_mid": (
+        SEV_REVIEW, "gui", "statements vanilla added that your GUI copy lacks", _ADD),
+    "gui_vanilla_removed_mid": (
+        SEV_REVIEW, "gui", "statements vanilla deleted that your GUI copy still carries", _DELETE),
+    "override_vanilla_changed_mid": (
+        SEV_REVIEW, "override", "statements your REPLACE keeps at an old vanilla value", _TAKE),
+    "override_vanilla_added_mid": (
+        SEV_REVIEW, "override", "statements vanilla added that your REPLACE lacks", _ADD),
+    "override_vanilla_removed_mid": (
+        SEV_REVIEW, "override", "statements vanilla deleted that your REPLACE still carries", _DELETE),
     "loc_changed": (
         SEV_STALE, "loc", "loc keys vanilla reworded that your override masks",
         "update your override to match, or drop it if the rewording matters"),
-    "override_replace_both_changed": (
-        SEV_REVIEW, "override", "values you customized that vanilla also changed",
-        "check your value still makes sense against vanilla's new one"),
-    "override_replace_unclassified": (
-        SEV_REVIEW, "override", "REPLACE changes that could not be matched line by line",
-        "compare your block against vanilla by hand"),
-    "gui_partial_adoption": (
-        SEV_REVIEW, "gui", "GUI copies where an earlier vanilla patch was only partly adopted",
-        "check the lines from that patch your copy lacks"),
     "override_inject_overlap": (
         SEV_REVIEW, "override", "INJECT targets where vanilla also changed a key you inject at the top level",
         "check whether your injected key now duplicates or conflicts with vanilla's"),
@@ -161,13 +184,9 @@ KIND = {
     # informational: counted, never listed
     "override_inject_context": (SEV_INFO, "override", "", ""),
     "override_nonblock": (SEV_INFO, "override", "", ""),
-    "override_replace_merged": (SEV_INFO, "override", "", ""),
-    "override_replace_commented_out": (SEV_INFO, "override", "", ""),
-    "override_replace_key_removed": (SEV_INFO, "override", "", ""),
-    "gui_reconciled": (SEV_INFO, "gui", "", ""),
     "dupes_file_override_drops": (SEV_INFO, "dupes", "", ""),
-}
-_KIND_ORDER = list(KIND)
+})
+_KIND_ORDER = sorted(KIND, key=lambda k: _SEV_ORDER.index(KIND[k][0]))
 
 _AUDIT_NAME = {"overrides": "override", "deps": "dependency",
                "gui": "GUI", "loc": "localization", "dupes": "duplicate"}
@@ -177,92 +196,42 @@ def finding_severity(f):
     return KIND[f.kind][0]
 
 
-# REPLACE line findings, shown as a labelled `yours:` / `vanilla:` pair.
-LINE_KINDS = {
-    "override_replace_frozen": "frozen",
-    "override_replace_new_line": "new_line",
-    "override_replace_kept_removed": "kept_removed",
-    "override_replace_both_changed": "both_changed",
-    "override_replace_unclassified": "unclassified",
-    "override_replace_merged": "merged",
-    "override_replace_commented_out": "commented_out",
-    "override_replace_key_removed": "key_removed",
-}
+def change_kind(kind):
+    """The diff3 change kind a finding kind was made from, or None."""
+    for change in VANILLA_KINDS + CONFLICT_KINDS:
+        if kind.endswith((f"_{change}_high", f"_{change}_mid")):
+            return change
+    return None
 
 
-def format_value_lines(cls, slot, old, new, mod, ops, text, since, indent="      "):
-    """Two aligned lines comparing your value with vanilla's change:
-        yours:    <your value>
-        vanilla:  <old>  →  <new>  (<patch>)"""
-    yours, vanilla = value_pair(cls, slot, old, new, mod, ops, text, since)
-    return [f"{indent}yours:    {yours}", f"{indent}vanilla:  {vanilla}"]
+def brief(text, width=120):
+    """One statement's text for a terminal line, cut at `width` characters."""
+    return text if len(text) <= width else text[:width - 1] + "…"
 
 
-def value_pair(cls, slot, old, new, mod, ops, text, since):
-    """(yours, vanilla) texts for one REPLACE line finding. Operators are shown
-    only when they differ between the versions."""
-    old_op, new_op, mod_op = (list(ops or []) + [None, None, None])[:3]
-    show_ops = len({o for o in (old_op, new_op, mod_op) if o}) > 1
+def value_pair(change, yours, vanilla, since):
+    """(yours, vanilla) texts for one change: your statement, and what vanilla did."""
     tag = f"  ({since})" if since else ""
-
-    def val(op, v):
-        return f"{op} {v}" if show_ops and op else str(v)
-
-    def stmt(op, v):
-        if slot in (None, "", "@item"):
-            return val(op, v)
-        return f"{slot} {op or '='} {v}"
-
-    if old is None and new is None:          # a whole sub-block
-        if cls == "new_line":
-            yours, vanilla = "(missing)", f"added {text}{tag}"
-        elif cls == "kept_removed":
-            yours, vanilla = text, f"deleted{tag}"
-        else:
-            yours, vanilla = f"**{text}**", f"deleted{tag}"
-    elif cls == "frozen":
-        yours, vanilla = val(mod_op, mod), f"{val(old_op, old)}  →  {val(new_op, new)}{tag}"
-    elif cls == "both_changed":
-        yours = f"**{val(mod_op, mod)}**" if mod is not None else "(missing)"
-        if old is not None and new is not None:
-            vanilla = f"{val(old_op, old)}  →  {val(new_op, new)}{tag}"
-        elif new is not None:
-            vanilla = f"added {val(new_op, new)}{tag}"
-        else:
-            vanilla = f"deleted {val(old_op, old)}{tag}"
-    elif cls == "new_line":
-        yours, vanilla = "(missing)", f"added {stmt(new_op, new)}{tag}"
-    elif cls == "kept_removed":
-        shown = mod if mod is not None else old
-        yours, vanilla = stmt(mod_op or old_op, shown), f"deleted{tag}"
-    elif cls == "unclassified":
-        yours, vanilla = "(repeated key, could not be matched)", f"added {stmt(new_op, new)}{tag}"
-    elif cls == "merged":
-        yours = val(mod_op, mod) if mod is not None else stmt(new_op, new)
-        vanilla = (f"{val(old_op, old)}  →  {val(new_op, new)}{tag}" if old is not None
-                   else f"added {stmt(new_op, new)}{tag}")
-    elif cls == "commented_out":
-        yours, vanilla = "(commented out)", f"added {stmt(new_op, new)}{tag}"
-    else:                                     # key_removed
-        yours, vanilla = "(removed)", f"{val(old_op, old)}  →  {val(new_op, new)}{tag}"
-    return yours, vanilla
+    yours = brief(yours) if yours is not None else None
+    vanilla = brief(vanilla) if vanilla is not None else None
+    if change == "vanilla_changed":
+        return yours, f"{yours}  →  {vanilla}{tag}"
+    if change == "vanilla_added":
+        return "(missing)", f"added {vanilla}{tag}"
+    if change == "vanilla_removed":
+        return yours, f"deleted{tag}"
+    if change == "both_changed":
+        return f"**{yours}**", (f"changed to {vanilla}{tag}" if vanilla is not None else f"deleted{tag}")
+    return "(removed)", f"changed to {vanilla}{tag}"
 
 
 def line_label(key):
-    """'path > key' for a REPLACE line finding's key dict ('' for a single value)."""
-    path = " > ".join(key.get("path") or [])
-    slot = key.get("slot")
-    if slot in (None, ""):
-        return path
-    if slot == "@item":
-        return f"{path} (list member)" if path else "(list member)"
-    return f"{path} > {slot}" if path else slot
+    """'a > b' for the blocks holding a change ('' at the top)."""
+    return " > ".join(key.get("path") or [])
 
 
 def _is_value_finding(f):
-    k = f.key or {}
-    return f.kind in LINE_KINDS and "slot" in k and (
-        k.get("old") is not None or k.get("new") is not None or k.get("text"))
+    return change_kind(f.kind) is not None and "yours" in (f.key or {})
 
 
 def render_triage(findings, old_msg, new_msg, selected, detail_shown=True,
@@ -333,9 +302,8 @@ def render_triage(findings, old_msg, new_msg, selected, detail_shown=True,
                         k = f.key
                         label = line_label(k)
                         lines.append(f"  - {fid}`{f.name}`{loc}" + (f" {label}" if label else ""))
-                        lines.extend(format_value_lines(
-                            LINE_KINDS[f.kind], k.get("slot"), k.get("old"), k.get("new"),
-                            k.get("mod"), k.get("ops"), k.get("text"), f.since))
+                        yours, vanilla = value_pair(change_kind(f.kind), k["yours"], k["vanilla"], f.since)
+                        lines.extend([f"      yours:    {yours}", f"      vanilla:  {vanilla}"])
                         continue
                     bits = [b for b in (f.detail, f"since {f.since}" if show_since else "") if b]
                     extra = f" ({'; '.join(bits)})" if bits else ""
@@ -446,8 +414,9 @@ def _render_value_line(m):
     elif "  →  " in rest:
         old, new = rest.rsplit("  →  ", 1)
         body = _wrap(("dim",), old) + _wrap(("dim",), "  →  ") + _wrap(("green",), new)
-    elif rest.startswith("added "):
-        body = _wrap(("dim",), "added ") + _wrap(("green",), rest[len("added "):])
+    elif rest.startswith(("added ", "changed to ")):
+        verb = "added " if rest.startswith("added ") else "changed to "
+        body = _wrap(("dim",), verb) + _wrap(("green",), rest[len(verb):])
     else:
         body = _wrap(("dim",), rest)
     return indent + _wrap(("dim",), label) + gap + body + tag

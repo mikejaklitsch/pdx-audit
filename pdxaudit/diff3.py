@@ -257,7 +257,13 @@ def distance(mine, theirs):
 def baseline(mod_text, versions, unwrap=False):
     """Index of the tracked version the copy differs from least, or None when
     vanilla has no version of the text. Among equals the oldest wins: a newer
-    version is the baseline only when the copy fits it strictly better."""
+    version is the baseline only when the copy fits it strictly better. A run
+    computes each copy's baseline once."""
+    return session.memo(("diff3.baseline", mod_text, tuple(versions), unwrap),
+                        lambda: _baseline(mod_text, versions, unwrap))
+
+
+def _baseline(mod_text, versions, unwrap):
     view = (lambda t: body(nodes(t))) if unwrap else nodes
     mine, best, costs = view(mod_text), None, {}
     for k, text in enumerate(versions):

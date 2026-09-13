@@ -6,7 +6,7 @@ import io
 import re
 from contextlib import redirect_stdout
 
-from pdxaudit.report import (Finding, render_triage, finding_severity, SEV_INFO, KIND)
+from pdxaudit.report import Finding, render_triage, KIND, SEV_REVIEW, SEV_STALE
 from pdxaudit.overrides import run_override_audit, run_deps_audit
 from pdxaudit.gui import run_gui_audit
 from pdxaudit.loc import run_loc_audit
@@ -20,28 +20,39 @@ def _run(fn, *a):
     return findings, buf.getvalue()
 
 
+# --- the class registry -----------------------------------------------------
+
+def test_change_classes_follow_priority():
+    for audit in ("gui", "override"):
+        for change in ("vanilla_changed", "vanilla_added", "vanilla_removed"):
+            assert KIND[f"{audit}_{change}_high"][0] == SEV_STALE
+            assert KIND[f"{audit}_{change}_mid"][0] == SEV_REVIEW
+        for change in ("both_changed", "removed_changed"):
+            assert KIND[f"{audit}_{change}_high"][0] == SEV_STALE
+            assert f"{audit}_{change}_mid" not in KIND
+
+
 # --- render_triage (pure) ---------------------------------------------------
 
-def _k(name):
-    return {"target": f"override:cat/{name}", "slot": "cost"}
+def _change(name, kind="override_vanilla_changed_mid", loc="m/a.txt:1", yours="cost = 1",
+            vanilla="cost = 2", since="1.3.8", path=()):
+    key = {"target": f"override:cat/{name}", "path": list(path), "yours": yours, "vanilla": vanilla}
+    return Finding(kind, name, loc, " > ".join(path), None, key, since)
 
 
 def test_render_triage_states_each_class_fix_once():
     fs = [
-        Finding("override_replace_frozen", "A", "m/a.txt:1", "", None, _k("A")),
-        Finding("override_replace_frozen", "B", "m/b.txt:2", "", None, _k("B")),
+        _change("A", loc="m/a.txt:1"),
+        _change("B", loc="m/b.txt:2"),
         Finding("deps_ref_dropped", "x", "r.txt:3", "dropped in 1.1", None, {"target": "deps:x"}),
     ]
     out = render_triage(fs, "1.0.0", "1.1.0", ["overrides", "deps"])
     assert "3 findings need attention" in out
-    # the class is described once with a single shared Fix line for both items
-    assert "2 values your REPLACE keeps at vanilla's old value" in out
+    assert "2 statements your REPLACE keeps at an old vanilla value" in out
     assert out.count("Fix: take vanilla's new value") == 1
     assert re.search(r"- \[[0-9a-f]{8}\] `A` `m/a.txt:1`", out)
     assert re.search(r"- \[[0-9a-f]{8}\] `B` `m/b.txt:2`", out)
-    # most urgent class first; closer points at the top tier present
-    assert out.index("values your REPLACE") < out.index("references")
-    assert "Open the stale items first" in out
+    assert "Open the review items first" in out
 
 
 def test_render_triage_lists_per_item_detail_for_flat_classes():
@@ -53,23 +64,16 @@ def test_render_triage_lists_per_item_detail_for_flat_classes():
 
 
 def test_render_triage_clean_when_nothing_actionable():
-    out = render_triage([Finding("gui_reconciled", "z", "f:3")],
-                        "1.0.0", "1.1.0", ["gui"])
+    out = render_triage([Finding("override_inject_context", "z", "f:3")],
+                        "1.0.0", "1.1.0", ["overrides"])
     assert "No action needed" in out
     assert "Fix:" not in out
 
 
 def test_render_triage_summary_mode_points_away_from_detail():
-    out = render_triage([Finding("override_replace_frozen", "x", "m/x.txt:1")],
-                        "", "", ["overrides"], detail_shown=False)
+    out = render_triage([_change("x")], "", "", ["overrides"], detail_shown=False)
     assert "without --summary" in out
     assert "follows below" not in out
-
-
-def _line_finding(kind, old, new, mod, since="1.3.8", path=(), slot="requires", ops=("=", "=", "=")):
-    key = {"target": "override:cat/blast_furnace", "path": list(path), "slot": slot,
-           "op": "=", "ops": list(ops), "old": old, "new": new, "mod": mod}
-    return Finding(kind, "blast_furnace", "m.txt:1", "detail", None, key, since)
 
 
 def _value_lines(out):
@@ -79,43 +83,35 @@ def _value_lines(out):
 
 
 def test_triage_shows_values_on_labelled_aligned_lines():
-    f = _line_finding("override_replace_frozen", "rgo_size_advance_absolutism",
-                      "construction_speed_absolutism", "rgo_size_advance_absolutism")
+    f = _change("blast_furnace", "override_vanilla_changed_high", yours="requires = a",
+                vanilla="requires = b", path=("unlock",))
     out = render_triage([f], "", "1.3.11 Pavia", ["overrides"], new_tag="1.3.11")
+    assert "`blast_furnace` `m/a.txt:1` unlock" in out
     yours, vanilla = _value_lines(out)
-    assert yours.strip() == "yours:    rgo_size_advance_absolutism"
-    assert vanilla.strip() == ("vanilla:  rgo_size_advance_absolutism  →  "
-                               "construction_speed_absolutism  (1.3.8)")
-    assert yours.index("rgo_size") == vanilla.index("rgo_size")      # value column aligned
-    assert "(detail)" not in out
+    assert yours.strip() == "yours:    requires = a"
+    assert vanilla.strip() == "vanilla:  requires = a  →  requires = b  (1.3.8)"
+    assert yours.index("requires") == vanilla.index("requires")      # value column aligned
 
 
-def test_triage_value_lines_per_class():
+def test_triage_value_lines_per_change():
     cases = {
-        ("override_replace_both_changed", "50", "200", "25"): ("**25**", "50  →  200  (1.3.8)"),
-        ("override_replace_new_line", None, "5", None): ("(missing)", "added upkeep = 5  (1.3.8)"),
-        ("override_replace_kept_removed", "1", None, "1"): ("upkeep = 1", "deleted  (1.3.8)"),
+        ("override_both_changed_high", "gold = 25", "gold = 200"): ("**gold = 25**", "changed to gold = 200  (1.3.8)"),
+        ("override_both_changed_high", "gold = 25", None): ("**gold = 25**", "deleted  (1.3.8)"),
+        ("override_vanilla_added_mid", None, "upkeep = 5"): ("(missing)", "added upkeep = 5  (1.3.8)"),
+        ("override_vanilla_removed_mid", "upkeep = 1", None): ("upkeep = 1", "deleted  (1.3.8)"),
+        ("override_removed_changed_high", None, "upkeep = 2"): ("(removed)", "changed to upkeep = 2  (1.3.8)"),
     }
-    for (kind, old, new, mod), (want_yours, want_vanilla) in cases.items():
-        f = _line_finding(kind, old, new, mod, slot="upkeep" if kind != "override_replace_both_changed" else "gold")
-        out = render_triage([f], "", "1.3.11 Pavia", ["overrides"], new_tag="1.3.11")
-        yours, vanilla = _value_lines(out)
-        assert yours.strip() == f"yours:    {want_yours}", kind
-        assert vanilla.strip() == f"vanilla:  {want_vanilla}", kind
-
-
-def test_triage_value_lines_show_operators_when_they_differ():
-    f = _line_finding("override_replace_frozen", "culture:x", "culture:x", "culture:x",
-                      slot="culture", ops=("=", "?=", "="))
-    out = render_triage([f], "", "1.3.11 Pavia", ["overrides"], new_tag="1.3.11")
-    yours, vanilla = _value_lines(out)
-    assert yours.strip() == "yours:    = culture:x"
-    assert vanilla.strip() == "vanilla:  = culture:x  →  ?= culture:x  (1.3.8)"
+    for (kind, yours, vanilla), (want_yours, want_vanilla) in cases.items():
+        out = render_triage([_change("b", kind, yours=yours, vanilla=vanilla)], "", "1.3.11 Pavia",
+                            ["overrides"], new_tag="1.3.11")
+        got_yours, got_vanilla = _value_lines(out)
+        assert got_yours.strip() == f"yours:    {want_yours}", kind
+        assert got_vanilla.strip() == f"vanilla:  {want_vanilla}", kind
 
 
 def test_triage_prints_the_dismiss_command_with_a_real_id():
     from pdxaudit.ledger import finding_id, short_id
-    f = _line_finding("override_replace_frozen", "a", "b", "a")
+    f = _change("a")
     out = render_triage([f], "", "1.3.11 Pavia", ["overrides"], new_tag="1.3.11")
     sid = short_id(finding_id(f))
     assert f'pdx-audit --dismiss {sid} --reason "why"' in out
@@ -141,13 +137,13 @@ def test_no_kind_suggests_renames():
 def test_gui_audit_does_not_flag_load_order(world):
     # zzz_mod.gui sorts after vanilla.gui, but a mod loads after vanilla and
     # overrides it regardless of filename, so this is NOT a problem. `bar` is
-    # unchanged, so it yields no finding; `foo` drifted, so it is stale.
+    # unchanged, so it yields no finding; `foo` lacks vanilla's change.
     findings, out = _run(run_gui_audit, world.mod, world.repo,
                          world.old, "1.0.0", world.new, "1.1.0", world.args)
     assert not any(f.kind == "gui_dead_shadow" for f in findings)
     assert "never apply" not in out and "load order" not in out.lower()
-    assert any(f.kind == "gui_shadow_stale" and f.name == "foo" for f in findings)
-    assert not any(f.name == "bar" for f in findings)   # unchanged shadow, no finding
+    assert any(f.kind == "gui_vanilla_changed_mid" and f.name == "foo" for f in findings)
+    assert not any(f.name == "bar" for f in findings)
 
 
 def test_override_audit_compares_unchanged_script_value_quietly(world):
@@ -159,12 +155,11 @@ def test_override_audit_compares_unchanged_script_value_quietly(world):
     assert "Not Found in Vanilla" not in out
 
 
-def test_override_audit_stale_replace_lines_are_stale_classes(world):
+def test_override_audit_reports_the_replaces_missing_changes(world):
     findings, _ = _run(run_override_audit, world.mod, world.repo,
                        world.old, "1.0.0", world.new, "1.1.0", world.args)
     kinds = {f.kind for f in findings if f.name == "some_building"}
-    assert "override_replace_new_line" in kinds        # upkeep = 5
-    assert "override_replace_kept_removed" in kinds    # legacy_mod = 1
+    assert kinds == {"override_vanilla_added_mid", "override_vanilla_removed_mid"}
 
 
 def test_loc_audit_returns_changed_class(world):

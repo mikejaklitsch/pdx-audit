@@ -7,17 +7,17 @@ A technical walkthrough of what the tool does behind the scenes. The README cove
 1. [The problem being solved](#1-the-problem-being-solved)
 2. [The vanilla tracker](#2-the-vanilla-tracker)
 3. [The override surface](#3-the-override-surface)
-4. [The three-way comparison](#4-the-three-way-comparison)
+4. [Comparing a copy with vanilla's history](#4-comparing-a-copy-with-vanillas-history)
 5. [Override audit](#5-override-audit)
 6. [Dependency audit](#6-dependency-audit)
 7. [Localization audit](#7-localization-audit)
 8. [GUI audit](#8-gui-audit)
-9. [Baselines and adoption](#9-baselines-and-adoption)
+9. [Baselines and attribution](#9-baselines-and-attribution)
 10. [Findings records](#10-findings-records)
 11. [Duplicate audit](#11-duplicate-audit)
 12. [Caching](#12-caching)
 13. [Deletion safety](#13-deletion-safety)
-14. [Baseline selection reference](#14-baseline-selection-reference)
+14. [Version window reference](#14-version-window-reference)
 
 ---
 
@@ -52,7 +52,7 @@ On every run a sample of live game files, from localization, `gui`, and the `com
 
 Two terms used throughout:
 
-- **old / new**: the audit window. By default `new` is the newest snapshot and `old` is the one before it (the last patch). `--old`, `--new` and `--full` move them; `--old` must be older than `--new`.
+- **old / new**: the audit window. `new` is the newest snapshot unless `--new` moves it. The override and GUI audits compare REPLACE blocks and GUI copies with every snapshot from `old` through `new`, where `old` is the oldest snapshot unless `--old` moves it. The dependency, localization and INJECT checks use the snapshot before `new` as `old`, unless `--old` or `--full` moves it. `--old` must be older than `--new`.
 - **version tag**: the first word of a snapshot's commit message (`1.3.10`). Records store tags, never tracker commit hashes, because every user builds their own tracker.
 
 ---
@@ -72,62 +72,73 @@ In GUI files the override is implicit: if the mod defines a `template` or `type`
 
 ---
 
-## 4. The three-way comparison
+## 4. Comparing a copy with vanilla's history
 
-The naive way to flag drift is: "did vanilla's version change?" That fires whenever vanilla changed anything, even something your override already accounts for or deliberately does differently. For a REPLACE the right question is: **for each thing vanilla changed, what did your copy do with the same thing?**
+A REPLACE block, a shadowed GUI definition and a replaced GUI file are all a **copy**: vanilla text taken at some game version and then edited. For each difference between your copy and vanilla's newest text, pdx-audit works out **who made it**.
 
-pdx-audit parses three texts, vanilla before (the baseline, section 9), your copy, and vanilla after, into statements keyed by **(key path, key)**. `cost = 100` inside `modifier = { ... }` becomes the value `100` at key `cost` under path `modifier`. Because values are matched by key and path, position inside the block never matters, and formatting (indentation, brace packing, `0.10` versus `0.1`) is normalized away. Operators are part of the statement, so `gold > 100` and `religion ?= x` are compared like `cost = 100`.
+### Lining up statements
 
-Each vanilla change is then classified:
+The copy and vanilla's newest text are parsed into statements: `key = value`, a block, or a run of bare values such as `0.0 0.0 0.0 1.0`. Sibling statements pair in order, trying in turn:
 
-| Class | Vanilla before → after | Your copy | Severity |
-|-------|------------------------|-----------|----------|
-| frozen | `cost = 100` → `cost = 200` | `cost = 100` | stale |
-| new vanilla line | (none) → `upkeep = 5` | no `upkeep` | stale |
-| kept removed line | `legacy = 1` → (none) | `legacy = 1` | stale |
-| both changed | `cost = 50` → `cost = 200` | `cost = 25` | review |
-| commented out | (none) → `trade_income = 0.1` | `#trade_income = 0.1` | informational |
-| key removed | `cost = 1` → `cost = 2` | no `cost` | informational |
-| already merged | `cost = 100` → `cost = 200` | `cost = 200` | informational |
-| unclassified | a changed value among repeated keys | | review |
+1. the same statement;
+2. the same key (a block that sets `name = "..."` is known by that name first, then by its key alone);
+3. the same distinctive quoted value under another key, such as vanilla moving `onpressed = "[OnPause]"` to `on_action = "[OnPause]"`.
 
-The stale classes are what a REPLACE hides by accident: you never touched the value (frozen), you never saw the line (new), or you still carry something the game deleted without changing it. **Both changed** is where you customized the value and vanilla changed it too, so the report shows all three values and a human decides; your "half the cost" may now be an eighth. The informational classes are choices you already made and are counted, not listed.
+What is still unpaired pairs by key out of order, so a moved block still pairs. Paired blocks are compared the same way inside. Layout, comments and the spelling of numbers (`0.10` versus `0.1`) never count as a difference. Repeated statements in one block, such as list members, compare as a multiset, so their order never matters. A REPLACE block is compared by its contents, since its own key (`REPLACE:some_block`) differs from vanilla's.
 
-Two structural rules keep the list short:
+### Attributing each difference
 
-- **Repeated keys compare as a set.** List members such as `religion ?= a religion ?= b` or bare tokens `{ A B C }` are compared as multisets, so order never matters and a new member is one new line. A changed value among repeated keys cannot be matched to its old value and is unclassified.
-- **Whole sub-blocks are one finding.** A sub-block vanilla added that your copy lacks entirely is one "new vanilla line" (`modifier = { … } (3 lines)`), not one per inner line. Likewise a deleted sub-block you still carry unchanged is one kept removed line.
+Each difference is looked up in vanilla's tracked history at the same place: the keys of the enclosing blocks plus the statement's own key. The copy's **baseline** (section 9) decides whether vanilla made a change before or after the copy was taken.
 
-### Containment, for GUI copies
+| Change | Meaning | Priority |
+|--------|---------|----------|
+| vanilla changed | your value is one vanilla had at this place; vanilla has changed it | high or mid |
+| vanilla added | vanilla added the statement after the block existed; your copy lacks it | high or mid |
+| vanilla removed | your copy carries a statement vanilla had here and has deleted | high or mid |
+| both changed | vanilla changed a statement you changed too, or deleted one you changed, after your baseline | high |
+| removed changed | vanilla changed a statement you deleted, after your baseline | high |
+| your edit | vanilla never touched the statement, or touched it at or before your baseline | info |
 
-GUI definitions are not key/value data in the same sense, so the GUI audit uses **containment**: diff vanilla's baseline against vanilla's new text, then report added statements your copy lacks (missing) and removed statements your copy still carries (kept). Both texts are read as statements with the parser the pdx tools share: each `key = value`, each block opening, and each run of bare values such as `color = { 0.0 0.0 0.0 1.0 }` is one entry however it is laid out. Line breaks, indentation, brace placement and comments never read as drift, and your own extra statements are ignored.
+A vanilla change is **high** when the block holding it also holds an edit of yours, since the two compete, and **mid** otherwise. A copy still holding an old vanilla value, or a statement vanilla deleted, is flagged whatever its baseline, since that is vanilla's text and not an edit; so is vanilla's deleted text inside a block only your copy has. A block of your own wrapped around vanilla's statements moves them to a different place, so they are not linked to vanilla's history there.
+
+For example, suppose vanilla's history of a block reads:
+
+```
+1.0:   cost = 100
+1.1:   cost = 200   upkeep = 5
+```
+
+and your copy reads `cost = 100` plus `custom = yes`. The baseline is 1.0. `cost` is a vanilla change (you still hold 1.0's value), `upkeep` is a vanilla addition, and `custom` is your edit. Because your edit sits in the same block, both vanilla changes are high.
+
+### Findings
+
+Every high or mid change is one finding of kind `<audit>_<change>_<priority>`, such as `override_vanilla_added_mid` or `gui_both_changed_high`. In a GUI copy, the changes vanilla made inside one block are one finding instead: a change joins the outermost block above it in an unbroken run of blocks that each hold a change of their own, and a block holding several changes is one `gui_block_changed_<priority>` finding, high when any of its changes is high. High is **stale** and mid is **review** in the summary. Your edits are counted only as the absence of findings.
+
+A finding records its location (the line of your statement, or for a statement only vanilla has, the line it follows in your copy), `since` (the patch in which vanilla made the change) and `base` (the version your copy matches). Its key holds the target, the enclosing keys, and both sides' text with layout collapsed, so a dismissal holds until either side's text changes (section 10).
+
+History that starts after your copy was made cannot tell your edits from vanilla's earlier ones: a difference older than the oldest tracked version reads as yours.
 
 ---
 
 ## 5. Override audit
 
-For each unique `INJECT`/`REPLACE`/`TRY_*` directive:
+For each unique `INJECT`/`REPLACE`/`TRY_*` directive, the audit reads vanilla's top-level block of the same name in the same folder.
 
-1. Pick the baseline (section 9) and look up the target block there and at the new version.
-2. Branch on what exists where:
+**REPLACE blocks.** The block is read at every snapshot in the window (section 2):
 
-| baseline | new | meaning | reported as |
-|----------|-----|---------|-------------|
-| yes | yes, same after normalization | vanilla left it alone | unchanged |
-| yes | yes, different | vanilla changed it | three-way classification (REPLACE) or injection-point check (INJECT) |
-| yes | no | vanilla removed the target | **orphaned override** (broken) |
-| no | yes | vanilla added a block you already replace | three-way against an empty baseline |
-| no | no | not a top-level block | single value, nested name, or absent (below) |
+| vanilla's block | meaning | reported as |
+|-----------------|---------|-------------|
+| in the newest snapshot | compared with its history | one finding per change (section 4) |
+| in an earlier snapshot only | vanilla removed the target | **orphaned override** (broken), with the patch that removed it |
+| in no snapshot | not a top-level block | single value, nested name, or absent (below) |
 
-**Single-value REPLACEs.** `REPLACE:levy_size = 0.02` has no block. The audit reads vanilla's top-level `name = value` statements at the baseline and the new version and classifies the value like one statement: frozen, both changed, already merged, or kept removed. Names that exist in vanilla only nested somewhere are reported informationally as a matcher limit; names that exist nowhere are reported as absent.
+A REPLACE whose braces never close cannot be read and is reported as broken.
 
-**INJECT.** An INJECT adds direct children to vanilla's block, so only vanilla's top-level children can collide with it. When vanilla added, removed or changed a top-level key that the INJECT also adds, it is reported for review; otherwise the injection still lands the same way and the change is informational.
+**Single-value REPLACEs.** `REPLACE:levy_size = 0.02` has no block. The audit reads vanilla's top-level `name = value` statement at every snapshot in the window and compares `levy_size = 0.02` with them the same way as a block. Names that exist in vanilla only nested somewhere are reported informationally as a matcher limit; names that exist nowhere are reported as absent.
 
-**TRY_ directives.** A `TRY_` target absent from both versions is listed as expected. A target that existed at the baseline and vanilla removed is orphaned like any other.
+**INJECT.** An INJECT adds direct children to vanilla's block, so only vanilla's top-level children can collide with it. The audit compares vanilla's block at the window's old version, or at the base of an open finding for the target (section 10), with the new version. Blocks that read the same statement for statement are unchanged. When vanilla added, removed or changed a top-level key that the INJECT also adds, it is reported for review; otherwise the injection still lands the same way and the change is informational. A target present at the old version and gone at the new one is orphaned.
 
-**Baselines for REPLACE blocks.** Adoption (section 9) is scored with the three-way classes rather than raw lines: a vanilla patch counts as adopted only where the block already merged it, commented the line out, or removed the key. A value you customized that vanilla also changed is not adoption, so the baseline never moves past it and the **both changed** finding keeps being reported until you dismiss it. REPLACE blocks get no partial-adoption findings.
-
-Each finding records `since`, the first patch after the baseline in which vanilla's block changed, so the summary can separate this patch's work from older drift.
+**TRY_ directives.** A `TRY_` target absent from every version is listed as expected. A target that existed and vanilla removed is orphaned like any other.
 
 ---
 
@@ -170,44 +181,36 @@ The baseline is the window's old version, except for a key with an open finding 
 
 ## 8. GUI audit
 
-Run with `--gui`. GUI overrides are implicit (section 3), so this pass has two jobs.
+Run with `--gui`. GUI overrides are implicit (section 3), so this pass has two jobs. Both read vanilla's GUI files at every snapshot in the window (section 2).
 
 ### Path A: shadowed definitions
 
-The mod defines a `template` or `type` whose name also exists in vanilla. The audit finds these by name, picks each copy's baseline (section 9), and runs containment (section 4) between the baseline and the new version. A copy missing vanilla's change is stale; one already carrying it is reconciled and only counted.
+The mod defines a `template` or `type` whose name also exists in vanilla. The copy is the definition's text, and vanilla's history is its definition of the same name at each snapshot. Each copy vanilla still defines is compared with that history (section 4), giving one finding per change.
 
-A stale definition whose vanilla text changed in the audited patch is reported as **changed in this patch**. One that is stale only because of an earlier patch after its baseline is reported as **still behind from an earlier patch**, with the patch it came from.
+Two cases are also reported on their own:
+
+- **New collision.** Vanilla added the name in the newest version. It is reported for that patch, and the copy is compared with vanilla's history like any other.
+- **Removed from vanilla.** Vanilla defined the name earlier in the window and no longer does, so your copy is now the only definition.
 
 ### Path B: same-path file replacements
 
-The mod ships a `.gui` file at the same path as a vanilla file, replacing it whole. Here containment does not help: your file is rebuilt by design, so "is your file missing a line vanilla added?" is true for many lines on purpose. For a whole replaced file the question is textual: **did vanilla's version of this file change between the baseline and now?** That makes the baseline decisive, which is why adoption-based baselines matter most here. The report lists the definitions vanilla changed, added or removed inside the file.
+The mod ships a `.gui` file at the same path as a vanilla file, replacing it whole. The copy is the whole file, and vanilla's history is its file at each snapshot, compared statement by statement like a definition. Definitions inside such a file are audited here, not as shadows. A file vanilla added in the newest version, or removed within the window, is also reported for review.
 
 ---
 
-## 9. Baselines and adoption
+## 9. Baselines and attribution
 
-A copy's **baseline** is the vanilla version it was last synced to. Measuring from there reports only what vanilla changed afterwards, instead of everything since the oldest snapshot. For each REPLACE block, shadowed GUI definition and replaced GUI file, the baseline is chosen in this order:
+A copy's **baseline** is the tracked version it differs from least. The distance to a version counts the statements that differ: each statement only one side has counts its size, and each lined-up pair that reads differently counts one (a pair of blocks, the statements differing inside). Among equally close versions the oldest wins, so a newer version is the baseline only when the copy fits it strictly better.
 
-1. **Recorded.** A version saved in the findings record for this target: `--stamp-fork-points` saves GUI fork points, and an open finding remembers the version it was measured from.
-2. **Detected.** The newest vanilla patch the copy adopted, found by adoption (below).
-3. **Window.** Otherwise, the audit window's old version.
+The baseline decides one question: whether vanilla made a change before or after the copy was taken.
 
-### Adoption
+- A change vanilla made **after** the baseline to a statement you also changed or deleted is a conflict (both changed, removed changed).
+- A change vanilla made **at or before** the baseline was visible when the copy was taken, so a different value there is your edit.
+- Vanilla's own text left in your copy (an old value, a deleted statement) is flagged whatever the baseline.
 
-Walk vanilla's text for the target from the oldest snapshot to the new version. At each patch where vanilla's normalized text changed, compare that patch against the copy:
+`since` is the version in which vanilla made the change: the version after the newest one that still had your value, or the version where vanilla's current statement first appeared in a block that already existed. History is read from the start of the text's latest unbroken run of versions, so a block vanilla removed and later re-added is measured from its return.
 
-- added lines the copy contains count as adopted;
-- removed lines the copy no longer has count as adopted;
-- brace-only lines are ignored, and a "removed" line still present elsewhere in vanilla's new text is a move, not a removal.
-
-The score is adopted lines divided by changed lines. A patch scoring at least **0.5** is adopted, and the baseline is the newest adopted patch. This is robust to the things that broke the older "closest snapshot" guess: indentation and brace packing are normalized (GUI copies compare statements, as in section 4, so a vanilla patch that only re-lays-out a block is not a change), the copy's own extra lines do not count against any version, and a few deliberately omitted lines still leave the patch adopted.
-
-Two refinements:
-
-- **Small patches cannot set the baseline on their own.** A patch with fewer than 3 changed lines only moves the baseline when the patch before it was also adopted (or it is the first change), so a one-line coincidence does not pull the baseline forward.
-- **Partial adoption is reported for GUI copies.** An adopted patch of at least 3 changed lines, at or before the baseline, that scored below **0.75** gets a review finding such as `1.3.0: 49/83 of vanilla's changed lines adopted`, because the lines the copy lacks from it are not measured again. REPLACE blocks score adoption with the three-way classes instead (section 5) and get no partial findings.
-
-When no patch was adopted, the copy may have been rewritten beyond recognition, so the audit falls back to the window's old version rather than reporting vanilla's entire history.
+Because findings come from vanilla's whole history in the window rather than from the last patch, a change stays reported until you take it or dismiss it, however many snapshots follow. `--old` shortens the history: with a window of a single version there is nothing to attribute changes with, and every difference reads as yours.
 
 ---
 
@@ -223,11 +226,10 @@ pdx-audit keeps a record per mod and commit in the per-user data folder, never i
 
 The mod id comes from `.metadata/metadata.json`; an id that is not a safe folder name is refused and records are disabled for that run.
 
-A record holds three maps:
+A record holds two maps:
 
 - `dismissed`: finding id → what was dismissed, when, and an optional reason;
-- `open`: finding id → the finding, the patch it came from (`since`) and the version it was measured from (`base`);
-- `reviewed_against`: target → the version saved by `--stamp-fork-points`.
+- `open`: finding id → the finding, the patch it came from (`since`) and the version it was measured from (`base`).
 
 ### Reading and writing
 
@@ -240,13 +242,13 @@ A run lists HEAD's first-parent history (`git rev-list --first-parent HEAD`) and
 
 ### Finding ids
 
-A finding's id is the SHA-1 of its kind plus its **key**: the target (for example `override:in_game/common/building_types/some_building`) and, for a line finding, the key path, the key, and vanilla's old value, vanilla's new value and yours. Line numbers, detail text and tracker hashes are never part of it. The summary shows the first 8 characters, which `--dismiss` accepts (an ambiguous prefix is an error).
+A finding's id is the SHA-1 of its kind plus its **key**: the target (for example `override:in_game/common/building_types/some_building`) and, for a change to a copy, the enclosing keys plus your statement's text and vanilla's, each with layout collapsed. Line numbers, detail text and tracker hashes are never part of it. The summary shows the first 8 characters, which `--dismiss` accepts (an ambiguous prefix is an error).
 
-Because the id is content, a dismissal applies only while the facts are the same. When vanilla changes the value again or you change yours, the id changes and the finding comes back. Duplicate definitions cannot be dismissed.
+Because the id is content, a dismissal applies only while the facts are the same. When vanilla changes its statement again or you change yours, the id changes and the finding comes back. Duplicate definitions cannot be dismissed.
 
 ### Open findings and carry-forward
 
-Default runs (no `--old`, `--new`, `--full`, `--block` or `--category`) replace the `open` map with this run's actionable, undismissed findings, keeping the `since` and `base` of any finding that was already open. Findings no longer produced are closed. On the next run, the base of an open finding feeds baseline selection (section 9) and the localization audit (section 7), so drift keeps being reported until it is fixed or dismissed, even after the window moves past its patch. The summary lists these under **Still open from earlier patches**.
+Default runs (no `--old`, `--new`, `--full`, `--block` or `--category`) replace the `open` map with this run's actionable, undismissed findings, keeping the `since` and `base` of any finding that was already open. Findings no longer produced are closed. On the next run, the base of an open finding feeds the localization audit (section 7) and the INJECT check (section 5), so drift keeps being reported until it is fixed or dismissed, even after the window moves past its patch. REPLACE blocks and GUI copies read vanilla's whole history in the window (section 9), so their findings carry forward without it. The summary lists findings from before the newest patch under **Still open from earlier patches**.
 
 ### Orphaned records
 
@@ -276,7 +278,7 @@ Only the newest snapshot is needed, and its definition index is cached. Duplicat
 
 ## 12. Caching
 
-Baseline detection reads parsed indexes at every tracked snapshot, not just two, so each is cached on disk under `<vanilla-tracker>/cache/`, keyed by the commit's full hash: block indexes, GUI indexes, vocabularies, and the duplicate audit's definition index.
+The override and GUI audits read parsed indexes at every snapshot in their window, not just two, so each is cached on disk under `<vanilla-tracker>/cache/`, keyed by the commit's full hash: block indexes, GUI indexes, vocabularies, and the duplicate audit's definition index.
 
 - A commit's content is immutable, so a cache entry for a given hash is never stale.
 - A version number in the file name (`gui-v1-...`) lets a parser change retire old entries.
@@ -284,7 +286,7 @@ Baseline detection reads parsed indexes at every tracked snapshot, not just two,
 
 The first run after a new snapshot pays to read that snapshot once; every run after is served from cache.
 
-Within a single run, the audits also share their work. The mod's module-root folders are listed once, each mod file is read once, each commit hash is resolved once, and each distinct vanilla text is normalized and parsed once, no matter how many audits or snapshots use it. The localization audit is not cached on disk. It reads only the vanilla `.yml` files in the languages the mod defines, in tree order so the first file defining a key still wins, and parses each distinct file once, so the old and new versions share every file vanilla left unchanged. Nothing is shared between runs, so edits to the mod between runs are always seen.
+Within a single run, the audits also share their work. The mod's module-root folders are listed once, each mod file is read once, each commit hash is resolved once, and each distinct vanilla text is parsed once, no matter how many audits or snapshots use it. The localization audit is not cached on disk. It reads only the vanilla `.yml` files in the languages the mod defines, in tree order so the first file defining a key still wins, and parses each distinct file once, so the old and new versions share every file vanilla left unchanged. Nothing is shared between runs, so edits to the mod between runs are always seen.
 
 ---
 
@@ -302,16 +304,16 @@ Anything else raises and leaves the target alone, so a malformed or hallucinated
 
 ---
 
-## 14. Baseline selection reference
+## 14. Version window reference
 
-| Invocation | Baseline for REPLACE blocks and GUI copies | Records updated |
-|------------|--------------------------------------------|-----------------|
-| `pdx-audit` | recorded, else detected by adoption, else the last patch | yes |
-| `pdx-audit --full` | the oldest snapshot, fixed for everything | dismissals only |
-| `pdx-audit --old X --new Y` | version X, fixed | dismissals only |
-| `pdx-audit --block B` / `--category C` | as the default | dismissals only |
+| Invocation | Versions for REPLACE blocks and GUI copies | Window for the other audits | Records updated |
+|------------|--------------------------------------------|-----------------------------|-----------------|
+| `pdx-audit` | every snapshot up to the newest | the last patch, or an open finding's base | yes |
+| `pdx-audit --full` | every snapshot up to the newest | the oldest snapshot to the newest | dismissals only |
+| `pdx-audit --old X --new Y` | X through Y | X to Y | dismissals only |
+| `pdx-audit --block B` / `--category C` | as the default | as the default | dismissals only |
 
-`new` is the newest snapshot unless `--new` overrides it. Dismissals always apply; open findings are only rewritten by default runs, so a filtered or fixed-window run never closes findings it did not look at.
+Dismissals always apply; open findings are only rewritten by default runs, so a filtered or fixed-window run never closes findings it did not look at.
 
 ---
 

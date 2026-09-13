@@ -13,7 +13,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
-from pdxaudit import results  # noqa: E402
+from pdxaudit import ledger, results  # noqa: E402
 from pdxaudit.report import Finding  # noqa: E402
 
 
@@ -30,7 +30,10 @@ def _settle(win, timeout=10):
 @pytest.fixture
 def window(world, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    from pdxaudit import app as appmod
     from pdxaudit.app import MainWindow
+    ini = str(tmp_path / "settings.ini")
+    monkeypatch.setattr(appmod, "_settings", lambda: appmod.QSettings(ini, appmod.QSettings.Format.IniFormat))
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     win = MainWindow(world.mod, world.repo, {}, autorun=False)
     _settle(win)
@@ -40,22 +43,23 @@ def window(world, tmp_path, monkeypatch):
     app.processEvents()
 
 
-BLOCK = {"type": "REPLACE", "vanilla_file": "in_game/common/building_types/b.txt", "diff": "",
-         "n_add": 1, "n_rem": 0, "missing": ["upkeep = 5"], "kept": [], "overlap": [], "lines": [],
-         "patch": [{"t": "REPLACE:some_building = {", "c": "context"},
-                   {"t": "\tcost = 100", "c": "context"},
-                   {"t": "\tupkeep = 5", "c": "add"},
-                   {"t": "}", "c": "context"}],
-         "absent": [], "removed_note": []}
+def _change(finding, **kw):
+    return dict({"kind": "vanilla_added", "mark": "stale", "fid": ledger.finding_id(finding),
+                 "since": finding.since, "first": None, "last": None, "cols": None, "anchor": None,
+                 "inside": False, "vanilla": None}, **kw)
 
 
 def _findings(since="1.1.0"):
     key = {"target": "override:in_game/common/building_types/some_building", "path": [],
-           "slot": "upkeep", "op": "=", "old": None, "new": "5", "mod": None,
-           "ops": [None, "=", None]}
+           "yours": None, "vanilla": "upkeep = 5"}
+    added = Finding("override_vanilla_added_high", "some_building",
+                    "in_game/common/building_types/m.txt:2", "", None, key, since, "1.0.0")
+    block = {"type": "REPLACE", "file": "in_game/common/building_types/m.txt", "line": 1,
+             "vanilla_file": "in_game/common/building_types/b.txt",
+             "lines": ["REPLACE:some_building = {", "\tcost = 100", "}"],
+             "changes": [_change(added, anchor=2, vanilla="upkeep = 5")]}
     return [
-        Finding("override_replace_new_line", "some_building",
-                "in_game/common/building_types/m.txt:1", "upkeep = 5", BLOCK, key, since, "1.0.0"),
+        added._replace(data=block),
         Finding("dupes_multiple_sources", "dup_thing", "in_game/common/buildings/dup1.txt:1",
                 "definition at in_game/common/buildings/dup1.txt:1; "
                 "definition at in_game/common/buildings/dup2.txt:1",
@@ -92,29 +96,32 @@ def test_lists_findings_and_shows_the_block(window):
     assert "cannot be dismissed" in window.detail_text()
 
 
-def test_each_duplicate_definition_opens_to_show_its_block(window):
+def test_each_duplicate_definition_shows_its_block_open_unless_expanding_is_off(window):
     window.show_results(_payload(_findings()))
     dupe = next(r for r in window.listed_records() if r["name"] == "dup_thing")
     window.select_record(dupe)
     view = window.block_view
-    assert view.visible_texts() == ["definition · in_game/common/buildings/dup1.txt:1",
-                                    "definition · in_game/common/buildings/dup2.txt:1"]
-    view.toggle(1)
-    assert view.visible_texts() == ["definition · in_game/common/buildings/dup1.txt:1",
-                                    "definition · in_game/common/buildings/dup2.txt:1",
-                                    "dup_thing = {", "\tcost = 2", "}"]
+    heads = ["definition · in_game/common/buildings/dup1.txt:1",
+             "definition · in_game/common/buildings/dup2.txt:1"]
+    both = [heads[0], "dup_thing = {", "\tcost = 1", "}", heads[1], "dup_thing = {", "\tcost = 2", "}"]
+    assert window.expand_sources.isChecked() and view.visible_texts() == both
     view.toggle(1)
     assert "\tcost = 2" not in view.visible_texts()
+    window.expand_sources.setChecked(False)
+    assert window.block_view.visible_texts() == heads
+    window.expand_sources.setChecked(True)
+    assert window.block_view.visible_texts() == both
 
 
 def test_a_gui_finding_shows_its_definition_with_indentation(window):
-    gui = Finding("gui_shadow_stale", "foo", "in_game/gui/aaa_mod.gui:1", "1 missing, 1 removed lines kept",
-                  {"patch": [{"t": "template foo = {", "c": "context"},
-                             {"t": "\tsize = { 10 10 }", "c": "changed", "e": [[10, 15]]},
-                             {"t": "\tsize = { 20 20 }", "c": "new", "e": [[10, 15]]},
-                             {"t": "}", "c": "context"}],
-                   "vanilla_file": "in_game/gui/vanilla.gui"},
-                  {"target": "gui:in_game/template/foo", "gap": "x"}, "1.1.0", "1.0.0")
+    gui = Finding("gui_vanilla_changed_high", "foo", "in_game/gui/aaa_mod.gui:2", "foo > size", None,
+                  {"target": "gui:in_game/template/foo", "path": ["foo", "size"],
+                   "yours": "size = { 10 10 }", "vanilla": "size = { 20 20 }"}, "1.1.0", "1.0.0")
+    gui = gui._replace(data={"type": None, "file": "in_game/gui/aaa_mod.gui", "line": 1,
+                             "vanilla_file": "in_game/gui/vanilla.gui",
+                             "lines": ["template foo = {", "\tsize = { 10 10 }", "}"],
+                             "changes": [_change(gui, kind="vanilla_changed", first=2, last=2, cols=[1, 17],
+                                                 vanilla="size = { 20 20 }")]})
     window.show_results(_payload(_findings() + [gui]))
     window.select_record(next(r for r in window.listed_records() if r["name"] == "foo"))
     view = window.block_view
@@ -199,7 +206,10 @@ def test_run_menu_offers_the_mods_categories_and_blocks(window):
 
 def test_the_window_opens_before_the_mods_overrides_are_read(world, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    from pdxaudit import app as appmod
     from pdxaudit.app import MainWindow
+    ini = str(tmp_path / "settings.ini")
+    monkeypatch.setattr(appmod, "_settings", lambda: appmod.QSettings(ini, appmod.QSettings.Format.IniFormat))
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     release = threading.Event()
     scan = results.override_targets

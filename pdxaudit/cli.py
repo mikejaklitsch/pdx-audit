@@ -4,18 +4,17 @@ Five audits (name one or more to run just those, or none to run all five), all
 driven by the vanilla-tracker bare git repo:
 
   Override audit (--overrides): finds every INJECT:/REPLACE:/TRY_INJECT:/
-  TRY_REPLACE: directive in the mod and compares each changed REPLACE with
-  vanilla three ways (vanilla before, your copy, vanilla after), so values you
-  froze at vanilla's old value, lines vanilla added, values you customized that
-  vanilla also changed, and deliberate removals are told apart.
+  TRY_REPLACE: directive in the mod and compares each REPLACE with vanilla's
+  tracked versions of its block, so a change vanilla made that your copy lacks is
+  told apart from your own edits and from a change that meets one of them.
 
   Dependency audit (--deps): flags names the mod uses (keys it writes and names
   it references) that vanilla used at some tracked version but no longer uses,
   with the patch that dropped them.
 
   GUI audit (--gui): finds mod .gui templates/types that shadow vanilla's and
-  mod .gui files that replace a vanilla file, detects which vanilla version
-  each copy was taken from, and reports vanilla changes the copy lacks.
+  mod .gui files that replace a vanilla file, and compares each copy with
+  vanilla's tracked versions the same way.
 
   Localization audit (--loc): loc keys the mod redefines whose vanilla value
   changed or was removed.
@@ -24,7 +23,7 @@ driven by the vanilla-tracker bare git repo:
   or overridden in more than one place, define keys set twice, GUI definitions
   defined twice, and plain redefinitions of vanilla names outside vanilla's file.
 
-Findings records (dismissals, open findings, reviewed versions) are kept in the
+Findings records (dismissals and open findings) are kept in the
 per-user data folder, keyed by the mod id and commit; pdx-audit never writes
 into the mod.
 """
@@ -39,7 +38,7 @@ from contextlib import redirect_stdout
 
 from . import ledger, session
 from .dupes import run_dupes_audit
-from .gui import run_gui_audit, run_stamp_fork_points
+from .gui import run_gui_audit
 from .loc import run_loc_audit
 from .overrides import run_deps_audit, run_override_audit
 from .report import ColorWriter, color_enabled, render_triage
@@ -50,7 +49,7 @@ from .tracker import do_snapshot, find_mod_root, find_vanilla_repo, get_commits,
 ALL_AUDITS = ["overrides", "deps", "gui", "loc", "dupes"]
 # Commands that do their own thing and exit; the --display app has a button for each.
 APP_COMMANDS = ("dismiss", "undismiss", "show_dismissed", "remove_orphaned_records",
-                "stamp_fork_points", "snapshot", "list_commits", "results_file")
+                "snapshot", "list_commits", "results_file")
 
 
 def _usage_error(msg):
@@ -92,13 +91,7 @@ def build_parser():
     ap.add_argument("--dupes", action="store_true",
                     help="Duplicate audit: one source of truth per definition")
     ap.add_argument("--full", action="store_true",
-                    help="Fixed window from the oldest tracked commit to new")
-    ap.add_argument("--stamp-fork-points", action="store_true",
-                    help="Detect each GUI copy's fork point and save it in this "
-                         "mod's findings record (never writes to the mod)")
-    ap.add_argument("--refresh", action="store_true",
-                    help="With --stamp-fork-points, also update fork points "
-                         "already saved")
+                    help="Compare every audit from the oldest tracked snapshot to new")
     ap.add_argument("--dismiss", nargs="+", metavar="ID",
                     help="Dismiss current findings by the id shown in the summary")
     ap.add_argument("--reason", metavar="TEXT",
@@ -118,7 +111,8 @@ def build_parser():
                     help="Filter to a specific category directory "
                          "(with --overrides and/or --dupes only)")
     ap.add_argument("--old",
-                    help="Old vanilla version tag or commit (default: second-most-recent)")
+                    help="Old vanilla version tag or commit (default: the oldest snapshot for "
+                         "the override and GUI audits, the second-most-recent for the others)")
     ap.add_argument("--new",
                     help="New vanilla version tag or commit (default: most-recent)")
     ap.add_argument("--list-commits", action="store_true",
@@ -179,8 +173,6 @@ def _main():
         _usage_error("--force only works together with --remove-orphaned-records")
     if args.reason and not args.dismiss:
         _usage_error("--reason only works together with --dismiss")
-    if args.refresh and not args.stamp_fork_points:
-        _usage_error("--refresh only works together with --stamp-fork-points")
     if args.display:
         clash = [f"--{c.replace('_', '-')}" for c in APP_COMMANDS if getattr(args, c)]
         if clash:
@@ -198,7 +190,7 @@ def _main():
     mod_root = find_mod_root(args.mod_root)
     store, store_err = open_store(mod_root)
     needs_store = (args.dismiss or args.undismiss or args.show_dismissed
-                   or args.remove_orphaned_records or args.stamp_fork_points or args.display)
+                   or args.remove_orphaned_records or args.display)
     if store is None:
         if needs_store:
             print(f"Error: {store_err}", file=sys.stderr)
@@ -240,10 +232,6 @@ def _main():
         print("Available vanilla-tracker commits:")
         for h, msg in commits:
             print(f"  {h}  {msg}")
-        sys.exit(0)
-
-    if args.stamp_fork_points:
-        run_stamp_fork_points(mod_root, vanilla_repo, commits, store, refresh=args.refresh)
         sys.exit(0)
 
     if len(commits) < 2:

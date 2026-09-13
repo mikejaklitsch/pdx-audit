@@ -1,0 +1,102 @@
+"""The override audit on diff3: each REPLACE block is compared with vanilla's
+tracked versions of it, single-value REPLACEs likewise, and INJECT targets keep
+their injection-point check."""
+import io
+from contextlib import redirect_stdout
+
+from conftest import _write_tree, audit_args, build_tracker, make_ctx
+from pdxaudit import results
+from pdxaudit.overrides import run_override_audit
+
+TARGET = "override:in_game/common/building_types/some_building"
+
+
+def _run(world, args=None, old=None, mod=None):
+    with redirect_stdout(io.StringIO()) as buf:
+        findings = run_override_audit(mod or world.mod, world.repo, old or world.old, "1.0.0 Test",
+                                      world.new, "1.1.0 Test", args or audit_args(),
+                                      make_ctx(world.repo, "1.1.0"))
+    return findings, buf.getvalue()
+
+
+def test_each_vanilla_change_the_replace_lacks_is_one_finding(world):
+    findings, out = _run(world)
+    assert sorted((f.kind, f.location, f.key["yours"], f.key["vanilla"]) for f in findings) == [
+        ("override_vanilla_added_mid", "in_game/common/building_types/m.txt:2", None, "upkeep = 5"),
+        ("override_vanilla_removed_mid", "in_game/common/building_types/m.txt:3", "legacy_mod = 1", None)]
+    assert all(f.key["target"] == TARGET and f.since == "1.1.0" and f.base == "1.0.0" for f in findings)
+    assert "vanilla:  added upkeep = 5  (1.1.0)" in out and "2 REPLACE changes to take or check" in out
+
+
+def test_your_edit_raises_vanilla_changes_in_its_block_and_is_not_a_finding(world):
+    (world.mod / "in_game/common/building_types/m.txt").write_text(
+        "REPLACE:some_building = {\n\tcost = 150\n\tlegacy_mod = 1\n}\n")
+    findings, out = _run(world)
+    assert sorted(f.kind for f in findings) == ["override_vanilla_added_high", "override_vanilla_removed_high"]
+    assert out.index("high priority") < out.index("legacy_mod")
+
+
+def test_the_window_starts_at_old_when_it_is_given(world):
+    findings, out = _run(world, audit_args(old="1.1.0"), old=world.new)
+    assert findings == [] and "All overrides are current with vanilla" in out
+
+
+def test_single_value_replace_compares_the_statement(tmp_path):
+    sv = "in_game/common/script_values/v.txt"
+    tr = build_tracker(tmp_path, [("1.0", {sv: "my_value = 5\n"}), ("1.1", {sv: "my_value = 7\n"})])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}',
+                      "in_game/common/script_values/m.txt": "REPLACE:my_value = 5\n"})
+    with redirect_stdout(io.StringIO()):
+        [f] = run_override_audit(mod, tr.repo, tr.hashes["1.0"], "1.0 Test", tr.hashes["1.1"], "1.1 Test",
+                                 audit_args(results_file="r.json"), make_ctx(tr.repo, "1.1"))
+    assert (f.kind, f.key["yours"], f.key["vanilla"], f.since) == (
+        "override_vanilla_changed_mid", "my_value = 5", "my_value = 7", "1.1")
+    rows = results.block_rows(f.data)
+    assert [(r["text"], r["sign"]) for r in rows] == [
+        ("REPLACE:my_value = 5", "-"), ("REPLACE:my_value = 7", "+")]
+    assert rows[0]["emph"] == [(19, 20)] and rows[1]["emph"] == [(19, 20)]
+
+
+def test_an_orphaned_replace_names_the_patch_that_removed_its_block(tmp_path):
+    b = "in_game/common/building_types/b.txt"
+    tr = build_tracker(tmp_path, [("1.0", {b: "old_building = {\n\tcost = 1\n}\n"}),
+                                  ("1.1", {b: "other = {\n\tcost = 1\n}\n"})])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}',
+                      "in_game/common/building_types/m.txt": "REPLACE:old_building = {\n\tcost = 2\n}\n"})
+    with redirect_stdout(io.StringIO()):
+        [f] = run_override_audit(mod, tr.repo, tr.hashes["1.0"], "1.0 Test", tr.hashes["1.1"], "1.1 Test",
+                                 audit_args(), make_ctx(tr.repo, "1.1"))
+    assert (f.kind, f.since) == ("override_orphaned", "1.1")
+
+
+def test_an_inject_colliding_with_vanilla_marks_its_key_in_the_block(world):
+    _write_tree(world.mod, {"in_game/common/building_types/i.txt":
+                            "INJECT:some_building = {\n\tupkeep = 7\n}\n"})
+    findings, _out = _run(world, audit_args(results_file="r.json"))
+    [inject] = [f for f in findings if f.kind == "override_inject_overlap"]
+    rows = results.block_rows(inject.data)
+    assert [(r["text"], r["mark"], r["sign"]) for r in rows] == [
+        ("INJECT:some_building = {", None, None), ("\tupkeep = 7", "review", "-"),
+        ("\tupkeep = 5", "review", "+"), ("}", None, None)]
+
+
+def test_every_finding_of_a_block_points_at_one_stored_block(world):
+    findings, _out = _run(world, audit_args(results_file="r.json"))
+    assert len({id(f.data) for f in findings}) == 1
+    payload = results.build_payload(findings, new_tag="1.1.0")
+    assert len(payload["blocks"]) == 1 and len({r["block"] for r in payload["records"]}) == 1
+    rows = results.block_rows(next(iter(payload["blocks"].values())))
+    assert [(r["n"], r["text"], r["mark"], r["sign"]) for r in rows] == [
+        (1, "REPLACE:some_building = {", None, None), (2, "\tcost = 100", None, None),
+        (None, "\tupkeep = 5", "review", "+"), (3, "\tlegacy_mod = 1", "review", "-"), (4, "}", None, None)]
+
+
+def test_a_dismissed_change_keeps_no_mark_in_the_block(world):
+    findings, _out = _run(world, audit_args(results_file="r.json"))
+    visible = [f for f in findings if f.kind != "override_vanilla_added_mid"]
+    block = next(iter(results.build_payload(visible, new_tag="1.1.0")["blocks"].values()))
+    rows = results.block_rows(block)
+    assert not any(r["ghost"] for r in rows)
+    assert [r["n"] for r in rows if r["mark"]] == [3]

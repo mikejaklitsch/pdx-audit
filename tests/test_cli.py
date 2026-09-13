@@ -99,7 +99,6 @@ def test_runs_never_write_into_the_mod(cli):
     code, out, _ = cli("--overrides")
     fid = re.search(r"\[([0-9a-f]{8})\]", out).group(1)
     cli("--overrides", "--dismiss", fid)
-    cli("--stamp-fork-points")
     assert _files(cli.world.mod) == before
 
 

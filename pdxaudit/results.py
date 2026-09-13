@@ -7,18 +7,17 @@ key, so a dismissal made from a record has the same id as one made with
 --dismiss."""
 import datetime
 import hashlib
-import re
 from pathlib import Path
 from stat import S_ISREG
 
 from pdx_utilities.constants import SCAN_TOPDIRS
+from pdx_utilities.script_parser import tokenize
 
 from . import ledger
 from .config import should_skip
-from .overrides import _brace_extract, _enclosing_paths, _norm, find_overrides
-from .report import KIND, LINE_KINDS, SEV_INFO, Finding, _is_value_finding, line_label, value_pair
+from .overrides import _brace_extract, find_overrides
+from .report import KIND, SEV_INFO, Finding, _is_value_finding, change_kind, line_label, value_pair
 from .store import open_store
-from .threeway import norm_value
 from .worddiff import word_spans
 
 
@@ -33,16 +32,21 @@ def _split_location(loc):
 def build_payload(findings, *, mod_name="", old_msg="", new_msg="", new_tag="",
                   selected=(), dismissed=0, triage="", details=(), warnings=()):
     """The app's view of one run. `findings` are the visible (not dismissed)
-    findings; informational ones are counted, not listed. A REPLACE or INJECT
-    block's rich view is stored once under `blocks`, and every line finding of
-    that block points at it."""
+    findings; informational ones are counted, not listed. A target's block view (a
+    GUI definition, GUI file, REPLACE or INJECT block) is stored once under
+    `blocks`, and every finding of that target points at it. A change whose finding
+    is not listed, because it was dismissed, keeps no mark."""
     blocks, block_of = {}, {}
+    listed = {ledger.finding_id(f) for f in findings if KIND[f.kind][0] != SEV_INFO}
     for f in findings:
-        sev, audit = KIND[f.kind][:2]
-        if f.data and audit == "override" and sev != SEV_INFO:
-            bid = hashlib.sha1(f"{f.location}\n{f.name}".encode("utf-8")).hexdigest()[:12]
-            blocks[bid] = f.data
-            block_of[(f.location, f.name)] = bid
+        if f.data and "changes" in f.data and KIND[f.kind][0] != SEV_INFO:
+            target = (f.key or {}).get("target") or f"{f.location}\n{f.name}"
+            bid = hashlib.sha1(target.encode("utf-8")).hexdigest()[:12]
+            if bid not in blocks:
+                blocks[bid] = dict(f.data, changes=[
+                    c if c["fid"] is None or c["fid"] in listed else dict(c, mark=None, fid=None)
+                    for c in f.data["changes"]])
+            block_of[id(f)] = bid
 
     records, info = [], 0
     for f in findings:
@@ -58,16 +62,14 @@ def build_payload(findings, *, mod_name="", old_msg="", new_msg="", new_tag="",
                "detail": f.detail or "", "key": f.key, "since": f.since or "",
                "base": f.base or "", "dismissible": ledger.is_dismissible(f),
                "earlier": bool(new_tag and f.since and f.since != new_tag)}
-        if audit == "override" and (f.location, f.name) in block_of:
-            rec["block"] = block_of[(f.location, f.name)]
+        if id(f) in block_of:
+            rec["block"] = block_of[id(f)]
         elif f.data:
             rec["data"] = f.data
         if _is_value_finding(f):
-            k = f.key
-            rec["path"] = line_label(k)
+            rec["path"] = line_label(f.key)
             rec["yours"], rec["vanilla"] = value_pair(
-                LINE_KINDS[f.kind], k.get("slot"), k.get("old"), k.get("new"),
-                k.get("mod"), k.get("ops"), k.get("text"), f.since)
+                change_kind(f.kind), f.key["yours"], f.key["vanilla"], f.since)
         records.append(rec)
 
     return {"mod": mod_name, "old": old_msg or "", "new": new_msg or "",
@@ -190,144 +192,111 @@ def override_targets(mod_root):
 
 # --- the block view -----------------------------------------------------------
 
-_STATEMENT = re.compile(r"^\s*([^\s=<>!?#{}]+)\s*(\?=|<=|>=|!=|==|=|<|>)\s*(.*?)\s*$")
-
-
-def _statement(key, value):
-    slot = key.get("slot")
-    return str(value) if slot == "@item" else f"{slot} {key.get('op') or '='} {value}"
-
-
-def _line_holds(text, key, value):
-    """Whether a script line is the statement `slot = value` (or the list member
-    `value`), comparing values the way the three-way classification does."""
-    if value is None:
-        return False
-    code = text.split("#")[0].strip()
-    if not code:
-        return False
-    if key.get("slot") == "@item":
-        return norm_value(code) == norm_value(value)
-    m = _STATEMENT.match(code)
-    return bool(m) and m.group(1) == key.get("slot") and norm_value(m.group(3)) == norm_value(value)
-
-
 def _row(n, text, ghost):
     return {"n": n, "text": text, "mark": None, "sign": None, "ghost": ghost, "note": "",
             "fid": None, "id": None}
 
 
-def block_rows(payload, rec):
-    """(rows, footer) for the app's view of rec's REPLACE or INJECT block.
+def _indent(line):
+    return line[:len(line) - len(line.lstrip())]
 
-    rows are the lines of the mod's block in order, each {n, text, mark, sign,
-    ghost, note, fid, id}. A line a finding is about gets mark 'stale' or 'review'
-    and a sign: '-' for your line that vanilla changed or deleted, '+' for vanilla's
-    line your block lacks (a ghost row, n None, where it belongs), '~' for a line to
-    look at for the reason its note gives. A value vanilla changed shows your line
-    with vanilla's right under it, the words that differ in each row's `emph`.
-    Notes carry only what the lines cannot show, and name the patch only when it
-    differs from rec's. footer is [(heading, lines)] for changes the block has no
-    line for."""
-    data = payload["blocks"][rec["block"]]
-    start = int(rec.get("line") or 1)
-    patch = data.get("patch") or []
-    paths = _enclosing_paths([p["t"] for p in patch if p["c"] != "add"])
-    rows, n = [], 0
-    for p in patch:
-        ghost = p["c"] == "add"
-        row = _row(None if ghost else start + n, p["t"], ghost)
-        if not ghost:
-            row["path"] = tuple(seg.split(" ")[0] for seg in paths[n][1:])
-            n += 1
-        rows.append(row)
 
-    def find(key, value, ghost):
-        path = tuple(seg.split(" ")[0] for seg in key.get("path") or [])
-        hits = [r for r in rows if r["ghost"] == ghost and not r["mark"]
-                and _line_holds(r["text"], key, value)]
-        exact = [r for r in hits if ghost or r.get("path") == path]
-        return (exact or hits or [None])[0]
+def _indent_unit(lines):
+    """The copy's indentation step: a tab, or the smallest step its spaces take."""
+    tabs = sum(line[:1] == "\t" for line in lines)
+    spaced = sorted({len(_indent(line)) for line in lines if line[:1] == " " and line.strip()})
+    if tabs >= len([line for line in lines if line[:1] == " "]) or not spaced:
+        return "\t"
+    steps = [b - a for a, b in zip([0] + spaced, spaced) if b > a]
+    return " " * min(steps)
 
-    unplaced = []
-    for r in payload["records"]:
-        if r.get("block") != rec["block"]:
+
+def _depths(text):
+    """Each line's depth inside `text`: the blocks open before it, less the ones the
+    line closes before anything else."""
+    tokens, out, depth, t, pos = tokenize(text), [], 0, 0, 0
+    for line in text.split("\n"):
+        end, before, closers, leading = pos + len(line), depth, 0, True
+        while t < len(tokens) and tokens[t]["start"] <= end:
+            tok = tokens[t]
+            if tok["type"] == "op" and tok["val"] == "}":
+                closers += leading
+                depth = max(depth - 1, 0)
+            elif tok["type"] != "comment":
+                leading = False
+                depth += tok["type"] == "op" and tok["val"] == "{"
+            t += 1
+        out.append(max(before - closers, 0))
+        pos = end + 1
+    return out
+
+
+def block_rows(block):
+    """Rows for the app's view of one target: the copy's lines with their numbers,
+    and vanilla's side of each flagged change.
+
+    Each row is {n, text, mark, sign, ghost, note, fid, id}. The lines of a flagged
+    change's copy statement get its mark ('stale' or 'review') and sign '-'.
+    Vanilla's text for it follows as ghost rows (sign '+', n None, the same mark):
+    right under your statement's last line when both sides have one, or where it
+    belongs when only vanilla has it. Ghost rows are indented like the line they
+    follow, one level deeper inside a block, in the copy's own indentation. When
+    both sides are one line, the ghost row is your line with vanilla's statement in
+    place of yours, so a value inside a one-line block keeps its key, and `emph`
+    holds the words that differ. A change inside a statement whose vanilla text is
+    already shown is marked but not shown again."""
+    lines, first = block["lines"], int(block["line"])
+    unit = _indent_unit(lines)
+    rows = [_row(first + i, text, False) for i, text in enumerate(lines)]
+    under, shown = {}, []
+
+    def ghosts(anchor, base, vanilla, change):
+        out = []
+        depths = _depths(vanilla)
+        for k, text in enumerate(vanilla.split("\n")):
+            row = _row(None, base + unit * depths[k] + text.lstrip(), True)
+            row.update(mark=change["mark"], sign="+", fid=change["fid"], id=ledger.short_id(change["fid"] or ""))
+            out.append(row)
+        under.setdefault(anchor, []).extend(out)
+        return out
+
+    for c in block["changes"]:
+        if not c["mark"]:
             continue
-        k = r.get("key") or {}
-        cls = LINE_KINDS.get(r["kind"])
-        since = r.get("since") or ""
-        when = f" in {since}" if since and since != rec.get("since") else ""
-        old, new, mod = k.get("old"), k.get("new"), k.get("mod")
-        # detail describes the change in full for the footer when no line holds it.
-        row, mark, sign, note, pair, shadow = None, "stale", "-", "", False, None
-        if cls == "frozen":
-            row = find(k, mod if mod is not None else old, False)
-            detail = f"vanilla changed it to {new}{when}"
-            shadow = find(k, new, True)
-            if shadow is not None:
-                rows.remove(shadow)
-            pair, note = True, when and f"changed{when}"
-        elif cls == "new_line":
-            sign = "+"
-            row = find(k, new, True)
-            if row is None:
-                row = _row(None, "\t" + (k.get("text") or _statement(k, new)), True)
-                rows.insert(max(len(rows) - 1, 0), row)
-            detail = f"vanilla added this line{when}; your block lacks it"
-            note = when and f"added{when}"
-        elif cls == "kept_removed":
-            row = find(k, mod if mod is not None else old, False)
-            detail = f"vanilla deleted this line{when}"
-            note = when and f"deleted{when}"
-        elif cls == "both_changed":
-            mark = "review"
-            row = find(k, mod, False)
-            if old is not None and new is not None:
-                detail = f"vanilla changed it from {old} to {new}{when}; yours is {mod}"
-                pair, note = True, f"vanilla had {old} before" + (when and f", changed{when}")
-            elif new is not None:
-                detail = f"vanilla added {_statement(k, new)}{when}; yours is {mod}"
-                pair, note = True, when and f"added{when}"
+        if c["vanilla"] is not None:
+            c = dict(c, vanilla=c["vanilla"].strip())
+        at = c["first"] if c["first"] is not None else c["anchor"] + 1
+        inside = any(lo <= at <= hi for lo, hi in shown)
+        if c["first"] is not None:
+            for n in range(c["first"], c["last"] + 1):
+                row = rows[n - first]
+                row["mark"] = row["mark"] or c["mark"]
+                row["sign"] = "-"
+                row["fid"] = row["fid"] or c["fid"]
+                row["id"] = ledger.short_id(row["fid"] or "")
+            if c["vanilla"] is None or inside:
+                continue
+            shown.append((c["first"], c["last"]))
+            if c["first"] == c["last"] and "\n" not in c["vanilla"]:
+                text, (start, end) = lines[c["first"] - first], c["cols"]
+                ghost = _row(None, text[:start] + c["vanilla"] + text[end:], True)
+                ghost.update(mark=c["mark"], sign="+", fid=c["fid"], id=ledger.short_id(c["fid"] or ""))
+                under.setdefault(c["last"], []).append(ghost)
+                mine, theirs = word_spans(text[start:end], c["vanilla"])
+                rows[c["first"] - first]["emph"] = [(a + start, b + start) for a, b in mine]
+                ghost["emph"] = [(a + start, b + start) for a, b in theirs]
             else:
-                detail = note = f"vanilla deleted this key{when} (it was {old}); you changed it to {mod}"
-        elif cls == "unclassified":
-            mark, sign = "review", "~"
-            row = rows[0] if rows else None
-            detail = note = f"vanilla changed this block{when} in a way that could not be matched line by line"
-        elif r["kind"] == "override_inject_overlap":
-            mark, sign = "review", "~"
-            keys = [o["key"] for o in data.get("overlap") or []]
-            row = next((x for x in rows if not x["ghost"] and not x["mark"] and x.get("path") == ()
-                        and (_STATEMENT.match(x["text"].split("#")[0]) or [None, None])[1] in keys), None)
-            detail = note = f"vanilla also changed {', '.join(keys)}{when}"
-        else:
-            continue
-        if row is None:
-            unplaced.append(f"{line_label(k) or r['name']}: {detail}")
-            continue
-        row["mark"], row["sign"] = mark, row["sign"] or sign
-        row["fid"], row["id"] = row["fid"] or r["fid"], row["id"] or r["id"]
-        noted = row
-        if pair:
-            indent = re.match(r"\s*", row["text"]).group(0)
-            vanilla = shadow or _row(None, indent + _statement(k, new), True)
-            vanilla["mark"], vanilla["sign"] = mark, "+"
-            rows.insert(rows.index(row) + 1, vanilla)
-            row["emph"], vanilla["emph"] = word_spans(row["text"], vanilla["text"])
-            noted = vanilla      # under the pair, so your line and vanilla's stay together
-        if note:
-            noted["note"] = f"{noted['note']}; {note}" if noted["note"] else note
+                ghosts(c["last"], _indent(lines[c["first"] - first]), c["vanilla"], c)
+        elif c["vanilla"] is not None and not inside:
+            anchor = c["anchor"]
+            follow = lines[anchor - first] if anchor >= first else lines[0] if lines else ""
+            ghosts(anchor, _indent(follow) + (unit if c["inside"] else ""), c["vanilla"], c)
 
-    footer = []
-    if unplaced:
-        footer.append(("Vanilla changes with no matching line in your block", unplaced))
-    if data.get("absent"):
-        footer.append(("Vanilla changed parts your block doesn't have",
-                       [a["line"] for a in data["absent"]]))
-    if data.get("removed_note"):
-        footer.append(("Vanilla also removed these; your block never had them",
-                       list(data["removed_note"])))
-    return rows, footer
+    out = [r for r in under.get(first - 1, [])]
+    for row in rows:
+        out.append(row)
+        out.extend(under.get(row["n"], []))
+    return out
 
 
 def fold_rows(rows, keep=3, min_hidden=6):
@@ -385,9 +354,9 @@ def gui_rows(rec):
     return rows
 
 
-def source_rows(rec, mod_root):
-    """One closed toggle per place a duplicate is defined, each holding that
-    definition's lines read from the mod. A definition no longer at its recorded
+def source_rows(rec, mod_root, expanded=True):
+    """One toggle per place a duplicate is defined, open when `expanded`, each holding
+    that definition's lines read from the mod. A definition no longer at its recorded
     line (the file changed since the run) holds a note instead."""
     name = rec["name"].split(".")[-1]
     files, out = {}, []
@@ -408,5 +377,5 @@ def source_rows(rec, mod_root):
             text = _brace_extract(lines, line - 1) if "{" in head else None
             code = [dict(blank, n=line + i, text=t, note="")
                     for i, t in enumerate((text or lines[line - 1]).split("\n"))]
-        out.append({"toggle": f"{s['how']} · {rel}:{line}", "open": False, "rows": code})
+        out.append({"toggle": f"{s['how']} · {rel}:{line}", "open": expanded, "rows": code})
     return out
