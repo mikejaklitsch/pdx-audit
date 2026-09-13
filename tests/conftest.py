@@ -3,16 +3,17 @@ that builds a tiny synthetic vanilla-tracker (a real bare git repo with two
 commits) plus a matching mod, so the git-dependent audits can be exercised
 end-to-end without the real 450 MB tracker."""
 import os
+import re
 import sys
 import types
-import shutil
-import tempfile
 import subprocess
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from pdxaudit.safety import remove_file  # noqa: E402
 
 
 # Two synthetic vanilla snapshots. Between them vanilla: adds `upkeep` to a
@@ -47,7 +48,7 @@ VANILLA_NEW = {
         'l_english:\n KEY_A:0 "new text"\n',
 }
 MOD = {
-    ".metadata/metadata.json": '{"name":"testmod"}',
+    ".metadata/metadata.json": '{"name":"Test Mod","id":"testmod"}',
     "in_game/common/building_types/m.txt":
         "REPLACE:some_building = {\n\tcost = 100\n\tlegacy_mod = 1\n}\n",
     "in_game/common/rules/r.txt":
@@ -60,6 +61,9 @@ MOD = {
     "in_game/common/script_values/m2.txt": "REPLACE:my_value = 5\n",
     "in_game/localization/english/m_l_english.yml":
         'l_english:\n KEY_A:0 "mod text"\n',
+    # the same mod-only name defined in two files: a duplicate definition
+    "in_game/common/buildings/dup1.txt": "dup_thing = {\n\tcost = 1\n}\n",
+    "in_game/common/buildings/dup2.txt": "dup_thing = {\n\tcost = 2\n}\n",
 }
 
 
@@ -70,23 +74,27 @@ def _write_tree(root, files):
         fp.write_text(content, encoding="utf-8")
 
 
+INDEX_NAME = "fixture.index"
+
+
 def _commit(repo, files, message, parent):
     """Commit `files` (a {relpath: text} dict) to bare `repo`, returning the
-    new commit hash. Uses a throwaway work tree and index so nothing persists."""
-    wt = tempfile.mkdtemp()
-    idx = wt + ".index"
+    new commit hash. Blobs are written straight into git, so no work tree is
+    created; the single index file is removed through the removal helper."""
+    repo = Path(repo)
+    idx = repo / INDEX_NAME
+    env = {**os.environ, "GIT_DIR": str(repo), "GIT_INDEX_FILE": str(idx),
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"}
+
+    def g(*a, stdin=None):
+        return subprocess.run(["git", *a], env=env, check=True, input=stdin,
+                              capture_output=True, text=True).stdout.strip()
+
     try:
-        _write_tree(wt, files)
-        env = {**os.environ, "GIT_DIR": str(repo), "GIT_WORK_TREE": wt,
-               "GIT_INDEX_FILE": idx,
-               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
-               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e"}
-
-        def g(*a):
-            return subprocess.run(["git", *a], env=env, check=True,
-                                  capture_output=True, text=True).stdout.strip()
-
-        g("add", "-A")
+        for rel, content in files.items():
+            blob = g("hash-object", "-w", "--stdin", stdin=content)
+            g("update-index", "--add", "--cacheinfo", f"100644,{blob},{rel}")
         tree = g("write-tree")
         args = ["commit-tree", tree]
         if parent:
@@ -97,9 +105,37 @@ def _commit(repo, files, message, parent):
         g("tag", message.split()[0], commit)   # version tag, like do_snapshot
         return commit
     finally:
-        shutil.rmtree(wt, ignore_errors=True)
-        if os.path.exists(idx):
-            os.remove(idx)
+        if idx.exists():
+            remove_file(idx, repo, re.escape(INDEX_NAME))
+
+
+def build_tracker(root, snapshots):
+    """A bare tracker repo with one commit per (tag, {relpath: text}) snapshot,
+    oldest first. Returns SimpleNamespace(repo, hashes={tag: full hash})."""
+    repo = Path(root) / "vanilla-tracker" / "repo.git"
+    repo.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "--bare", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "--git-dir", str(repo), "symbolic-ref", "HEAD",
+                    "refs/heads/master"], check=True, capture_output=True)
+    parent, hashes = None, {}
+    for tag, files in snapshots:
+        parent = _commit(repo, files, f"{tag} Test", parent)
+        hashes[tag] = parent
+    return types.SimpleNamespace(repo=str(repo), hashes=hashes)
+
+
+def make_ctx(repo, new_tag, fixed=False, bases=None, dismissed=None):
+    """The run context the CLI hands to audits."""
+    from pdxaudit.tracker import get_commits
+    return types.SimpleNamespace(commits=get_commits(repo), new_tag=new_tag,
+                                 fixed_window=fixed, bases=bases or {}, scanned={},
+                                 dismissed=set(dismissed or ()))
+
+
+def audit_args(**kw):
+    base = dict(diff=False, block=None, category=None, full=False, old=None, new=None)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
 
 
 @pytest.fixture

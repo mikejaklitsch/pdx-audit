@@ -2,12 +2,11 @@
 
 import subprocess
 import re
-import shutil
 import sys
 import difflib
-import tempfile
 import hashlib
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from pdx_utilities.git import git, git_archive
@@ -15,7 +14,16 @@ from pdx_utilities.paths import (find_mod_root_or_exit, vanilla_root,
                                   DEFAULT_VANILLA_ROOT)
 from pdx_utilities.constants import SCAN_TOPDIRS as MODULE_ROOTS  # noqa: F401
 
+from . import session
 from .config import cfg
+from .safety import remove_file, RefusedRemoval
+
+# Every cache file name pdx-audit writes under <vanilla-tracker>/cache/.
+CACHE_FILE_RE = r"(?:blocks|gui|vocab|dupes)-v\d+-[0-9a-f]{40}(?:-[0-9a-f]{12})?\.json"
+
+# The one temporary file --snapshot creates, inside the tracker repo itself.
+SNAPSHOT_INDEX_NAME = "pdx-audit-snapshot.index"
+SNAPSHOT_INDEX_RE = r"pdx-audit-snapshot\.index"
 
 def find_mod_root(override: str | None = None) -> Path:
     return find_mod_root_or_exit(override=override)
@@ -55,6 +63,60 @@ def get_commits(vanilla_repo):
         result.append((parts[0], parts[1] if len(parts) > 1 else ""))
     return result
 
+def full_hash(vanilla_repo, commit):
+    """The full hash of a tracker commit, or '' when it does not resolve."""
+    return session.memo(("rev-parse", str(vanilla_repo), commit),
+                        lambda: git(vanilla_repo, "rev-parse", commit).strip())
+
+def tree_files(vanilla_repo, commit):
+    """[(path, blob id)] for the regular files at `commit`, in tree order, which
+    is the order `git archive` writes them in."""
+    def list_tree():
+        files = []
+        for rec in git(vanilla_repo, "ls-tree", "-r", "-z", commit, timeout=60).split("\0"):
+            meta, _tab, path = rec.partition("\t")
+            parts = meta.split()
+            if len(parts) == 3 and parts[1] == "blob" and parts[0] in ("100644", "100755"):
+                files.append((path, parts[2]))
+        return files
+    return session.memo(("ls-tree", str(vanilla_repo), commit), list_tree)
+
+def read_blobs(vanilla_repo, blob_ids, timeout=180, workers=8):
+    """{blob id: bytes} for tracker blobs. Git inflates one blob at a time per
+    process, so a large batch is split across several `git cat-file` processes
+    read in parallel. Ids git cannot find are left out."""
+    ids = list(dict.fromkeys(blob_ids))
+    n = max(1, min(workers, os.cpu_count() or 1, len(ids) // 64))
+    blobs = {}
+    with ThreadPoolExecutor(n) as pool:
+        for part in pool.map(lambda chunk: _cat_file(vanilla_repo, chunk, timeout),
+                             [ids[i::n] for i in range(n)]):
+            blobs.update(part)
+    return blobs
+
+def _cat_file(vanilla_repo, ids, timeout):
+    if not ids:
+        return {}
+    try:
+        r = subprocess.run(["git", f"--git-dir={vanilla_repo}", "cat-file", "--batch"],
+                           input="".join(f"{b}\n" for b in ids).encode(),
+                           capture_output=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return {}
+    out, pos, blobs = r.stdout, 0, {}
+    for _ in ids:
+        eol = out.find(b"\n", pos)
+        if eol == -1:
+            break
+        header = out[pos:eol].split()   # "<id> <type> <size>" or "<id> missing"
+        pos = eol + 1
+        if len(header) != 3:
+            continue
+        size = int(header[2])
+        blobs[header[0].decode()] = out[pos:pos + size]
+        pos += size + 1
+    return blobs
+
 _CACHE_HASH_RE = re.compile(r"-([0-9a-f]{40})[-.]")
 
 def prune_cache(vanilla_repo):
@@ -69,8 +131,8 @@ def prune_cache(vanilla_repo):
         m = _CACHE_HASH_RE.search(fp.name)
         if m and m.group(1) not in live:
             try:
-                fp.unlink()
-            except OSError:
+                remove_file(fp, cache_dir, CACHE_FILE_RE)
+            except (RefusedRemoval, OSError):
                 pass
 
 def resolve_ref(vanilla_repo, ref, commits, side):
@@ -94,10 +156,13 @@ def resolve_ref(vanilla_repo, ref, commits, side):
 
 DEFAULT_GAME_ROOT = DEFAULT_VANILLA_ROOT
 
-STALE_SENTINEL_DIRS = ("main_menu/localization/english", "in_game/gui")
+STALE_SENTINEL_DIRS = ("main_menu/localization/english", "in_game/gui",
+                       "in_game/common", "main_menu/common",
+                       "loading_screen/common/defines")
 
 def warn_if_tracker_stale(vanilla_repo, newest_hash, sample_size=40):
-    """Warn if game files differ from the newest tracked commit."""
+    """Warn if game files differ from the newest tracked commit. Returns the
+    warning, or None."""
     game_root = Path(os.environ.get("PDX_GAME_ROOT")
                      or cfg("game_root") or str(DEFAULT_GAME_ROOT))
     if not game_root.is_dir():
@@ -121,11 +186,14 @@ def warn_if_tracker_stale(vanilla_repo, newest_hash, sample_size=40):
             h = hashlib.sha1(b"blob %d\x00" % len(data) + data).hexdigest()
             if h != sha:
                 stale += 1
-    if stale:
-        print(f"Warning: vanilla-tracker looks OUT OF DATE: {stale}/{checked} "
-              f"sampled game files differ from the newest tracked commit. "
-              f"Run the tracker's update script, then re-audit.",
-              file=sys.stderr)
+    if not stale:
+        return None
+    msg = (f"Warning: vanilla-tracker looks OUT OF DATE: {stale}/{checked} "
+           f"sampled game files differ from the newest tracked commit. "
+           f"Record the new game version with `pdx-audit --snapshot <version>`, "
+           f"then re-audit.")
+    print(msg, file=sys.stderr)
+    return msg
 
 def _git_archive(vanilla_repo, commit, paths=None, timeout=60):
     """Wrapper around shared git_archive with ignore_zeros note."""
@@ -180,46 +248,45 @@ def do_snapshot(repo: Path, tag: str, patch_name: str,
         if _version_key(tag) < _version_key(newest):
             print(f"Error: '{tag}' is older than the newest tracked version "
                   f"('{newest}'), and snapshots must be recorded oldest "
-                  "first. To back-populate history, snapshot old versions "
-                  "in order BEFORE the current one (delete the repo.git "
-                  "directory and start over if needed; snapshots are cheap, "
-                  "derived data).", file=sys.stderr)
+                  "first. To back-populate history, snapshot the old versions "
+                  "in order into a new tracker (pass --vanilla-repo with a new "
+                  "path), then snapshot the current version last.",
+                  file=sys.stderr)
             sys.exit(1)
 
     print(f"Snapshotting {game_root} as {tag}...")
-    with tempfile.TemporaryDirectory(prefix="vanilla-tracker-") as tmp:
-        work = Path(tmp) / "work"
-        work.mkdir()
-        n_files = 0
-        for ext in ("*.txt", "*.yml", "*.gui"):
-            for f in game_root.rglob(ext):
-                rel = f.relative_to(game_root)
-                dest = work / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(f, dest)
-                n_files += 1
+    files = sorted({f for ext in ("*.txt", "*.yml", "*.gui")
+                    for f in game_root.rglob(ext) if f.is_file()})
+    n_files = len(files)
 
-        env = dict(os.environ,
-                   GIT_DIR=str(repo),
-                   GIT_WORK_TREE=str(work),
-                   GIT_INDEX_FILE=str(Path(tmp) / "index"))
+    # Files are hashed straight from the game folder into the tracker; git never
+    # writes to the game folder. The index is the only temporary item.
+    index = repo / SNAPSHOT_INDEX_NAME
+    env = dict(os.environ, GIT_DIR=str(repo), GIT_INDEX_FILE=str(index))
 
-        def g(*args, check=True):
-            return subprocess.run(["git", *args], env=env, check=check,
-                                  capture_output=True, text=True)
+    def g(*args, stdin=None, check=True):
+        return subprocess.run(["git", *args], env=env, check=check, input=stdin,
+                              capture_output=True, text=True)
 
-        has_head = subprocess.run(
-            ["git", "--git-dir", str(repo), "rev-parse", "--verify",
-             "--quiet", "HEAD"], capture_output=True).returncode == 0
+    if index.exists():
+        remove_file(index, repo, SNAPSHOT_INDEX_RE)   # left behind by a crashed run
+    try:
+        hashes = g("hash-object", "-w", "--no-filters", "--stdin-paths",
+                   stdin="".join(f"{f}\n" for f in files)).stdout.split()
+        if len(hashes) != n_files:
+            print("Error: git did not hash every game file; nothing committed.",
+                  file=sys.stderr)
+            sys.exit(1)
+        entries = "".join(f"100644 {h}\t{f.relative_to(game_root).as_posix()}\0"
+                          for f, h in zip(files, hashes))
+        g("update-index", "--add", "-z", "--index-info", stdin=entries)
+        tree = g("write-tree").stdout.strip()
 
-        if has_head:
-            g("read-tree", "HEAD")
-        g("add", "-A")
-        if has_head and g("diff", "--cached", "--quiet", check=False).returncode == 0:
+        has_head = g("rev-parse", "--verify", "--quiet", "HEAD", check=False).returncode == 0
+        if has_head and g("rev-parse", "HEAD^{tree}").stdout.strip() == tree:
             print("No changes from the previous snapshot; nothing committed.")
             return
 
-        tree = g("write-tree").stdout.strip()
         msg = f"{tag} {patch_name}".strip()
         commit_args = ["commit-tree", tree]
         if has_head:
@@ -228,6 +295,9 @@ def do_snapshot(repo: Path, tag: str, patch_name: str,
         commit = g(*commit_args).stdout.strip()
         g("update-ref", "refs/heads/master", commit)
         g("tag", tag)
+    finally:
+        if index.exists():
+            remove_file(index, repo, SNAPSHOT_INDEX_RE)
 
     print(f"Done: {msg} ({n_files} files).")
     tags = subprocess.run(["git", "--git-dir", str(repo), "tag", "-l",

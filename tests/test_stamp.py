@@ -1,87 +1,86 @@
-"""Fork-point pins and the stamp write path (add + refresh), forcing the
-interactive confirmation. No vanilla tracker needed: fork detection is stubbed."""
+"""--stamp-fork-points saves detected fork points into the per-user findings
+record (reviewed_against). It never touches the mod's files and needs no
+confirmation. Fork detection is stubbed; no vanilla tracker needed."""
 import types
 
+import pytest
+
 import pdxaudit.gui as gui
+from pdxaudit import store as st
 
 
-def test_parse_fork_pin_top_of_file_only():
-    assert gui.parse_fork_pin("# pdx-audit fork-point: 1.3.8\nrest\n") == "1.3.8"
-    assert gui.parse_fork_pin("line\n" * 30 + "# pdx-audit fork-point: 9.9\n") is None
-    assert gui.parse_fork_pin("no pin here\n") is None
-
-
-def test_stamp_add_prepends_and_preserves_bom(tmp_path):
-    p = tmp_path / "f.gui"
-    p.write_bytes(b"\xef\xbb\xbftypes X {}\n")
-    gui._stamp_add(p, "1.3.10")
-    raw = p.read_bytes()
-    assert raw.startswith(b"\xef\xbb\xbf")
-    assert gui.parse_fork_pin(raw.decode("utf-8-sig")) == "1.3.10"
-    assert raw.decode("utf-8-sig").splitlines()[1] == "types X {}"
-
-
-def test_stamp_update_rewrites_in_place(tmp_path):
-    p = tmp_path / "f.gui"
-    p.write_bytes(b"\xef\xbb\xbf# pdx-audit fork-point: 1.3.10\nbody\n")
-    gui._stamp_update(p, "1.2.2")
-    raw = p.read_bytes()
-    assert raw.startswith(b"\xef\xbb\xbf")
-    text = raw.decode("utf-8-sig")
-    assert gui.parse_fork_pin(text) == "1.2.2"
-    assert text.count("pdx-audit fork-point") == 1     # not duplicated
-    assert "body" in text
+@pytest.fixture
+def data_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    return tmp_path / "xdg"
 
 
 def _mk_mod(tmp_path):
     d = tmp_path / "mod"
     (d / ".metadata").mkdir(parents=True)
+    (d / ".metadata/metadata.json").write_text('{"id": "testmod"}')
     (d / "in_game" / "gui").mkdir(parents=True)
-    (d / "in_game/gui/a.gui").write_bytes(b"\xef\xbb\xbftypes A {}\n")  # unpinned
-    (d / "in_game/gui/b.gui").write_bytes(
-        b"\xef\xbb\xbf# pdx-audit fork-point: 1.3.10\ntypes B {}\n")     # stale pin
+    (d / "in_game/gui/a.gui").write_bytes(b"\xef\xbb\xbftemplate A = { x = 1 }\n")
+    (d / "in_game/gui/b.gui").write_bytes(b"\xef\xbb\xbftemplate B = { x = 1 }\n")
     return d
 
 
-def _stub_forks(monkeypatch):
-    def fake(vanilla_repo, commits, modules, mdefs, mod_file_texts):
-        file_base = {
-            "in_game/gui/a.gui": ("t", "h", "1.3.10 Pavia", False),   # unpinned -> add
-            "in_game/gui/b.gui": ("t", "h", "1.3.10 Pavia", True),    # pinned, stale
-        }
-        pin_stale = {"in_game/gui/b.gui": ("1.3.10", "1.2.2")}
-        return {}, file_base, {}, pin_stale
+def _stub_forks(monkeypatch, tag="1.3.10"):
+    def fake(vanilla_repo, commits, modules, mdefs, mod_file_texts, bases=None):
+        msg = f"{tag} Pavia"
+        def_base = {("in_game", "template", "A"): ("in_game/gui/v.gui", "t", "h", msg, False)}
+        file_base = {"in_game/gui/b.gui": ("t", "h", msg, False)}
+        return def_base, file_base
     monkeypatch.setattr(gui, "build_fork_baselines", fake)
-    monkeypatch.setattr(gui, "get_commits", lambda repo: [("h", "1.3.10 Pavia")])
-    # force an interactive "yes"
-    monkeypatch.setattr(gui.sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
-    monkeypatch.setattr(gui, "input", lambda *a, **k: "y", raising=False)
 
 
-def test_stamp_add_writes_unpinned_only(tmp_path, monkeypatch):
+def _snapshot(d):
+    return {p.relative_to(d).as_posix(): p.read_bytes() for p in d.rglob("*") if p.is_file()}
+
+
+def test_stamp_writes_record_not_mod(tmp_path, monkeypatch, data_home):
     d = _mk_mod(tmp_path)
+    before = _snapshot(d)
     _stub_forks(monkeypatch)
-    gui.run_stamp_fork_points(d, "repo", [("h", "1.3.10 Pavia")], refresh=False)
-    a = (d / "in_game/gui/a.gui").read_text(encoding="utf-8-sig")
-    b = (d / "in_game/gui/b.gui").read_text(encoding="utf-8-sig")
-    assert gui.parse_fork_pin(a) == "1.3.10"     # added
-    assert gui.parse_fork_pin(b) == "1.3.10"     # stale pin left untouched without --refresh
+    store = st.Store(d, "testmod")
+    gui.run_stamp_fork_points(d, "repo", [("h", "1.3.10 Pavia")], store, refresh=False)
+    ra = st.Store(d, "testmod").state["reviewed_against"]
+    assert ra == {"gui:in_game/template/A": "1.3.10", "guifile:in_game/gui/b.gui": "1.3.10"}
+    assert _snapshot(d) == before
 
 
-def test_stamp_refresh_updates_stale_pin(tmp_path, monkeypatch):
+def test_stamp_keeps_existing_entries_without_refresh(tmp_path, monkeypatch, data_home):
     d = _mk_mod(tmp_path)
+    store = st.Store(d, "testmod")
+    store.state["reviewed_against"]["guifile:in_game/gui/b.gui"] = "1.2.2"
+    store.save()
     _stub_forks(monkeypatch)
-    gui.run_stamp_fork_points(d, "repo", [("h", "1.3.10 Pavia")], refresh=True)
-    b = (d / "in_game/gui/b.gui").read_text(encoding="utf-8-sig")
-    assert gui.parse_fork_pin(b) == "1.2.2"      # refreshed 1.3.10 -> 1.2.2
+    gui.run_stamp_fork_points(d, "repo", [("h", "1.3.10 Pavia")], st.Store(d, "testmod"),
+                              refresh=False)
+    ra = st.Store(d, "testmod").state["reviewed_against"]
+    assert ra["guifile:in_game/gui/b.gui"] == "1.2.2"
+    assert ra["gui:in_game/template/A"] == "1.3.10"
 
 
-def test_stamp_refuses_without_tty(tmp_path, monkeypatch):
+def test_stamp_refresh_updates_existing_entries(tmp_path, monkeypatch, data_home):
+    d = _mk_mod(tmp_path)
+    store = st.Store(d, "testmod")
+    store.state["reviewed_against"]["guifile:in_game/gui/b.gui"] = "1.2.2"
+    store.save()
+    _stub_forks(monkeypatch)
+    gui.run_stamp_fork_points(d, "repo", [("h", "1.3.10 Pavia")], st.Store(d, "testmod"),
+                              refresh=True)
+    assert st.Store(d, "testmod").state["reviewed_against"]["guifile:in_game/gui/b.gui"] == "1.3.10"
+
+
+def test_stamp_needs_no_terminal(tmp_path, monkeypatch, data_home):
     d = _mk_mod(tmp_path)
     _stub_forks(monkeypatch)
     monkeypatch.setattr(gui.sys, "stdin", types.SimpleNamespace(isatty=lambda: False))
-    import pytest
-    with pytest.raises(SystemExit):
-        gui.run_stamp_fork_points(d, "repo", [("h", "1.3.10 Pavia")], refresh=False)
-    # nothing written
-    assert gui.parse_fork_pin((d / "in_game/gui/a.gui").read_text(encoding="utf-8-sig")) is None
+    gui.run_stamp_fork_points(d, "repo", [("h", "1.3.10 Pavia")], st.Store(d, "testmod"))
+    assert st.Store(d, "testmod").state["reviewed_against"]
+
+
+def test_pin_comments_in_mod_files_are_ignored(tmp_path, monkeypatch, data_home):
+    assert not hasattr(gui, "parse_fork_pin")
+    assert not hasattr(gui, "_stamp_add") and not hasattr(gui, "_stamp_update")

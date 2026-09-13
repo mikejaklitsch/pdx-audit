@@ -8,8 +8,14 @@ version = "1.0.0"
 description = "Audit a Paradox mod against vanilla patch changes"
 requires-python = ">=3.10"
 
+[project.optional-dependencies]
+app = ["PySide6>=6.5"]
+
 [project.scripts]
 pdx-audit = "pdxaudit.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["pdxaudit*", "pdx_utilities*"]
+
+[tool.setuptools.package-data]
+pdxaudit = ["fonts/*", "assets/*", "syntax/*"]

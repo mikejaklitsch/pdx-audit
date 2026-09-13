@@ -1,14 +1,12 @@
-"""The --display report: the override audit attaches a rich data payload to its
-findings only under --display, and render_report turns findings into a
-self-contained HTML page."""
+"""The desktop app's payload: the override audit attaches a rich data payload to
+its findings only when a run writes a results file, and build_payload turns
+findings into the records the app lists."""
 import io
-import re
-import json
 import types
 from contextlib import redirect_stdout
 
 from pdxaudit.overrides import run_override_audit
-from pdxaudit.htmlreport import render_report
+from pdxaudit.results import build_payload
 from pdxaudit.report import Finding
 
 
@@ -18,38 +16,66 @@ def _run(fn, *a):
         return fn(*a)
 
 
-def test_no_data_without_display(world):
+def test_no_data_without_results_file(world):
     findings = _run(run_override_audit, world.mod, world.repo,
                     world.old, "1.0.0", world.new, "1.1.0", world.args)
     assert findings and all(f.data is None for f in findings)
 
 
-def test_display_attaches_report_data(world):
+def test_results_file_attaches_report_data_once_per_block(world):
     args = types.SimpleNamespace(diff=False, block=None, category=None,
-                                 full=True, old=None, new=None, display="r.html")
+                                 full=True, old=None, new=None, results_file="r.json")
     findings = _run(run_override_audit, world.mod, world.repo,
                     world.old, "1.0.0", world.new, "1.1.0", args)
-    f = next(x for x in findings if x.name == "some_building")
-    assert f.data is not None
-    assert any("upkeep = 5" in m for m in f.data["missing"])   # gap, with breadcrumb form
-    assert f.data["patch"]                                     # 3-way block rows present
+    with_data = [x for x in findings if x.name == "some_building" and x.data]
+    assert len(with_data) == 1
+    data = with_data[0].data
+    assert any("upkeep = 5" in m for m in data["missing"])
+    assert any("legacy_mod = 1" in k for k in data["kept"])
+    assert {line["c"] for line in data["lines"]} >= {"new_line", "kept_removed"}
+    assert data["patch"]                                        # 3-way block rows present
 
 
-def test_render_report_is_self_contained():
-    fs = [Finding("override_replace_stale", "some_building", "m.txt:1", "",
-                  {"type": "REPLACE", "diff": "@@\n+\tupkeep = 5", "n_add": 1, "n_rem": 0,
-                   "missing": ["upkeep = 5"], "kept": [], "overlap": [],
-                   "patch": [{"t": "some_building = {", "c": "context"}],
-                   "absent": [], "removed_note": []})]
-    out = render_report(fs, "testmod", "1.0.0", "1.1.0")
-    assert "some_building" in out and "upkeep = 5" in out and "testmod" in out
-    assert "@@DATA@@" not in out and "@@MOD@@" not in out     # placeholders filled
-    payload = json.loads(re.search(r'type="application/json">(.*?)</script>', out, re.S).group(1))
-    assert payload["records"][0]["name"] == "some_building"
+BLOCK = {"type": "REPLACE", "diff": "@@\n+\tupkeep = 5", "n_add": 1, "n_rem": 0,
+         "missing": ["upkeep = 5"], "kept": [], "overlap": [],
+         "lines": [{"c": "new_line", "t": "upkeep = 5"}],
+         "patch": [{"t": "some_building = {", "c": "context"}],
+         "absent": [], "removed_note": []}
 
 
-def test_render_report_skips_informational_findings():
-    fs = [Finding("override_replace_reconciled", "quiet_block", "m.txt:9")]
-    out = render_report(fs, "testmod", "1.0.0", "1.1.0")
-    payload = json.loads(re.search(r'type="application/json">(.*?)</script>', out, re.S).group(1))
-    assert payload["records"] == []          # info findings are not listed
+def test_payload_records_carry_ids_and_patch():
+    fs = [Finding("override_replace_new_line", "some_building", "m.txt:1", "upkeep = 5",
+                  BLOCK, {"target": "override:x/some_building"}, "1.1.0")]
+    payload = build_payload(fs, mod_name="testmod", old_msg="1.0.0", new_msg="1.1.0",
+                            new_tag="1.1.0")
+    rec = payload["records"][0]
+    assert rec["name"] == "some_building" and rec["file"] == "m.txt" and rec["line"] == "1"
+    assert rec["id"] == rec["fid"][:8] and len(rec["fid"]) == 40
+    assert rec["since"] == "1.1.0" and rec["earlier"] is False
+    assert payload["blocks"][rec["block"]]["patch"]
+
+
+def test_payload_shares_block_data_across_its_lines():
+    fs = [Finding("override_replace_new_line", "b", "m.txt:1", "upkeep = 5", BLOCK,
+                  {"target": "override:x/b", "slot": "upkeep"}, "1.1.0"),
+          Finding("override_replace_kept_removed", "b", "m.txt:1", "legacy = 1", None,
+                  {"target": "override:x/b", "slot": "legacy"}, "1.1.0")]
+    recs = build_payload(fs, new_tag="1.1.0")["records"]
+    assert len(recs) == 2 and recs[0]["block"] == recs[1]["block"]
+
+
+def test_payload_skips_informational_findings_but_counts_them():
+    fs = [Finding("override_replace_merged", "quiet_block", "m.txt:9")]
+    payload = build_payload(fs)
+    assert payload["records"] == [] and payload["info"] == 1
+
+
+def test_payload_marks_findings_from_earlier_patches():
+    fs = [Finding("loc_removed", "KEY", "m.yml", "english", None, {"target": "loc:KEY"},
+                  "1.0.0")]
+    assert build_payload(fs, new_tag="1.1.0")["records"][0]["earlier"] is True
+
+
+def test_payload_counts_dismissed():
+    payload = build_payload([], dismissed=3, new_tag="1.1.0")
+    assert payload["dismissed"] == 3 and payload["new_tag"] == "1.1.0"

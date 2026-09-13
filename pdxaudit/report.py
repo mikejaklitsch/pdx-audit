@@ -67,43 +67,73 @@ _SEV_HEAD = {
 # to. The class carries the severity, the one-line description, and the single
 # shared remedy, so the triage states each of those once and then lists the
 # items under it. This keeps output growing one short line per real finding,
-# not one paragraph, which is what a large mod needs. `detail` is a short
-# per-item extra (a vanilla target, a rename guess); `location` is 'file:line';
-# `data` is an optional dict carrying the rich --display payload (diff, patch,
-# gap, ...), which the terminal triage ignores.
-Finding = namedtuple("Finding", "kind name location detail data")
-Finding.__new__.__defaults__ = ("", None)   # detail and data are optional
+# not one paragraph, which is what a large mod needs.
+#   detail    short per-item extra shown in the triage
+#   location  'file:line'
+#   data      optional rich --display payload, ignored by the terminal triage
+#   key       the finding's identity for its fingerprint (see ledger.py): a
+#             dict with a "target" plus whatever values make it this finding
+#   since     version tag of the vanilla patch the finding comes from
+#   base      version tag the finding was measured from
+Finding = namedtuple("Finding", "kind name location detail data key since base")
+Finding.__new__.__defaults__ = ("", None, None, None, None)
+
+_BEHIND_FIX = "merge vanilla's change into your copy"
 
 # kind -> (severity, audit_tag, plural_label, shared_fix). The label reads after
-# a count ("103 REPLACE blocks that ..."); the fix is stated once for the class.
+# a count ("3 values your REPLACE ..."); the fix is stated once for the class.
 KIND = {
+    "dupes_multiple_sources": (
+        SEV_BROKEN, "dupes", "names defined or overridden in more than one place in the mod",
+        "keep one definition, REPLACE or INJECT and merge the others into it"),
+    "dupes_define_key": (
+        SEV_BROKEN, "dupes", "define keys set in more than one place in the mod",
+        "keep one and delete the others"),
+    "dupes_gui_definition": (
+        SEV_BROKEN, "dupes", "GUI templates or types defined in more than one mod file",
+        "keep one definition and delete the others"),
     "override_orphaned": (
         SEV_BROKEN, "override", "override targets a block vanilla no longer defines",
-        "remove the override, or repoint it at the block vanilla renamed it to"),
-    "override_replace_stale": (
-        SEV_STALE, "override", "REPLACE blocks that no longer carry vanilla's current lines",
-        "merge vanilla's change into your block, or switch to INJECT"),
-    "override_inject_overlap": (
-        SEV_REVIEW, "override", "INJECT targets where vanilla also changed a key you inject at the top level",
-        "check whether your injected key now duplicates or conflicts with vanilla's"),
+        "remove the override, or point it at the block vanilla replaced it with"),
+    "override_replace_frozen": (
+        SEV_STALE, "override", "values your REPLACE keeps at vanilla's old value after vanilla changed them",
+        "take vanilla's new value, or dismiss the finding if keeping the old one is deliberate"),
+    "override_replace_new_line": (
+        SEV_STALE, "override", "lines vanilla added that your REPLACE lacks",
+        "copy the line into your block, or dismiss the finding if leaving it out is deliberate"),
+    "override_replace_kept_removed": (
+        SEV_STALE, "override", "lines vanilla deleted that your REPLACE still carries unchanged",
+        "delete the line, or dismiss the finding if keeping it is deliberate"),
     "gui_shadow_stale": (
-        SEV_STALE, "gui", "shadowed GUI definitions your copy is now behind on",
-        "merge vanilla's change into your copy"),
+        SEV_STALE, "gui", "shadowed GUI definitions vanilla changed in this patch that your copy lacks",
+        _BEHIND_FIX),
+    "gui_shadow_behind": (
+        SEV_STALE, "gui", "shadowed GUI definitions still behind vanilla from an earlier patch",
+        _BEHIND_FIX),
     "gui_file_replaced": (
-        SEV_STALE, "gui", "whole-file GUI replacements where vanilla changed underneath",
+        SEV_STALE, "gui", "whole-file GUI replacements where vanilla changed the file in this patch",
+        "reconcile the changed definitions listed in the GUI detail"),
+    "gui_file_behind": (
+        SEV_STALE, "gui", "whole-file GUI replacements still behind vanilla from an earlier patch",
         "reconcile the changed definitions listed in the GUI detail"),
     "loc_changed": (
         SEV_STALE, "loc", "loc keys vanilla reworded that your override masks",
         "update your override to match, or drop it if the rewording matters"),
-    "override_replace_review": (
-        SEV_REVIEW, "override", "REPLACE blocks whose match with vanilla could not be confirmed",
-        "compare your block against vanilla and reconcile if it matters"),
-    # informational: vanilla changed the block but not the keys this INJECT adds,
-    # so the injection still lands the same way (counted, not listed).
-    "override_inject_context": (SEV_INFO, "override", "", ""),
+    "override_replace_both_changed": (
+        SEV_REVIEW, "override", "values you customized that vanilla also changed",
+        "check your value still makes sense against vanilla's new one"),
+    "override_replace_unclassified": (
+        SEV_REVIEW, "override", "REPLACE changes that could not be matched line by line",
+        "compare your block against vanilla by hand"),
+    "gui_partial_adoption": (
+        SEV_REVIEW, "gui", "GUI copies where an earlier vanilla patch was only partly adopted",
+        "check the lines from that patch your copy lacks"),
+    "override_inject_overlap": (
+        SEV_REVIEW, "override", "INJECT targets where vanilla also changed a key you inject at the top level",
+        "check whether your injected key now duplicates or conflicts with vanilla's"),
     "override_absent": (
         SEV_REVIEW, "override", "override targets with no matching name in vanilla",
-        "repoint or remove the override, or confirm it is mod-only"),
+        "point the override at an existing vanilla name, remove it, or confirm it is mod-only"),
     "gui_file_review": (
         SEV_REVIEW, "gui", "same-path GUI files where vanilla added or removed its copy",
         "confirm your override still makes sense against vanilla"),
@@ -111,7 +141,7 @@ KIND = {
         SEV_REVIEW, "gui", "shadowed GUI definitions vanilla removed",
         "confirm you still want to define them"),
     "gui_new_collision": (
-        SEV_REVIEW, "gui", "names vanilla now also defines too",
+        SEV_REVIEW, "gui", "names vanilla now also defines",
         "check whether you meant to override vanilla's new definition, or rename yours"),
     "loc_removed": (
         SEV_REVIEW, "loc", "loc keys vanilla removed",
@@ -120,43 +150,143 @@ KIND = {
         SEV_REVIEW, "loc", "loc keys vanilla now also defines",
         "check whether you meant to override vanilla's new key, or rename yours"),
     "deps_key_dropped": (
-        SEV_REVIEW, "deps", "keys the mod writes that vanilla dropped",
-        "check for a rename and match vanilla's current name"),
+        SEV_REVIEW, "deps", "keys the mod writes that vanilla no longer uses",
+        "find what vanilla uses now and update or remove the key"),
     "deps_ref_dropped": (
-        SEV_REVIEW, "deps", "names the mod references that vanilla dropped",
-        "repoint the reference at vanilla's current name"),
+        SEV_REVIEW, "deps", "names the mod references that vanilla no longer uses",
+        "find what vanilla uses now and update or remove the reference"),
+    "dupes_plain_other_file": (
+        SEV_REVIEW, "dupes", "plain definitions of a vanilla name in a file not at vanilla's path",
+        "use REPLACE or INJECT, or give the file vanilla's path to replace the whole file"),
     # informational: counted, never listed
-    "override_replace_reconciled": (SEV_INFO, "override", "", ""),
+    "override_inject_context": (SEV_INFO, "override", "", ""),
     "override_nonblock": (SEV_INFO, "override", "", ""),
+    "override_replace_merged": (SEV_INFO, "override", "", ""),
+    "override_replace_commented_out": (SEV_INFO, "override", "", ""),
+    "override_replace_key_removed": (SEV_INFO, "override", "", ""),
     "gui_reconciled": (SEV_INFO, "gui", "", ""),
+    "dupes_file_override_drops": (SEV_INFO, "dupes", "", ""),
 }
 _KIND_ORDER = list(KIND)
 
 _AUDIT_NAME = {"overrides": "override", "deps": "dependency",
-               "gui": "GUI", "loc": "localization"}
+               "gui": "GUI", "loc": "localization", "dupes": "duplicate"}
 
 
 def finding_severity(f):
     return KIND[f.kind][0]
 
 
-def render_triage(findings, old_msg, new_msg, selected, detail_shown=True, report=False):
+# REPLACE line findings, shown as a labelled `yours:` / `vanilla:` pair.
+LINE_KINDS = {
+    "override_replace_frozen": "frozen",
+    "override_replace_new_line": "new_line",
+    "override_replace_kept_removed": "kept_removed",
+    "override_replace_both_changed": "both_changed",
+    "override_replace_unclassified": "unclassified",
+    "override_replace_merged": "merged",
+    "override_replace_commented_out": "commented_out",
+    "override_replace_key_removed": "key_removed",
+}
+
+
+def format_value_lines(cls, slot, old, new, mod, ops, text, since, indent="      "):
+    """Two aligned lines comparing your value with vanilla's change:
+        yours:    <your value>
+        vanilla:  <old>  →  <new>  (<patch>)"""
+    yours, vanilla = value_pair(cls, slot, old, new, mod, ops, text, since)
+    return [f"{indent}yours:    {yours}", f"{indent}vanilla:  {vanilla}"]
+
+
+def value_pair(cls, slot, old, new, mod, ops, text, since):
+    """(yours, vanilla) texts for one REPLACE line finding. Operators are shown
+    only when they differ between the versions."""
+    old_op, new_op, mod_op = (list(ops or []) + [None, None, None])[:3]
+    show_ops = len({o for o in (old_op, new_op, mod_op) if o}) > 1
+    tag = f"  ({since})" if since else ""
+
+    def val(op, v):
+        return f"{op} {v}" if show_ops and op else str(v)
+
+    def stmt(op, v):
+        if slot in (None, "", "@item"):
+            return val(op, v)
+        return f"{slot} {op or '='} {v}"
+
+    if old is None and new is None:          # a whole sub-block
+        if cls == "new_line":
+            yours, vanilla = "(missing)", f"added {text}{tag}"
+        elif cls == "kept_removed":
+            yours, vanilla = text, f"deleted{tag}"
+        else:
+            yours, vanilla = f"**{text}**", f"deleted{tag}"
+    elif cls == "frozen":
+        yours, vanilla = val(mod_op, mod), f"{val(old_op, old)}  →  {val(new_op, new)}{tag}"
+    elif cls == "both_changed":
+        yours = f"**{val(mod_op, mod)}**" if mod is not None else "(missing)"
+        if old is not None and new is not None:
+            vanilla = f"{val(old_op, old)}  →  {val(new_op, new)}{tag}"
+        elif new is not None:
+            vanilla = f"added {val(new_op, new)}{tag}"
+        else:
+            vanilla = f"deleted {val(old_op, old)}{tag}"
+    elif cls == "new_line":
+        yours, vanilla = "(missing)", f"added {stmt(new_op, new)}{tag}"
+    elif cls == "kept_removed":
+        shown = mod if mod is not None else old
+        yours, vanilla = stmt(mod_op or old_op, shown), f"deleted{tag}"
+    elif cls == "unclassified":
+        yours, vanilla = "(repeated key, could not be matched)", f"added {stmt(new_op, new)}{tag}"
+    elif cls == "merged":
+        yours = val(mod_op, mod) if mod is not None else stmt(new_op, new)
+        vanilla = (f"{val(old_op, old)}  →  {val(new_op, new)}{tag}" if old is not None
+                   else f"added {stmt(new_op, new)}{tag}")
+    elif cls == "commented_out":
+        yours, vanilla = "(commented out)", f"added {stmt(new_op, new)}{tag}"
+    else:                                     # key_removed
+        yours, vanilla = "(removed)", f"{val(old_op, old)}  →  {val(new_op, new)}{tag}"
+    return yours, vanilla
+
+
+def line_label(key):
+    """'path > key' for a REPLACE line finding's key dict ('' for a single value)."""
+    path = " > ".join(key.get("path") or [])
+    slot = key.get("slot")
+    if slot in (None, ""):
+        return path
+    if slot == "@item":
+        return f"{path} (list member)" if path else "(list member)"
+    return f"{path} > {slot}" if path else slot
+
+
+def _is_value_finding(f):
+    k = f.key or {}
+    return f.kind in LINE_KINDS and "slot" in k and (
+        k.get("old") is not None or k.get("new") is not None or k.get("text"))
+
+
+def render_triage(findings, old_msg, new_msg, selected, detail_shown=True,
+                  new_tag=None, dismissed=0):
     """The cross-audit summary printed above the per-audit detail. `findings` is
-    every audit's Finding list concatenated. Returns Markdown (one string); the
-    ColorWriter tints it when stdout is a terminal.
+    every audit's visible (not dismissed) Finding list. Returns Markdown (one
+    string); the ColorWriter tints it when stdout is a terminal.
 
     Findings are grouped by CLASS (severity + kind), most urgent first. Each
     class states its description and its one shared remedy once, then lists its
-    affected items one compact line each, so a large mod's real workload shows
-    as a long-but-flat list rather than a wall of repeated paragraphs. Nothing
-    is hidden: every actionable finding is listed. Informational findings are
-    counted but not detailed. With nothing actionable it prints a clean verdict.
-    `detail_shown` is False under --summary, when no per-audit detail follows."""
+    affected items one compact line each, prefixed with the id `--dismiss`
+    takes (duplicates, which cannot be dismissed, carry none). When `new_tag`
+    is given, findings from an earlier patch than `new_tag` are listed in a
+    separate "still open" section. Informational findings are counted but not
+    detailed; `dismissed` findings are only counted."""
+    from .ledger import finding_id, is_dismissible, short_id
+
     ran = ", ".join(_AUDIT_NAME.get(s, s) for s in selected)
     title = "# Audit summary"
     if old_msg or new_msg:
         title += f": {old_msg} → {new_msg}"
     lines = [title, ""]
+    dismissed_line = (f"{dismissed} dismissed findings hidden; list them with "
+                      f"`pdx-audit --show-dismissed`." if dismissed else None)
 
     actionable = [f for f in findings if finding_severity(f) != SEV_INFO]
     n_info = len(findings) - len(actionable)
@@ -164,6 +294,8 @@ def render_triage(findings, old_msg, new_msg, selected, detail_shown=True, repor
         tail = f" ({n_info} informational)" if n_info else ""
         lines.append(f"Ran {ran}. **No action needed**: everything the mod "
                      f"overrides is current with vanilla.{tail}")
+        if dismissed_line:
+            lines += ["", dismissed_line]
         return "\n".join(lines)
 
     by_sev = {s: [f for f in actionable if finding_severity(f) == s]
@@ -174,35 +306,69 @@ def render_triage(findings, old_msg, new_msg, selected, detail_shown=True, repor
                  f"{counts}.{info_note}")
     lines.append("")
 
-    first_sev = None
-    for sev in _SEV_ORDER:
-        if not by_sev.get(sev):
-            continue
-        first_sev = first_sev or sev
-        sym = _SEV_SYMBOL[sev]
-        for kind in _KIND_ORDER:
-            if KIND[kind][0] != sev:
-                continue
-            items = [f for f in actionable if f.kind == kind]
-            if not items:
-                continue
-            _s, _a, label, fix = KIND[kind]
-            head = f"{sym} **{len(items)} {label}.**"
-            lines.append(head + (f" Fix: {fix}." if fix else ""))
-            for f in sorted(items, key=lambda x: x.name):
-                loc = (f" `{f.location}`"
-                       if f.location and f.location != f.name else "")
-                extra = f" ({f.detail})" if f.detail else ""
-                lines.append(f"  - `{f.name}`{loc}{extra}")
-            lines.append("")
+    earlier = [f for f in actionable if new_tag and f.since and f.since != new_tag]
+    earlier_ids = {id(f) for f in earlier}
+    current = [f for f in actionable if id(f) not in earlier_ids]
 
+    def section(items, show_since):
+        for sev in _SEV_ORDER:
+            sym = _SEV_SYMBOL.get(sev, "")
+            for kind in _KIND_ORDER:
+                if KIND[kind][0] != sev:
+                    continue
+                group = [f for f in items if f.kind == kind]
+                if not group:
+                    continue
+                _s, _a, label, fix = KIND[kind]
+                head = f"{sym} **{len(group)} {label}.**"
+                lines.append(head + (f" Fix: {fix}." if fix else ""))
+                first_id = None
+                for f in sorted(group, key=lambda x: (x.name, x.detail or "")):
+                    sid = short_id(finding_id(f)) if is_dismissible(f) else None
+                    first_id = first_id or sid
+                    fid = f"[{sid}] " if sid else ""
+                    loc = (f" `{f.location}`"
+                           if f.location and f.location != f.name else "")
+                    if _is_value_finding(f):
+                        k = f.key
+                        label = line_label(k)
+                        lines.append(f"  - {fid}`{f.name}`{loc}" + (f" {label}" if label else ""))
+                        lines.extend(format_value_lines(
+                            LINE_KINDS[f.kind], k.get("slot"), k.get("old"), k.get("new"),
+                            k.get("mod"), k.get("ops"), k.get("text"), f.since))
+                        continue
+                    bits = [b for b in (f.detail, f"since {f.since}" if show_since else "") if b]
+                    extra = f" ({'; '.join(bits)})" if bits else ""
+                    lines.append(f"  - {fid}`{f.name}`{loc}{extra}")
+                if first_id:
+                    lines.append(f'    To keep one as it is: `pdx-audit --dismiss {first_id} --reason "why"`')
+                lines.append("")
+
+    if earlier:
+        if current:
+            lines.append(f"## This patch{f' ({new_tag})' if new_tag else ''} and current state")
+            lines.append("")
+            section(current, False)
+        lines.append("## Still open from earlier patches")
+        lines.append("")
+        section(earlier, True)
+    else:
+        section(current, False)
+
+    first_sev = next(s for s in _SEV_ORDER if by_sev.get(s))
     top = _SEV_HEAD[first_sev].split(":")[0].lower()
-    if report:
-        closer = "Full detail, grouped by file, is in the HTML report."
-    elif detail_shown:
+    if detail_shown:
         closer = "Full per-audit detail follows below."
     else:
         closer = "Re-run without --summary for the per-audit detail."
+    if dismissed_line:
+        lines.append(dismissed_line)
+    if any(is_dismissible(f) for f in actionable):
+        lines.append('To keep a finding as it is, dismiss it: `pdx-audit --dismiss <id> --reason "why"`. '
+                     "It stays hidden in later runs until vanilla's value or yours changes; "
+                     "`pdx-audit --undismiss <id>` brings it back.")
+    if any(not is_dismissible(f) for f in actionable):
+        lines.append("Duplicate definitions cannot be dismissed; fix them in the mod.")
     lines.append(f"**Open the {top} items first.** {closer}")
     return "\n".join(lines)
 
@@ -262,6 +428,30 @@ def _inline(s):
 
 _SYMBOLS = (("✗", "red"), ("⚠", "yellow"), ("✓", "green"), ("≈", "yellow"))
 
+_VALUE_LINE = re.compile(r"^(\s+)(yours:|vanilla:)(\s+)(.*)$")
+_PATCH_TAG = re.compile(r"^(.*?)(\s+)(\([^()]*\))$")
+
+
+def _render_value_line(m):
+    """`yours:` / `vanilla:` lines: labels and vanilla's old value dim, vanilla's
+    new or added value green, the patch tag dim, your value as written."""
+    indent, label, gap, rest = m.groups()
+    tag = ""
+    if label == "vanilla:":
+        t = _PATCH_TAG.match(rest)
+        if t:
+            rest, tag = t.group(1), t.group(2) + _wrap(("dim",), t.group(3))
+    if label == "yours:":
+        body = _inline(rest)
+    elif "  →  " in rest:
+        old, new = rest.rsplit("  →  ", 1)
+        body = _wrap(("dim",), old) + _wrap(("dim",), "  →  ") + _wrap(("green",), new)
+    elif rest.startswith("added "):
+        body = _wrap(("dim",), "added ") + _wrap(("green",), rest[len("added "):])
+    else:
+        body = _wrap(("dim",), rest)
+    return indent + _wrap(("dim",), label) + gap + body + tag
+
 
 def _verdict(text):
     t = text.strip()
@@ -275,9 +465,14 @@ def _verdict(text):
 
 
 def _render_md(line):
-    for sym, col in _SYMBOLS:
-        if sym in line:
-            return _wrap((col,), _strip_md(line))
+    m = _VALUE_LINE.match(line)
+    if m:
+        return _render_value_line(m)
+    if any(sym in line for sym, _col in _SYMBOLS):
+        rendered = _inline(line)
+        for sym, col in _SYMBOLS:
+            rendered = rendered.replace(sym, _wrap((col,), sym))
+        return rendered
     v = _verdict(_strip_md(line))
     if v:
         return _wrap((v,), _strip_md(line))

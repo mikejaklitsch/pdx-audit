@@ -62,6 +62,50 @@ def test_all_five_branches(monkeypatch):
     assert "KEY_UNCHANGED" not in out   # unchanged keys show only in the summary tally
 
 
+def _run_loc_ctx(monkeypatch, mod_text, values_by_commit, ctx):
+    monkeypatch.setattr(loc, "mod_loc_files",
+                        lambda mr: [("main_menu/localization/english/t_l_english.yml", mod_text)])
+
+    def fake_build(repo, commit, wanted, label=""):
+        return {k: v for k, v in values_by_commit[commit].items() if k in wanted}
+    monkeypatch.setattr(loc, "build_loc_vanilla", fake_build)
+    args = types.SimpleNamespace(block=None)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        findings = loc.run_loc_audit("/mod", "repo", "OLD", "1.2 Old", "NEW", "1.3 New", args, ctx)
+    return findings, buf.getvalue()
+
+
+def _ctx(bases=None, fixed=False):
+    return types.SimpleNamespace(
+        commits=[("NEW", "1.3 New"), ("OLD", "1.2 Old"), ("OLDER", "1.1 Older")],
+        new_tag="1.3", fixed_window=fixed, bases=bases or {}, scanned={})
+
+
+def test_findings_carry_keys_and_since(monkeypatch):
+    E = "english"
+    values = {"OLDER": {(E, "KEY_A"): "A"}, "OLD": {(E, "KEY_A"): "A"},
+              "NEW": {(E, "KEY_A"): "B"}}
+    findings, _ = _run_loc_ctx(monkeypatch, 'l_english:\n KEY_A:0 "mine"\n', values, _ctx())
+    f = next(f for f in findings if f.kind == "loc_changed")
+    assert f.key["target"] == "loc:english/KEY_A"
+    assert f.since == "1.3" and f.base == "1.2"
+
+
+def test_open_finding_base_carries_a_change_forward(monkeypatch):
+    E = "english"
+    values = {"OLDER": {(E, "KEY_A"): "A"}, "OLD": {(E, "KEY_A"): "B"},
+              "NEW": {(E, "KEY_A"): "B"}}
+    mod = 'l_english:\n KEY_A:0 "mine"\n'
+    findings, _ = _run_loc_ctx(monkeypatch, mod, values, _ctx())
+    assert not [f for f in findings if f.kind == "loc_changed"]      # window saw no change
+    findings, out = _run_loc_ctx(monkeypatch, mod, values,
+                                 _ctx(bases={"loc:english/KEY_A": "1.1"}))
+    f = next(f for f in findings if f.kind == "loc_changed")
+    assert f.since == "1.2" and f.base == "1.1"
+    assert '"A"' in out and '"B"' in out
+
+
 def test_clean_when_nothing_drifted(monkeypatch):
     mod_text = 'l_english:\n KEY_A:0 "mine"\n'
     old = {("english", "KEY_A"): "V"}

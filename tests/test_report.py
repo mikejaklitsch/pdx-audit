@@ -33,6 +33,32 @@ def test_severity_symbol_tints_its_line():
     assert "✗" in out
 
 
+def test_symbol_is_coloured_not_the_whole_line():
+    out = _render("  ✗ **kept at vanilla's old value**\n")
+    assert "\033[31m✗\033[0m" in out            # the symbol alone is red
+    assert "\033[1mkept at vanilla's old value" in out
+    assert "\033[31m  ✗ kept" not in out         # the heading is not painted red
+
+
+DIM, GREEN, BOLD = "\033[2m", "\033[32m", "\033[1m"
+
+
+def test_value_lines_separate_labels_from_values():
+    out = _render("        yours:    rgo_size_advance_absolutism\n"
+                  "        vanilla:  rgo_size_advance_absolutism  →  construction_speed_absolutism  (1.3.8)\n")
+    assert f"{DIM}yours:" in out and f"{DIM}vanilla:" in out
+    assert f"{DIM}rgo_size_advance_absolutism" in out            # vanilla's old value dim
+    assert f"{GREEN}construction_speed_absolutism" in out        # vanilla's new value green
+    assert f"{DIM}(1.3.8)" in out
+
+
+def test_value_lines_colour_added_and_bold_customized():
+    out = _render("        yours:    **25**\n"
+                  "        vanilla:  added upkeep = 5  (1.3.8)\n")
+    assert f"{BOLD}25" in out
+    assert f"{GREEN}upkeep = 5" in out and "**" not in out
+
+
 def test_dash_prefix_is_diff_red_only_without_markdown():
     # a plain diff-summary removal line is coloured red like a diff
     assert "\033[31m" in _render("  - upkeep = 5\n")

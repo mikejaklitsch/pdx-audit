@@ -27,10 +27,11 @@ def test_tracker_commits_newest_first(world):
 def test_override_audit_flags_stale_replace(world):
     out = _out(run_override_audit, world.mod, world.repo,
                world.old, "1.0.0", world.new, "1.1.0", world.args)
-    # vanilla added `upkeep = 5`; the mod's REPLACE lacks it -> stale
+    # vanilla added `upkeep = 5` and dropped `legacy_mod`; the mod's REPLACE
+    # lacks the first and still carries the second
     assert "some_building" in out
-    assert "1 REPLACE blocks stale" in out
-    assert "upkeep = 5" in out          # names the missing line
+    assert "2 stale REPLACE lines" in out
+    assert "upkeep = 5" in out and "legacy_mod = 1" in out
 
 
 def test_deps_audit_flags_dropped_key(world):
@@ -38,17 +39,17 @@ def test_deps_audit_flags_dropped_key(world):
                world.old, "1.0.0", world.new, "1.1.0")
     # vanilla dropped `legacy_mod`, which the mod still writes as a key
     assert "legacy_mod" in out
-    assert "**1** keys the mod writes that vanilla dropped" in out
+    assert "**1** keys the mod writes that vanilla no longer uses" in out
 
 
 def test_deps_audit_flags_dropped_reference(world):
     out = _out(run_deps_audit, world.mod, world.repo,
                world.old, "1.0.0", world.new, "1.1.0")
-    # vanilla renamed building_farm -> building_granary; the mod references the
-    # old name on the right-hand side of `has_building = building_farm`
-    assert "**1** names the mod references that vanilla dropped" in out
+    # vanilla replaced building_farm with building_granary; the mod references
+    # the old name on the right-hand side of `has_building = building_farm`
+    assert "**1** names the mod references that vanilla no longer uses" in out
     assert "building_farm" in out
-    assert "building_granary" in out          # offered as a rename candidate
+    assert "building_granary" not in out          # no rename suggestions
 
 
 def test_gui_audit_flags_stale_shadow(world):
@@ -73,4 +74,4 @@ def test_clean_when_mod_matches_new_vanilla(world):
     out = _out(run_override_audit, world.mod, world.repo,
                world.new, "1.1.0", world.new, "1.1.0", world.args)
     assert "unique overrides scanned" in out
-    assert "1 REPLACE blocks stale" not in out
+    assert "Action needed" not in out
