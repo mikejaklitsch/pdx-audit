@@ -154,6 +154,9 @@ KIND.update({
     "override_inject_overlap": (
         SEV_REVIEW, "override", "INJECT targets where vanilla also changed a key you inject at the top level",
         "check whether your injected key now duplicates or conflicts with vanilla's"),
+    "override_now_created": (
+        SEV_REVIEW, "override", "_OR_CREATE overrides whose target vanilla removed, so the override now creates it",
+        "confirm the created definition still belongs, since vanilla no longer has one"),
     "override_absent": (
         SEV_REVIEW, "override", "override targets with no matching name in vanilla",
         "point the override at an existing vanilla name, remove it, or confirm it is mod-only"),

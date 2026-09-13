@@ -36,6 +36,37 @@ def test_your_edit_raises_vanilla_changes_in_its_block_and_is_not_a_finding(worl
     assert out.index("high priority") < out.index("legacy_mod")
 
 
+def test_replace_or_create_is_compared_like_replace(world):
+    path = world.mod / "in_game/common/building_types/m.txt"
+    path.write_text(path.read_text().replace("REPLACE:", "REPLACE_OR_CREATE:"))
+    findings, _out = _run(world)
+    assert sorted(f.kind for f in findings) == ["override_vanilla_added_mid", "override_vanilla_removed_mid"]
+
+
+def test_a_missing_target_is_expected_for_try_and_or_create(world):
+    _write_tree(world.mod, {"in_game/common/building_types/n.txt":
+                            "REPLACE_OR_CREATE:brand_new = {\n\tcost = 1\n}\n"
+                            "INJECT_OR_CREATE:other_new = {\n\tcost = 2\n}\n"
+                            "TRY_REPLACE:maybe_new = {\n\tcost = 3\n}\n"})
+    findings, out = _run(world)
+    assert not any(f.name in ("brand_new", "other_new", "maybe_new") for f in findings)
+    assert "REPLACE_OR_CREATE:brand_new at `in_game/common/building_types/n.txt:1`: creates it" in out
+    assert "TRY_REPLACE:maybe_new at `in_game/common/building_types/n.txt:7`: ignored" in out
+
+
+def test_or_create_whose_target_vanilla_removed_now_creates_it(tmp_path):
+    bt = "in_game/common/building_types/b.txt"
+    tr = build_tracker(tmp_path, [("1.0", {bt: "gone_building = {\n\tcost = 1\n}\n"}),
+                                  ("1.1", {bt: "other_building = {\n\tcost = 1\n}\n"})])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}',
+                      "in_game/common/building_types/m.txt": "REPLACE_OR_CREATE:gone_building = {\n\tcost = 5\n}\n"})
+    with redirect_stdout(io.StringIO()):
+        findings = run_override_audit(mod, tr.repo, tr.hashes["1.0"], "1.0 Test", tr.hashes["1.1"], "1.1 Test",
+                                      audit_args(), make_ctx(tr.repo, "1.1"))
+    assert [(f.kind, f.since) for f in findings] == [("override_now_created", "1.1")]
+
+
 def test_the_window_starts_at_old_when_it_is_given(world):
     findings, out = _run(world, audit_args(old="1.1.0"), old=world.new)
     assert findings == [] and "All overrides are current with vanilla" in out

@@ -3,8 +3,8 @@
 Five audits (name one or more to run just those, or none to run all five), all
 driven by the vanilla-tracker bare git repo:
 
-  Override audit (--overrides): finds every INJECT:/REPLACE:/TRY_INJECT:/
-  TRY_REPLACE: directive in the mod and compares each REPLACE with vanilla's
+  Override audit (--overrides): finds every INJECT:, REPLACE:, TRY_ and _OR_CREATE
+  directive in the mod and compares each REPLACE with vanilla's
   tracked versions of its block, so a change vanilla made that your copy lacks is
   told apart from your own edits and from a change that meets one of them.
 

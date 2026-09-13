@@ -15,7 +15,10 @@ from .report import diff_lines, diff_summary, Finding
 from .tracker import MODULE_ROOTS, _git_archive, full_hash
 from .config import should_skip
 
-REPLACE_TYPES = ("REPLACE", "TRY_REPLACE")
+REPLACE_TYPES = ("REPLACE", "TRY_REPLACE", "REPLACE_OR_CREATE")
+# Directives whose target may be missing: a TRY_ override is then ignored, and an
+# _OR_CREATE override creates the object.
+MISSING_OK = ("TRY_INJECT", "TRY_REPLACE", "INJECT_OR_CREATE", "REPLACE_OR_CREATE")
 
 def parse_top_blocks(text):
     blocks = {}
@@ -58,7 +61,8 @@ def find_overrides(mod_root):
         except Exception:
             continue
         for ln, line in enumerate(text.split("\n"), 1):
-            m = re.match(r"\s*(TRY_REPLACE|TRY_INJECT|REPLACE|INJECT)\s*:\s*(\w+)", line)
+            m = re.match(r"\s*(TRY_REPLACE|TRY_INJECT|REPLACE_OR_CREATE|INJECT_OR_CREATE|REPLACE|INJECT)"
+                         r"\s*:\s*(\w+)", line)
             if m:
                 results.append({
                     "type": m.group(1),
@@ -742,9 +746,7 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
                 changed_inject.append((ov, old_e, new_e))
 
     # Single-value REPLACEs (`REPLACE:name = value`), which have no block to index.
-    try_types = ("TRY_INJECT", "TRY_REPLACE")
-    hard_misses = [o for o in not_found if o["type"] not in try_types]
-    try_injects = [o for o in not_found if o["type"] in try_types]
+    hard_misses = list(not_found)
     scalar_ovs = [(o, mod_scalar_text(mod_root, o)) for o in hard_misses if o["type"] in REPLACE_TYPES]
     scalar_ovs = [(o, t) for o, t in scalar_ovs if t is not None]
     scalar_results, scalar_seen = [], set()
@@ -773,6 +775,8 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
             else:
                 unchanged.append(ov)
     hard_misses = [o for o in hard_misses if id(o) not in scalar_seen]
+    expected_misses = [o for o in hard_misses if o["type"] in MISSING_OK]
+    hard_misses = [o for o in hard_misses if o["type"] not in MISSING_OK]
     defined_elsewhere, absent = [], []
     if hard_misses:
         # A hard miss is only alarming if the name is truly gone from vanilla.
@@ -781,6 +785,11 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
             {o["block"] for o in hard_misses})
         defined_elsewhere = [o for o in hard_misses if o["block"] in present]
         absent = [o for o in hard_misses if o["block"] not in present]
+
+    # An _OR_CREATE override whose target vanilla removed creates the object instead
+    # of being orphaned.
+    created = [r for r in removed if r[0]["type"].endswith("_OR_CREATE")]
+    removed = [r for r in removed if not r[0]["type"].endswith("_OR_CREATE")]
 
     n_changes = sum(len(item[-1].flagged) for item in changed_replace + scalar_results)
     summary = [
@@ -794,6 +803,7 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
         f"- **{len(changed_inject)}** INJECT targets vanilla changed",
         f"- **{len(scalar_results)}** single-value REPLACEs vanilla changed",
         f"- **{len(removed)}** vanilla blocks removed: override orphaned",
+        f"- **{len(created)}** vanilla blocks removed that an _OR_CREATE override now creates",
         f"- **{len(absent)}** not found in vanilla, **{len(defined_elsewhere)}** defined but not as a block",
         f"- **{len(unchanged)}** current with vanilla",
         "",
@@ -806,6 +816,14 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
         for ov, vfile, since, _base in removed:
             print(f"- **{ov['type']}:{ov['block']}**, `{ov['file']}:{ov['line']}` "
                   f"(was in `{vfile}`, removed in {since})")
+        print()
+
+    if created:
+        print(f"## Removed from Vanilla, Now Created by the Override ({len(created)})")
+        print()
+        for ov, vfile, since, _base in created:
+            print(f"- **{ov['type']}:{ov['block']}**, `{ov['file']}:{ov['line']}` "
+                  f"(was in `{vfile}`, removed in {since}); the override now creates it")
         print()
 
     if unreadable:
@@ -860,16 +878,21 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
             print(f"- {ov['type']}:{ov['block']}, `{ov['file']}:{ov['line']}`")
         print()
 
-    if try_injects:
-        print(f"## TRY_* Overrides Not Found (expected, non-fixable) ({len(try_injects)})")
+    if expected_misses:
+        print(f"## Targets Vanilla Does Not Define (expected for TRY_ and _OR_CREATE) "
+              f"({len(expected_misses)})")
         print()
-        for ov in try_injects:
-            print(f"- {ov['type']}:{ov['block']} at `{ov['file']}:{ov['line']}`")
+        for ov in expected_misses:
+            effect = "creates it" if ov["type"].endswith("_OR_CREATE") else "ignored"
+            print(f"- {ov['type']}:{ov['block']} at `{ov['file']}:{ov['line']}`: {effect}")
         print()
 
     findings = []
     for ov, _vfile, since, base in removed:
         findings.append(Finding("override_orphaned", ov["block"], f"{ov['file']}:{ov['line']}",
+                                "", None, {"target": override_target(ov)}, since, base))
+    for ov, _vfile, since, base in created:
+        findings.append(Finding("override_now_created", ov["block"], f"{ov['file']}:{ov['line']}",
                                 "", None, {"target": override_target(ov)}, since, base))
     for ov in unreadable:
         findings.append(Finding("override_unreadable", ov["block"], f"{ov['file']}:{ov['line']}",
@@ -903,7 +926,8 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
         findings.append(Finding("override_nonblock", ov["block"], f"{ov['file']}:{ov['line']}",
                                 "", None, {"target": override_target(ov)}))
 
-    if not n_changes and not overlaps_found and not removed and not absent and not unreadable:
+    if (not n_changes and not overlaps_found and not removed and not created and not absent
+            and not unreadable):
         print("**All overrides are current with vanilla.** No action needed.")
     else:
         print("---")

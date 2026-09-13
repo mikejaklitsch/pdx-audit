@@ -62,11 +62,16 @@ Two terms used throughout:
 The tool scans the mod for the places it overrides vanilla. In script files that means directives like:
 
 ```
-REPLACE:some_block = { ... }       # replace vanilla's block entirely
-REPLACE:some_value = 5             # replace a single-value definition
-INJECT:some_block = { ... }        # add to / modify vanilla's block
-TRY_INJECT:maybe_block = { ... }   # inject only if the target exists
+REPLACE:some_block = { ... }             # replace vanilla's block entirely
+REPLACE:some_value = 5                   # replace a single-value definition
+INJECT:some_block = { ... }              # add to vanilla's block
+TRY_REPLACE:maybe_block = { ... }        # replace only if the target exists
+TRY_INJECT:maybe_block = { ... }         # inject only if the target exists
+REPLACE_OR_CREATE:some_block = { ... }   # replace, or create the block if it does not exist
+INJECT_OR_CREATE:some_block = { ... }    # inject, or create the block if it does not exist
 ```
+
+`REPLACE:` and `INJECT:` are errors when the target does not exist; the `TRY_` and `_OR_CREATE` forms are not.
 
 In GUI files the override is implicit: if the mod defines a `template` or `type` with the same name as a vanilla one, or ships a `.gui` file at the same path as a vanilla file, it overrides it. There is no keyword; sameness of name or path *is* the override. This is why the GUI audit is a separate pass with its own logic (section 8).
 
@@ -122,9 +127,9 @@ History that starts after your copy was made cannot tell your edits from vanilla
 
 ## 5. Override audit
 
-For each unique `INJECT`/`REPLACE`/`TRY_*` directive, the audit reads vanilla's top-level block of the same name in the same folder.
+For each unique `INJECT`, `REPLACE`, `TRY_*` and `*_OR_CREATE` directive, the audit reads vanilla's top-level block of the same name in the same folder.
 
-**REPLACE blocks.** The block is read at every snapshot in the window (section 2):
+**REPLACE blocks** (`REPLACE`, `TRY_REPLACE`, `REPLACE_OR_CREATE`). The block is read at every snapshot in the window (section 2):
 
 | vanilla's block | meaning | reported as |
 |-----------------|---------|-------------|
@@ -138,7 +143,7 @@ A REPLACE whose braces never close cannot be read and is reported as broken.
 
 **INJECT.** An INJECT adds direct children to vanilla's block, so only vanilla's top-level children can collide with it. The audit compares vanilla's block at the window's old version, or at the base of an open finding for the target (section 10), with the new version. Blocks that read the same statement for statement are unchanged. When vanilla added, removed or changed a top-level key that the INJECT also adds, it is reported for review; otherwise the injection still lands the same way and the change is informational. A target present at the old version and gone at the new one is orphaned.
 
-**TRY_ directives.** A `TRY_` target absent from every version is listed as expected. A target that existed and vanilla removed is orphaned like any other.
+**TRY_ and _OR_CREATE directives.** A target of either absent from every version is listed as expected: a `TRY_` override is then ignored, and an `_OR_CREATE` override creates the object. A `TRY_` target that vanilla removed is orphaned like any other. An `_OR_CREATE` target that vanilla removed is not orphaned, since the override now creates the object; it is reported for review.
 
 ---
 
@@ -260,7 +265,7 @@ A record whose commit is not reachable from any branch, remote branch, tag, or H
 
 Run with `--dupes`. The rule is one source of truth per definition: within a `common/<type>` folder, across all module roots, each name should be defined or overridden in exactly one place in the mod.
 
-The audit scans top-level statements in every mod script and groups them by type and name, counting plain definitions and every prefixed override (`INJECT:`, `REPLACE:`, `TRY_*`) alike:
+The audit scans top-level statements in every mod script and groups them by type and name, counting plain definitions and every prefixed override (`INJECT:`, `REPLACE:`, `TRY_*`, `*_OR_CREATE`) alike:
 
 | Finding | Case | Severity | Dismissible |
 |---------|------|----------|-------------|
