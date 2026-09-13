@@ -328,14 +328,18 @@ def _strip_positions(nodes):
             _strip_positions(node['val'])
 
 
-def parse(tokens, text, raw_blocks=RAW_BLOCKS, strict=True, positions=False):
+def parse(tokens, text, raw_blocks=RAW_BLOCKS, strict=True, positions=False, keyless=False):
     """Parse a token list into an AST (nested list of node dicts).
 
     strict=False skips a stray '}' and closes blocks still open at the end of the
     text, instead of raising or returning only the innermost open block.
     positions=True keeps each node's _start, _end and _open_end offsets; without
-    it the nodes are exactly as a formatter has always received them."""
+    it the nodes are exactly as a formatter has always received them.
+    keyless=True keeps a block that has no key (`{ 0.0 1.0 }` in a list) as a node
+    with key None; without it such a block's contents are left out, as a formatter
+    has always received them."""
     stack = []
+    opens = []          # (start, end) of each open '{', innermost last
     current_list = []
     i = 0
     preceding_comments = []
@@ -371,6 +375,7 @@ def parse(tokens, text, raw_blocks=RAW_BLOCKS, strict=True, positions=False):
                 raise MisnestedBracesError(token_line)
             finished_list = current_list
             current_list = stack.pop()
+            open_start, open_end = opens.pop()
             if current_list and current_list[-1].get('val') == 'PENDING_BLOCK':
                 parent_node = current_list[-1]
                 parent_node['val'] = finished_list
@@ -381,6 +386,10 @@ def parse(tokens, text, raw_blocks=RAW_BLOCKS, strict=True, positions=False):
                 if cm:
                     parent_node['_cm_close'] = cm
                     i += offset
+            elif keyless:
+                current_list.append({'key': None, 'op': None, 'val': finished_list, 'type': 'node',
+                                     '_start': open_start, '_open_end': open_end,
+                                     '_end': token['end']})
             preceding_comments = []
             i += 1
             continue
@@ -405,6 +414,7 @@ def parse(tokens, text, raw_blocks=RAW_BLOCKS, strict=True, positions=False):
                     current_list[-1]['_cm_open'] = cm
                     i += offset
             stack.append(current_list)
+            opens.append((token['start'], token['end']))
             current_list = []
             i += 1
             continue
