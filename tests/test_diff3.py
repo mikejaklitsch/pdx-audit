@@ -167,12 +167,17 @@ def test_block_only_you_have_still_shows_vanilla_text_vanilla_deleted_inside_it(
         ("mod_added", "info", "s", None), ("vanilla_removed", "high", "t", 1)]
 
 
-def test_key_vanilla_no_longer_uses_is_flagged_even_at_the_baseline():
+def test_block_vanilla_deleted_that_you_changed_is_yours_when_your_copy_came_after():
     versions = ("w = { a = 1 u = { k = 1 } }", "w = { a = 2 b = 3 c = 4 d = 5 p = { k = 1 } }")
     mod = "w = { a = 2 b = 3 c = 4 d = 5 u = { k = 5 } }"
     assert baseline(mod, list(versions)) == 1
     assert _changes(mod, *versions) == [
-        ("both_changed", "high", "u", 1), ("vanilla_added", "mid", "p", 1)]
+        ("mod_added", "info", "u", None), ("vanilla_added", "high", "p", 1)]
+
+
+def test_block_vanilla_deleted_after_your_copy_that_you_changed_is_both_changed():
+    versions = ("w = { a = 1 u = { k = 1 } }", "w = { a = 1 u = { k = 1 } }", "w = { a = 1 }")
+    assert _changes("w = { a = 1 u = { k = 5 } }", *versions) == [("both_changed", "high", "u", 2)]
 
 
 def test_block_vanilla_named_still_pairs_by_key():

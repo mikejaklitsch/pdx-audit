@@ -25,9 +25,8 @@ blocks plus the statement's own key.
                     at or before your baseline, so your copy was made seeing it
 
 A copy still holding an old vanilla value, or a statement vanilla deleted, is flagged
-whatever its baseline, since that is vanilla's text and not an edit; so is one whose
-key vanilla no longer uses at that place, and vanilla's deleted text inside a block
-only the copy has.
+whatever its baseline, since that is vanilla's text and not an edit; so is vanilla's
+deleted text inside a block only the copy has.
 
 A block of your own wrapped around vanilla's statements moves them to a different
 place, so they are not linked to vanilla's history there.
@@ -368,8 +367,8 @@ def _walk(mine, theirs, path, parent, hist, out):
     settled_mine, settled_theirs = _settle(mine, theirs, pairs)
     local, inner = [], []
 
-    def add(kind, m, v, since, after=None, demote=True):
-        if demote and kind in CONFLICT_KINDS and hist.seen_before_copy(since):
+    def add(kind, m, v, since, after=None):
+        if kind in CONFLICT_KINDS and hist.seen_before_copy(since):
             kind, since = ("mod_removed" if m is None else
                            "mod_changed" if v is not None else "mod_added"), None
         local.append(Change(kind, None, path, m, v, since, parent, after))
@@ -412,8 +411,7 @@ def _walk(mine, theirs, path, parent, hist, out):
         if k is not None:
             add("vanilla_removed", m, None, k)
         elif (k := hist.gone(place)) is not None:
-            # a key vanilla no longer uses here at all is flagged whatever the baseline
-            add("both_changed", m, None, k, demote=hist.count(hist.cur, place) > 0)
+            add("both_changed", m, None, k)
         else:
             add("mod_added", m, None, None)
             if m.children is not None:
