@@ -9,13 +9,17 @@ no longer matches."""
 import hashlib
 import json
 
-from .report import SEV_INFO, finding_severity
+from .report import KIND, SEV_INFO, finding_severity
 
 SHORT_ID = 8
+
+# A kind's audit tag or a target's prefix, as the audit's command-line name.
+_AUDITS = {"override": "overrides", "guifile": "gui", "dupesfile": "dupes"}
 
 # Duplicate definitions must be fixed, never dismissed.
 NOT_DISMISSIBLE = frozenset({
     "dupes_multiple_sources", "dupes_define_key", "dupes_gui_definition",
+    "dupes_loc_key", "dupes_loc_key_same", "dupes_on_action_syntax", "dupes_on_action_key",
 })
 
 
@@ -27,9 +31,16 @@ def target_of(f):
     return (f.key or {}).get("target") or f"{f.kind}:{f.name}"
 
 
+# Key fields the id ignores: `was`, vanilla's statement before a conflicting change,
+# follows from vanilla's history and the rest of the key.
+_NOT_ID = ("was",)
+
+
 def fingerprint_payload(f):
     key = f.key if f.key is not None else {"target": f"{f.kind}:{f.name}",
                                            "detail": f.detail or ""}
+    if any(k in key for k in _NOT_ID):
+        key = {k: v for k, v in key.items() if k not in _NOT_ID}
     return {"kind": f.kind, "key": key}
 
 
@@ -41,6 +52,61 @@ def finding_id(f):
 
 def short_id(fid):
     return fid[:SHORT_ID]
+
+
+# The key fields distinct() adds to findings whose content matches another's.
+_PLACE = ("file", "occurrence")
+
+
+def _content(f):
+    """`f` without the key fields distinct() adds."""
+    if f.key and any(k in f.key for k in _PLACE):
+        return f._replace(key={k: v for k, v in f.key.items() if k not in _PLACE})
+    return f
+
+
+def _file_line(f):
+    file, sep, line = (f.location or "").rpartition(":")
+    return (file, int(line)) if sep and line.isdigit() else (f.location or "", 0)
+
+
+def distinct(findings):
+    """`findings` with no id shared. Findings whose content matches, such as the same
+    change in two copies of a block, add their `file` to the key, and those in one file
+    also add their `occurrence` there, counting from 1 in line order. A finding no other
+    matches keeps its content id. A block view's change rows follow their finding's id."""
+    out = [_content(f) for f in findings]
+    groups = {}
+    for i, f in enumerate(out):
+        groups.setdefault(finding_id(f), []).append(i)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        by_file = {}
+        for i in members:
+            by_file.setdefault(_file_line(out[i])[0], []).append(i)
+        for file, same in by_file.items():
+            same.sort(key=lambda i: _file_line(out[i])[1])
+            for n, i in enumerate(same, 1):
+                key = dict(out[i].key if out[i].key is not None else fingerprint_payload(out[i])["key"],
+                           file=file)
+                if len(same) > 1:
+                    key["occurrence"] = n
+                out[i] = out[i]._replace(key=key)
+
+    renames = {}
+    for f, g in zip(findings, out):
+        if f.data and "changes" in f.data:
+            renames.setdefault(id(f.data), {})[finding_id(f)] = finding_id(g)
+    views = {}
+    for i, f in enumerate(findings):
+        names = renames.get(id(f.data)) if f.data else None
+        if names and any(old != new for old, new in names.items()):
+            if id(f.data) not in views:
+                views[id(f.data)] = dict(f.data, changes=[
+                    dict(c, fid=names[c["fid"]]) if c.get("fid") in names else c for c in f.data["changes"]])
+            out[i] = out[i]._replace(data=views[id(f.data)])
+    return out
 
 
 def is_actionable(f):
@@ -97,6 +163,8 @@ def dismiss(state, findings, prefixes, reason, today):
                  "detail": f.detail or "", "on": today}
         if reason:
             entry["reason"] = reason
+        if (f.key or {}).get("base"):
+            entry["source"] = f.key["base"]
         state["dismissed"][fid] = entry
         done.append((fid, f))
     return done, errors
@@ -119,35 +187,86 @@ def undismiss(state, prefixes):
     return removed, errors
 
 
-def update_open(state, findings, new_tag):
-    """Replace the open-findings map with the actionable findings of this run.
-    A finding already open keeps the `since` and `base` recorded when it first
-    appeared; findings no longer produced are closed by omission."""
+def _plain(tag, source):
+    """A version tag within its source's own order: a stack point's `<source> <version>`
+    tag loses its source when the source is the finding's."""
+    if tag and source and tag.startswith(f"{source} "):
+        return tag[len(source) + 1:]
+    return tag
+
+
+def audit_of(entry, adopted=()):
+    """The audit (a --overrides style name) that produces a record entry: the adopted
+    pass for a finding measured against a source in `adopted`, else its kind's audit.
+    A foundation duplicate belongs to the audit its target names."""
+    if entry.get("source") and entry["source"] in adopted:
+        return "adopted"
+    audit = KIND[entry["finding"]][1] if entry.get("finding") in KIND else None
+    if audit == "layer":
+        audit = (entry.get("target") or "").split(":", 1)[0]
+    return _AUDITS.get(audit, audit)
+
+
+def update_open(state, findings, new_tag, covers=None, produced=None):
+    """Replace the open findings this run looked at with its actionable findings.
+    `covers(entry)` says whether the run looked at an entry's audit (every entry by
+    default); entries it did not look at stay as they are. A finding already open
+    keeps the `since` and `base` recorded when it first appeared; findings no longer
+    produced are closed by omission. A finding measured against a source other than
+    vanilla records it as `source`, and its tags within that source's order.
+
+    `produced` holds the id of every finding the run produced, dismissed ones
+    included; a dismissal the run looked at but did not produce is marked `gone`."""
+    covers = covers or (lambda _entry: True)
     prev = state.get("open", {})
-    fresh = {}
+    fresh = {fid: e for fid, e in prev.items() if not covers(e)}
+    if produced is not None:
+        for fid, e in state.get("dismissed", {}).items():
+            if fid in produced:
+                e.pop("gone", None)
+            elif covers(e):
+                e["gone"] = True
     for f in findings:
         if not is_actionable(f):
             continue
         fid = finding_id(f)
         old = prev.get(fid) or {}
+        source = (f.key or {}).get("base")
         entry = {"finding": f.kind, "name": f.name, "target": target_of(f),
                  "detail": f.detail or "",
-                 "since": old.get("since") or f.since or new_tag}
-        base = old.get("base") or f.base
+                 "since": old.get("since") or _plain(f.since, source) or new_tag}
+        base = old.get("base") or _plain(f.base, source)
         if base:
             entry["base"] = base
+        if source:
+            entry["source"] = source
         fresh[fid] = entry
     state["open"] = fresh
 
 
-def bases_from_state(state, order):
-    """target -> version tag to measure from: the oldest base any open finding on
-    that target was measured from. `order` lists the tracked version tags oldest
-    first; tags this tracker does not know are ignored."""
-    pos = {t: i for i, t in enumerate(order)}
+# The kinds whose open findings carry their base into later runs: the checks that
+# compare a window of versions rather than a copy's whole history.
+CARRIED = frozenset({"override_inject_overlap", "loc_changed"})
+
+
+def bases_from_state(state, orders):
+    """The version tag to measure each target from: the oldest base any open finding of
+    a CARRIED kind on that target was measured from, so a check only ever widens its
+    window from its own earlier findings. `orders` lists vanilla's tracked version tags
+    oldest first, and the result maps target -> tag for findings measured against
+    vanilla; or `orders` maps a source id (None for vanilla) to its tags, and the result
+    maps (source, target) -> tag. Tags a source does not know are ignored."""
+    keyed = isinstance(orders, dict)
+    positions = {s: {t: i for i, t in enumerate(tags)} for s, tags in (orders.items() if keyed else [(None, orders)])}
     bases = {}
     for entry in state.get("open", {}).values():
-        t, b = entry.get("target"), entry.get("base")
-        if t and b in pos and (t not in bases or pos[b] < pos[bases[t]]):
-            bases[t] = b
+        if entry.get("finding") not in CARRIED:
+            continue
+        s, t, b = entry.get("source"), entry.get("target"), entry.get("base")
+        pos = positions.get(s)
+        if not t or pos is None or b not in pos:
+            continue
+        k = (s, t) if keyed else t
+        if k not in bases or pos[b] < pos[bases[k]]:
+            bases[k] = b
     return bases

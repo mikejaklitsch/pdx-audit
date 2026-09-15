@@ -18,7 +18,8 @@ from . import session
 from .config import cfg
 from .safety import remove_file, RefusedRemoval
 
-# Every cache file name pdx-audit writes under <vanilla-tracker>/cache/.
+# Every cache file name pdx-audit writes under a source's cache folder. A source
+# other than vanilla prefixes its storage key.
 CACHE_FILE_RE = r"(?:blocks|gui|vocab|dupes)-v\d+-[0-9a-f]{40}(?:-[0-9a-f]{12})?\.json"
 
 # The one temporary file --snapshot creates, inside the tracker repo itself.
@@ -36,11 +37,15 @@ def find_vanilla_repo(mod_root: Path, override: str | None = None) -> Path:
         print(f"Vanilla repo not found at {p}", file=sys.stderr)
         sys.exit(1)
 
-    for src in (os.environ.get("PDX_VANILLA_REPO"), cfg("vanilla_repo")):
+    for name, src in (("$PDX_VANILLA_REPO", os.environ.get("PDX_VANILLA_REPO")),
+                      ("The config file's vanilla_repo", cfg("vanilla_repo"))):
         if src:
             p = Path(src).resolve()
             if p.exists():
                 return p
+            print(f"Error: {name} points at {p}, which does not exist. Correct it, or pass "
+                  f"--vanilla-repo <path>.", file=sys.stderr)
+            sys.exit(1)
 
     candidate = mod_root.parent / "vanilla-tracker" / "repo.git"
     if candidate.exists():
@@ -52,6 +57,23 @@ def find_vanilla_repo(mod_root: Path, override: str | None = None) -> Path:
           f"  {candidate}\n"
           "Use --vanilla-repo <path> to specify.", file=sys.stderr)
     sys.exit(1)
+
+class Message(str):
+    """A version's message carrying its tag, for a tag that is not the message's
+    first word (a foundation point's `<source id> <version>`)."""
+
+    def __new__(cls, text, tag=None):
+        obj = super().__new__(cls, text)
+        obj.tag = tag
+        return obj
+
+def tag_of(msg):
+    """A version's tag: the one its Message carries, or its message's first word."""
+    tag = getattr(msg, "tag", None)
+    if tag:
+        return tag
+    parts = (msg or "").split()
+    return parts[0] if parts else ""
 
 def get_commits(vanilla_repo):
     log = git(vanilla_repo, "log", "--oneline", "--no-decorate")
@@ -119,19 +141,34 @@ def _cat_file(vanilla_repo, ids, timeout):
 
 _CACHE_HASH_RE = re.compile(r"-([0-9a-f]{40})[-.]")
 
-def prune_cache(vanilla_repo):
-    """Delete cache files for commits no longer in the tracker."""
-    cache_dir = Path(vanilla_repo).parent / "cache"
-    if not cache_dir.is_dir():
+def cache_location(source):
+    """(git directory, cache folder, file name prefix) for a source's parsed-index
+    cache. A path is the vanilla tracker, whose cache sits beside it."""
+    if hasattr(source, "cache_dir"):
+        return source.git_dir, Path(source.cache_dir), source.cache_prefix
+    return source, Path(source).parent / "cache", ""
+
+def cache_path(source, name):
+    """The cache file `name` (a CACHE_FILE_RE name) of a source."""
+    _git_dir, folder, prefix = cache_location(source)
+    return folder / f"{prefix}{name}"
+
+def prune_cache(source):
+    """Delete a source's cache files for commits no longer in its repository."""
+    git_dir, cache_dir, prefix = cache_location(source)
+    if not cache_dir.is_dir() or not git_dir:
         return
-    live = set(git(vanilla_repo, "rev-list", "--all").split())
+    live = set(git(git_dir, "rev-list", "--all").split())
     if not live:
         return
-    for fp in cache_dir.glob("*.json"):
-        m = _CACHE_HASH_RE.search(fp.name)
+    pattern = re.escape(prefix) + CACHE_FILE_RE
+    for fp in cache_dir.glob(f"{prefix}*.json"):
+        if not re.fullmatch(pattern, fp.name):
+            continue
+        m = _CACHE_HASH_RE.search(fp.name[len(prefix):])
         if m and m.group(1) not in live:
             try:
-                remove_file(fp, cache_dir, CACHE_FILE_RE)
+                remove_file(fp, cache_dir, pattern)
             except (RefusedRemoval, OSError):
                 pass
 
@@ -209,6 +246,46 @@ def resolve_tracker_path(mod_root_arg, vanilla_repo_arg) -> Path:
     mod_root = find_mod_root(mod_root_arg)
     return mod_root.parent / "vanilla-tracker" / "repo.git"
 
+class SnapshotError(Exception):
+    """git did not store every file of a snapshot."""
+
+def snapshot_tree(repo, root, files, index_name=SNAPSHOT_INDEX_NAME, index_re=SNAPSHOT_INDEX_RE):
+    """The tree id of `files` (paths under `root`) stored in `repo`. Files are hashed
+    straight from their folder into git with their bytes exact; git never writes to
+    that folder. The index is the only temporary item, and it is removed after."""
+    repo, root = Path(repo), Path(root)
+    index = repo / index_name
+    env = dict(os.environ, GIT_DIR=str(repo), GIT_INDEX_FILE=str(index))
+
+    def g(*args, stdin=None):
+        return subprocess.run(["git", *args], env=env, check=True, input=stdin,
+                              capture_output=True, text=True)
+
+    if index.exists():
+        remove_file(index, repo, index_re)   # left behind by a crashed run
+    try:
+        if files:
+            hashes = g("hash-object", "-w", "--no-filters", "--stdin-paths",
+                       stdin="".join(f"{f}\n" for f in files)).stdout.split()
+            if len(hashes) != len(files):
+                raise SnapshotError(f"git hashed {len(hashes)} of {len(files)} files")
+            entries = "".join(f"100644 {h}\t{Path(f).relative_to(root).as_posix()}\0"
+                              for f, h in zip(files, hashes))
+            g("update-index", "--add", "-z", "--index-info", stdin=entries)
+        return g("write-tree").stdout.strip()
+    finally:
+        if index.exists():
+            remove_file(index, repo, index_re)
+
+def commit_tree(repo, tree, parent, message):
+    """A new commit of `tree` on `parent` (or none) in `repo`; no ref moves."""
+    args = ["git", "-c", "user.name=pdx-audit", "-c", "user.email=pdx-audit@localhost",
+            "--git-dir", str(repo), "commit-tree", tree]
+    if parent:
+        args += ["-p", parent]
+    args += ["-m", message]
+    return subprocess.run(args, check=True, capture_output=True, text=True).stdout.strip()
+
 def _version_key(tag: str):
     nums = tuple(int(n) for n in re.findall(r"\d+", tag))
     suffix = re.sub(r"[\d.]+", "", tag)
@@ -258,46 +335,22 @@ def do_snapshot(repo: Path, tag: str, patch_name: str,
     files = sorted({f for ext in ("*.txt", "*.yml", "*.gui")
                     for f in game_root.rglob(ext) if f.is_file()})
     n_files = len(files)
-
-    # Files are hashed straight from the game folder into the tracker; git never
-    # writes to the game folder. The index is the only temporary item.
-    index = repo / SNAPSHOT_INDEX_NAME
-    env = dict(os.environ, GIT_DIR=str(repo), GIT_INDEX_FILE=str(index))
-
-    def g(*args, stdin=None, check=True):
-        return subprocess.run(["git", *args], env=env, check=check, input=stdin,
-                              capture_output=True, text=True)
-
-    if index.exists():
-        remove_file(index, repo, SNAPSHOT_INDEX_RE)   # left behind by a crashed run
     try:
-        hashes = g("hash-object", "-w", "--no-filters", "--stdin-paths",
-                   stdin="".join(f"{f}\n" for f in files)).stdout.split()
-        if len(hashes) != n_files:
-            print("Error: git did not hash every game file; nothing committed.",
-                  file=sys.stderr)
-            sys.exit(1)
-        entries = "".join(f"100644 {h}\t{f.relative_to(game_root).as_posix()}\0"
-                          for f, h in zip(files, hashes))
-        g("update-index", "--add", "-z", "--index-info", stdin=entries)
-        tree = g("write-tree").stdout.strip()
+        tree = snapshot_tree(repo, game_root, files)
+    except SnapshotError:
+        print("Error: git did not hash every game file; nothing committed.",
+              file=sys.stderr)
+        sys.exit(1)
 
-        has_head = g("rev-parse", "--verify", "--quiet", "HEAD", check=False).returncode == 0
-        if has_head and g("rev-parse", "HEAD^{tree}").stdout.strip() == tree:
-            print("No changes from the previous snapshot; nothing committed.")
-            return
-
-        msg = f"{tag} {patch_name}".strip()
-        commit_args = ["commit-tree", tree]
-        if has_head:
-            commit_args += ["-p", "HEAD"]
-        commit_args += ["-m", msg]
-        commit = g(*commit_args).stdout.strip()
-        g("update-ref", "refs/heads/master", commit)
-        g("tag", tag)
-    finally:
-        if index.exists():
-            remove_file(index, repo, SNAPSHOT_INDEX_RE)
+    head = git(repo, "rev-parse", "--verify", "--quiet", "HEAD").strip()
+    if head and git(repo, "rev-parse", "HEAD^{tree}").strip() == tree:
+        print("No changes from the previous snapshot; nothing committed.")
+        return
+    msg = f"{tag} {patch_name}".strip()
+    commit = commit_tree(repo, tree, head or None, msg)
+    subprocess.run(["git", "--git-dir", str(repo), "update-ref", "refs/heads/master", commit],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "--git-dir", str(repo), "tag", tag], check=True, capture_output=True)
 
     print(f"Done: {msg} ({n_files} files).")
     tags = subprocess.run(["git", "--git-dir", str(repo), "tag", "-l",

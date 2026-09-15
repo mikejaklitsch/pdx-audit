@@ -8,6 +8,7 @@ from contextlib import redirect_stdout, redirect_stderr
 import pytest
 
 import pdxaudit.config as config
+from conftest import _write_tree, build_tracker
 from pdxaudit.cli import main
 
 
@@ -169,11 +170,78 @@ def test_default_run_records_open_findings_and_filtered_runs_leave_them(cli):
     assert _record(cli)["open"] == before
 
 
+def test_a_run_of_one_audit_keeps_the_other_audits_open_findings(cli):
+    cli()
+    before = _record(cli)["open"]
+    assert {e["finding"].split("_")[0] for e in before.values()} > {"gui"}
+    cli("--gui")
+    assert _record(cli)["open"] == before
+
+
+def test_a_dismissal_the_last_run_no_longer_found_is_marked(cli):
+    code, out, _ = cli("--overrides")
+    fid = _id_for(out, "some_building")
+    cli("--overrides", "--dismiss", fid)
+    (cli.world.mod / "in_game/common/building_types/m.txt").write_text(
+        "REPLACE:some_building = {\n\tcost = 100\n\tupkeep = 5\n}\n", encoding="utf-8")
+    cli("--overrides")
+    code, out, _ = cli("--show-dismissed")
+    assert fid in out and "no longer found" in out
+
+
+def test_new_alone_compares_from_the_version_before_it(cli, tmp_path):
+    from conftest import VANILLA_NEW, VANILLA_OLD, build_tracker
+    t = build_tracker(tmp_path / "three", [("1.0.0", VANILLA_OLD), ("1.0.5", VANILLA_OLD), ("1.1.0", VANILLA_NEW)])
+    code, _out, err = cli("--deps", "--new", "1.0.5", "--vanilla-repo", t.repo)
+    assert code == 0 and "must be older" not in err and "same version" not in err
+
+
+@pytest.mark.parametrize("argv, text", [
+    (("--full", "--old", "1.0.0"), "--full and --old"),
+    (("--diff", "--summary"), "--diff and --summary"),
+    (("--deps", "--block", "some_building"), "dependency audit"),
+])
+def test_options_that_cannot_work_together_are_refused(cli, argv, text):
+    code, _out, err = cli(*argv)
+    assert code == 2 and text in err
+
+
+def test_a_mod_root_that_is_not_a_mod_is_refused(cli, tmp_path):
+    code, out, err = cli("--summary", mod=tmp_path / "nowhere")
+    assert code == 1 and "not found" in err and not out
+    (tmp_path / "plain").mkdir()
+    code, out, err = cli("--summary", mod=tmp_path / "plain")
+    assert code == 1 and ".metadata" in err and not out
+
+
+def test_a_vanilla_repo_setting_that_points_nowhere_is_an_error(world, tmp_path, monkeypatch):
+    from pdxaudit.tracker import find_vanilla_repo
+    monkeypatch.setenv("PDX_VANILLA_REPO", str(tmp_path / "missing"))
+    with pytest.raises(SystemExit) as e:
+        find_vanilla_repo(world.mod)
+    assert e.value.code == 1
+
+
 def test_repeated_default_runs_report_the_same_findings(cli):
     _code, first, _ = cli()
     _code, second, _ = cli()
     ids = lambda out: sorted(re.findall(r"\[([0-9a-f]{8})\]", out))
     assert ids(first) and ids(first) == ids(second)
+
+
+def test_a_replace_of_an_injected_block_never_widens_the_inject_check_on_a_later_run(cli, tmp_path):
+    b = "in_game/common/building_types/b.txt"
+    tr = build_tracker(tmp_path / "t", [("1.0", {b: "thing = {\n\tcost = 1\n\tupkeep = 1\n}\n"}),
+                                        ("1.1", {b: "thing = {\n\tcost = 2\n\tupkeep = 2\n}\n"}),
+                                        ("1.2", {b: "thing = {\n\tcost = 2\n\tupkeep = 2\n\tx = 1\n}\n"})])
+    mod = tmp_path / "injmod"
+    _write_tree(mod, {".metadata/metadata.json": '{"name": "Inj", "id": "injmod"}',
+                      "in_game/common/building_types/r.txt": "REPLACE:thing = {\n\tcost = 1\n\tupkeep = 1\n}\n",
+                      "in_game/common/building_types/i.txt": "INJECT:thing = {\n\tupkeep = 9\n}\n"})
+    runs = [cli("--vanilla-repo", tr.repo, "--overrides", mod=mod)[1] for _ in range(3)]
+    ids = lambda out: sorted(re.findall(r"\[([0-9a-f]{8})\]", out))
+    assert ids(runs[0]) and ids(runs[0]) == ids(runs[1]) == ids(runs[2])
+    assert "INJECT targets where vanilla also changed" not in runs[1]
 
 
 def test_dismissed_finding_is_not_open(cli):

@@ -18,6 +18,7 @@ Unknown keys are ignored. See config.sample.json for an example.
 import json
 import os
 import fnmatch
+import sys
 from pathlib import Path
 
 _CACHE = None
@@ -34,21 +35,26 @@ def _candidate_paths():
 
 
 def load_config():
-    """The parsed config dict (first file found), or {} if none/unreadable.
-    Cached for the process."""
+    """The parsed config dict of the first file found, or {} if there is none. A file
+    that cannot be read as a JSON object is reported on stderr and its settings are
+    ignored; later candidates are not read. Cached for the process."""
     global _CACHE
     if _CACHE is not None:
         return _CACHE
     _CACHE = {}
     for p in _candidate_paths():
-        try:
-            if p.is_file():
-                data = json.loads(p.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    _CACHE = data
-                break
-        except (OSError, ValueError):
+        if not p.is_file():
             continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print(f"Warning: could not read the config file {p}: {e}. Its settings are ignored.", file=sys.stderr)
+            break
+        if isinstance(data, dict):
+            _CACHE = data
+        else:
+            print(f"Warning: the config file {p} is not a JSON object. Its settings are ignored.", file=sys.stderr)
+        break
     return _CACHE
 
 

@@ -6,7 +6,7 @@ import io
 import re
 from contextlib import redirect_stdout
 
-from pdxaudit.report import Finding, render_triage, KIND, SEV_REVIEW, SEV_STALE
+from pdxaudit.report import Finding, count_label, render_triage, KIND, SEV_REVIEW, SEV_STALE
 from pdxaudit.overrides import run_override_audit, run_deps_audit
 from pdxaudit.gui import run_gui_audit
 from pdxaudit.loc import run_loc_audit
@@ -28,8 +28,9 @@ def test_change_classes_follow_priority():
             assert KIND[f"{audit}_{change}_high"][0] == SEV_STALE
             assert KIND[f"{audit}_{change}_mid"][0] == SEV_REVIEW
         for change in ("both_changed", "removed_changed"):
-            assert KIND[f"{audit}_{change}_high"][0] == SEV_STALE
-            assert f"{audit}_{change}_mid" not in KIND
+            assert KIND[f"{audit}_{change}_mid"][0] == SEV_REVIEW
+            assert f"{audit}_{change}_high" not in KIND
+    assert KIND["override_inject_overlap"][0] == SEV_STALE
 
 
 # --- render_triage (pure) ---------------------------------------------------
@@ -53,6 +54,53 @@ def test_render_triage_states_each_class_fix_once():
     assert re.search(r"- \[[0-9a-f]{8}\] `A` `m/a.txt:1`", out)
     assert re.search(r"- \[[0-9a-f]{8}\] `B` `m/b.txt:2`", out)
     assert "Open the review items first" in out
+
+
+def test_a_class_of_one_is_named_in_the_singular():
+    out = render_triage([_change("A")], "", "", ["overrides"])
+    assert "1 statement your REPLACE keeps at an old vanilla value" in out
+    assert count_label(1, KIND["dupes_on_action_syntax"][2]) == "on_action block that sets `effect` or `trigger` twice"
+    assert count_label(1, KIND["dupes_gui_definition"][2]).startswith("GUI template or type defined")
+    assert count_label(2, KIND["dupes_gui_definition"][2]) == KIND["dupes_gui_definition"][2]
+
+
+def test_a_file_line_names_places_in_its_own_file_by_line():
+    f = Finding("dupes_loc_key", "k", "loc/a.yml:3", "loc/a.yml:3; loc/b.yml:8", None,
+                {"target": "dupes:loc/english/k"})
+    out = render_triage([f], "", "", ["dupes"])
+    assert "- `loc/a.yml`: `k` (line 3; loc/b.yml:8)" in out
+
+
+def test_the_heading_names_both_windows_when_copies_reach_further_back():
+    out = render_triage([_change("A")], "1.1.0 Test", "1.2.0 Test", ["overrides", "gui"], history_old="1.0.0 Test")
+    assert out.startswith("# Audit summary: 1.2.0 Test\n")
+    assert "every snapshot from 1.0.0 Test" in out and "INJECT targets from 1.1.0 Test" in out
+    out = render_triage([_change("A")], "1.1.0 Test", "1.2.0 Test", ["gui"], history_old="1.0.0 Test")
+    assert out.startswith("# Audit summary: 1.0.0 Test → 1.2.0 Test")
+    out = render_triage([_change("A")], "1.0.0 Test", "1.2.0 Test", ["gui"], history_old="1.0.0 Test")
+    assert out.startswith("# Audit summary: 1.0.0 Test → 1.2.0 Test")
+
+
+def test_a_loc_change_across_a_wide_window_is_dated_by_its_version(world, tmp_path):
+    from conftest import VANILLA_NEW, VANILLA_OLD, audit_args, build_tracker, make_ctx
+    t = build_tracker(tmp_path / "three", [("1.0.0", VANILLA_OLD), ("1.0.5", VANILLA_NEW), ("1.1.0", VANILLA_NEW)])
+    findings, _ = _run(run_loc_audit, world.mod, t.repo, t.hashes["1.0.0"], "1.0.0 Test", t.hashes["1.1.0"],
+                       "1.1.0 Test", audit_args(full=True), make_ctx(t.repo, "1.1.0", fixed=True))
+    assert [f.since for f in findings if f.kind == "loc_changed"] == ["1.0.5"]
+
+
+def test_an_inject_overlap_is_dated_by_the_version_that_changed_its_key(world, tmp_path):
+    from conftest import VANILLA_OLD, audit_args, build_tracker, make_ctx, _write_tree
+    block = "in_game/common/building_types/b.txt"
+    other_change = dict(VANILLA_OLD, **{block: "some_building = {\n\tcost = 100\n\tlegacy_mod = 1\n\tupkeep = 1\n}\n"})
+    key_change = dict(VANILLA_OLD, **{block: "some_building = {\n\tcost = 200\n\tlegacy_mod = 1\n\tupkeep = 1\n}\n"})
+    t = build_tracker(tmp_path / "three", [("1.0.0", VANILLA_OLD), ("1.0.5", other_change), ("1.1.0", key_change)])
+    mod = tmp_path / "injmod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id":"inj"}',
+                      "in_game/common/building_types/m.txt": "INJECT:some_building = {\n\tcost = 150\n}\n"})
+    findings, _ = _run(run_override_audit, mod, t.repo, t.hashes["1.0.0"], "1.0.0 Test", t.hashes["1.1.0"],
+                       "1.1.0 Test", audit_args(full=True), make_ctx(t.repo, "1.1.0", fixed=True))
+    assert [f.since for f in findings if f.kind == "override_inject_overlap"] == ["1.1.0"]
 
 
 def test_render_triage_lists_per_item_detail_for_flat_classes():
@@ -95,11 +143,11 @@ def test_triage_shows_values_on_labelled_aligned_lines():
 
 def test_triage_value_lines_per_change():
     cases = {
-        ("override_both_changed_high", "gold = 25", "gold = 200"): ("**gold = 25**", "changed to gold = 200  (1.3.8)"),
-        ("override_both_changed_high", "gold = 25", None): ("**gold = 25**", "deleted  (1.3.8)"),
+        ("override_both_changed_mid", "gold = 25", "gold = 200"): ("**gold = 25**", "changed to gold = 200  (1.3.8)"),
+        ("override_both_changed_mid", "gold = 25", None): ("**gold = 25**", "deleted  (1.3.8)"),
         ("override_vanilla_added_mid", None, "upkeep = 5"): ("(missing)", "added upkeep = 5  (1.3.8)"),
         ("override_vanilla_removed_mid", "upkeep = 1", None): ("upkeep = 1", "deleted  (1.3.8)"),
-        ("override_removed_changed_high", None, "upkeep = 2"): ("(removed)", "changed to upkeep = 2  (1.3.8)"),
+        ("override_removed_changed_mid", None, "upkeep = 2"): ("(removed)", "changed to upkeep = 2  (1.3.8)"),
     }
     for (kind, yours, vanilla), (want_yours, want_vanilla) in cases.items():
         out = render_triage([_change("b", kind, yours=yours, vanilla=vanilla)], "", "1.3.11 Pavia",
@@ -107,6 +155,19 @@ def test_triage_value_lines_per_change():
         got_yours, got_vanilla = _value_lines(out)
         assert got_yours.strip() == f"yours:    {want_yours}", kind
         assert got_vanilla.strip() == f"vanilla:  {want_vanilla}", kind
+
+
+def test_a_conflict_shows_vanillas_text_before_its_change():
+    cases = {
+        ("override_both_changed_mid", "gold = 25", "gold = 200"): "gold = 100  →  gold = 200  (1.3.8)",
+        ("override_both_changed_mid", "gold = 25", None): "deleted gold = 100  (1.3.8)",
+        ("override_removed_changed_mid", None, "gold = 200"): "gold = 100  →  gold = 200  (1.3.8)",
+    }
+    for (kind, yours, vanilla), want in cases.items():
+        f = _change("b", kind, yours=yours, vanilla=vanilla)
+        f = f._replace(key=dict(f.key, was="gold = 100"))
+        out = render_triage([f], "", "1.3.11 Pavia", ["overrides"], new_tag="1.3.11")
+        assert _value_lines(out)[1].strip() == f"vanilla:  {want}", kind
 
 
 def test_triage_prints_the_dismiss_command_with_a_real_id():
@@ -125,6 +186,48 @@ def test_triage_offers_no_dismiss_command_for_duplicates():
     out = render_triage([dup], "", "1.3.11 Pavia", ["dupes"], new_tag="1.3.11")
     assert "--dismiss" not in out
     assert "cannot be dismissed" in out
+
+
+def test_triage_lists_file_classes_one_line_per_mod_file():
+    loc = "main_menu/localization/english"
+    fs = [Finding("dupes_loc_key", key, f"{loc}/{file}:{line}", "", None, {"target": f"dupes:loc/english/{key}"})
+          for key, file, line in (("A", "a_l_english.yml", 2), ("B", "a_l_english.yml", 9),
+                                  ("C", "b_l_english.yml", 4))]
+    out = render_triage(fs, "", "1.3.11 Pavia", ["dupes"], new_tag="1.3.11")
+    assert out.count("Fix: keep one copy and delete the others.") == 1
+    assert f"  - `{loc}/a_l_english.yml`: `A`, `B`" in out
+    assert f"  - `{loc}/b_l_english.yml`: `C`" in out
+    assert "--dismiss" not in out
+
+
+def test_classes_after_a_per_file_class_are_all_listed():
+    loc = "main_menu/localization/english"
+    fs = [Finding("dupes_loc_key", "A", f"{loc}/a_l_english.yml:2", "", None, {"target": "dupes:loc/english/A"}),
+          Finding("dupes_loc_key", "B", f"{loc}/b_l_english.yml:2", "", None, {"target": "dupes:loc/english/B"}),
+          Finding("dupes_on_action_key", "on_x", "in_game/common/on_action/a.txt:2", "", None,
+                  {"target": "dupes:common/on_action/on_x/effect"}),
+          Finding("dupes_loc_key_same", "C", f"{loc}/c_l_english.yml:2", "", None, {"target": "dupes:loc/english/C"})]
+    out = render_triage(fs, "", "1.1 Test", ["dupes"], new_tag="1.1")
+    for name in ("A", "B", "on_x", "C"):
+        assert f"`{name}`" in out, name
+
+
+def test_findings_against_an_adopted_source_are_worded_as_its_own():
+    theirs = _change("w", "gui_vanilla_changed_mid", since="1.1", yours="size = 1", vanilla="size = 2")
+    theirs = theirs._replace(key=dict(theirs.key, target="gui:in_game/template/w", base="up"))
+    mine = _change("x", "gui_vanilla_changed_mid", since="1.3.11")
+    out = render_triage([theirs, mine], "", "1.3.11 Test", ["gui", "adopted"], new_tag="1.3.11", adopted={"up"})
+    assert "1 statement your copy keeps at an old up value" in out
+    assert "1 statement your GUI copy keeps at an old vanilla value" in out
+    assert "upstream: size = 1  →  size = 2  (1.1)" in out
+    assert "Still open from earlier patches" not in out
+
+
+def test_points_placed_on_the_newest_patch_count_as_this_patch():
+    out = render_triage([_change("a", since="found 2.1"), _change("b", since="1.3.10")], "", "", ["overrides"],
+                        new_tag="found 2.1", patch_tags={"1.3.11", "found 2.1"})
+    assert "## This patch (1.3.11)" in out
+    assert out.index("`a`") < out.index("Still open from earlier patches") < out.index("`b`")
 
 
 def test_no_kind_suggests_renames():

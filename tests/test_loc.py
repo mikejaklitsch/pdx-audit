@@ -106,6 +106,35 @@ def test_open_finding_base_carries_a_change_forward(monkeypatch):
     assert '"A"' in out and '"B"' in out
 
 
+def test_loc_entries_keep_repeats_and_lines():
+    text = 'l_english:\n KEY:0 "one"\n\n KEY:0 "two"\n'
+    assert list(loc.loc_entries(text)) == [("english", "KEY", "one", 2), ("english", "KEY", "two", 4)]
+    assert loc.parse_loc(text) == {("english", "KEY"): "two"}
+
+
+def test_replace_folder_is_recognized():
+    assert loc.is_replace_loc("main_menu/localization/english/replace/a_l_english.yml")
+    assert loc.is_replace_loc("main_menu/localization/replace/english/a_l_english.yml")
+    assert not loc.is_replace_loc("main_menu/localization/english/a_l_english.yml")
+    assert not loc.is_replace_loc("main_menu/localization/english/replace_l_english.yml")
+
+
+def test_loc_audit_takes_the_replace_copy_over_a_normal_one(monkeypatch):
+    E = "english"
+    monkeypatch.setattr(loc, "mod_loc_files", lambda mr: [
+        ("main_menu/localization/english/a_l_english.yml", 'l_english:\n KEY_A:0 "normal"\n'),
+        ("main_menu/localization/english/replace/b_l_english.yml", 'l_english:\n KEY_A:0 "replaced"\n')])
+    values = {"OLD": {(E, "KEY_A"): "A"}, "NEW": {(E, "KEY_A"): "B"}}
+    monkeypatch.setattr(loc, "build_loc_vanilla",
+                        lambda repo, commit, wanted, label="": dict(values[commit]))
+    with redirect_stdout(io.StringIO()):
+        findings = loc.run_loc_audit("/mod", "repo", "OLD", "1.2 Old", "NEW", "1.3 New",
+                                     types.SimpleNamespace(block=None))
+    f = next(f for f in findings if f.kind == "loc_changed")
+    assert f.key["mod"] == "replaced"
+    assert f.location == "main_menu/localization/english/replace/b_l_english.yml"
+
+
 def test_clean_when_nothing_drifted(monkeypatch):
     mod_text = 'l_english:\n KEY_A:0 "mine"\n'
     old = {("english", "KEY_A"): "V"}

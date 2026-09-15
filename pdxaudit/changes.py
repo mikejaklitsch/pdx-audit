@@ -87,12 +87,25 @@ def _block_groups(flagged, top):
     return list(groups.values())
 
 
+def layer_label(change):
+    """Who owns what a change touches, in a stack run: vanilla's content, a
+    foundation's content, or an addition of a foundation's the copy lacks."""
+    if not change.layer or change.layer == "vanilla":
+        return "changes vanilla content"
+    return "drops a foundation addition" if change.kind == "vanilla_added" else "changes foundation content"
+
+
 def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
-          unwrap=False, want=False, block_type=None, vanilla_file=None):
+          unwrap=False, want=False, block_type=None, vanilla_file=None, layers=None, owner=None):
     """Compare one copy with vanilla's versions (oldest first, the last current) and
     return an Audited. tags names each version. line is the copy's first line in
-    `file`."""
+    `file`. In a stack run `layers` names each version's layer, and `owner` is the id
+    of the foundation owning the compared text, which each finding's key holds as `base`.
+    No two findings of the copy share an id (ledger.distinct); `distinct` does the same
+    across an audit's copies."""
     changes = diff3.compare(mod_text, versions, unwrap)
+    if layers:
+        changes = [c._replace(layer=layers[c.since]) if c.since is not None else c for c in changes]
     base_i = diff3.baseline(mod_text, versions, unwrap)
     base = tags[base_i] if base_i is not None else None
     new_text = versions[-1]
@@ -119,6 +132,8 @@ def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
             c = group[0]
             yours, vanilla = texts[id(c)]
             key = {"target": target, "path": list(c.path), "yours": yours, "vanilla": vanilla}
+            if c.old is not None:
+                key["was"] = normalized(versions[c.since - 1], c.old)
             kind, detail = f"{audit_name}_{c.kind}_{c.priority}", " > ".join(c.path)
         else:
             priority = diff3.HIGH if any(c.priority == diff3.HIGH for c in group) else diff3.MID
@@ -127,14 +142,19 @@ def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
                    "changes": sorted(([f"{c.kind}_{c.priority}", *texts[id(c)]] for c in group),
                                      key=json.dumps)}
             kind, detail = f"{audit_name}_block_changed_{priority}", f"{len(group)} changes"
+        if owner:
+            key["base"] = owner
         f = Finding(kind, name, f"{file}:{at(first)}", detail, None, key, since, base)
         findings.append(f)
         for c in group:
             finding_of[id(c)] = f
+    renamed = dict(zip(map(id, findings), ledger.distinct(findings)))
+    finding_of = {k: renamed[id(f)] for k, f in finding_of.items()}
+    findings = [renamed[id(f)] for f in findings]
 
     block = None
     if want:
-        rows = []
+        rows, vlines = [], _Lines(new_text, 1)
         for c in changes:
             f = finding_of.get(id(c))
             row = {"kind": c.kind, "mark": MARK.get(c.priority),
@@ -142,6 +162,10 @@ def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
                    "since": tags[c.since] if c.since is not None else None,
                    "first": None, "last": None, "cols": None, "anchor": None, "inside": False,
                    "vanilla": None if c.new is None else new_text[c.new.start:c.new.end]}
+            if c.layer and c.layer != "vanilla":
+                row["layer"] = c.layer
+            if c.new is not None:
+                row["vfirst"], row["vlast"] = vlines.at(c.new.start), vlines.last(c.new)
             parent = c.parent or outer
             if c.mod is not None:
                 row["first"], row["last"] = lines.at(c.mod.start), lines.last(c.mod)
@@ -154,17 +178,35 @@ def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
                 row["anchor"] = line - 1
             rows.append(row)
         block = {"type": block_type, "file": file, "line": line, "lines": mod_text.split("\n"),
-                 "vanilla_file": vanilla_file, "changes": rows}
+                 "vanilla_file": vanilla_file, "changes": rows,
+                 "vanilla_lines": new_text.split("\n"), "vanilla_tag": tags[-1],
+                 "base_lines": (versions[base_i] if base_i is not None else new_text).split("\n"),
+                 "base_tag": base or tags[-1]}
         with_data = {id(f): f._replace(data=block) for f in findings}
         finding_of = {k: with_data[id(f)] for k, f in finding_of.items()}
         findings = [with_data[id(f)] for f in findings]
     return Audited(findings, [(c, finding_of[id(c)]) for c in flagged], base, block, texts)
 
 
-def print_target(title, facts, result, versions, tags, show_diff, dismissed=frozenset()):
+def distinct(results):
+    """The Audited copies of one audit with no finding id shared (ledger.distinct), in
+    the same order; each copy's findings, flagged changes and block view follow."""
+    renamed = iter(ledger.distinct([f for r in results for f in r.findings]))
+    out = []
+    for r in results:
+        swap = {id(f): next(renamed) for f in r.findings}
+        findings = [swap[id(f)] for f in r.findings]
+        block = next((f.data for f in findings if f.data is not None), r.block)
+        out.append(r._replace(findings=findings, flagged=[(c, swap[id(f)]) for c, f in r.flagged], block=block))
+    return out
+
+
+def print_target(title, facts, result, versions, tags, show_diff, dismissed=frozenset(), stacked=False,
+                 upstream=False):
     """The detail for one target: its facts, then its findings grouped by priority,
     high first, each with where it is, when vanilla made it, and both sides' text of
-    every change it holds."""
+    every change it holds. In a stack run each finding also says whose content it
+    touches (layer_label). `upstream` labels the other side as an adopted source's."""
     print(f"### {title}")
     for label, value in facts:
         print(f"- **{label}:** {value}")
@@ -189,11 +231,16 @@ def print_target(title, facts, result, versions, tags, show_diff, dismissed=froz
         for fid, f, cs in group:
             where = " > ".join(f.key["path"])
             when = f" *(since {f.since})*" if f.since else ""
-            print(f"    [{ledger.short_id(fid)}] `{f.location}`" + (f" {where}" if where else "") + when)
+            owned = ""
+            if stacked:
+                owned = " · " + "; ".join(dict.fromkeys(layer_label(c) for c in cs))
+            print(f"    [{ledger.short_id(fid)}] `{f.location}`" + (f" {where}" if where else "") + when + owned)
             for c in cs:
-                yours, vanilla = value_pair(c.kind, *result.texts[id(c)], tags[c.since] if c.since is not None else None)
+                was = normalized(versions[c.since - 1], c.old) if c.old is not None else None
+                yours, vanilla = value_pair(c.kind, *result.texts[id(c)], tags[c.since] if c.since is not None else None,
+                                            was)
                 print(f"        yours:    {yours}")
-                print(f"        vanilla:  {vanilla}")
+                print(f"        {'upstream:' if upstream else 'vanilla: '} {vanilla}")
     if hidden:
         print(f"  {hidden} dismissed finding(s) hidden; list them with `pdx-audit --show-dismissed`")
     if not shown:

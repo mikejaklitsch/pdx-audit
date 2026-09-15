@@ -12,6 +12,27 @@ def _changes(mod, *versions, unwrap=False):
     return sorted(out)
 
 
+def test_a_conflict_holds_vanillas_statement_before_the_change():
+    old, new = "w = { price = 8 x = 1 }", "w = { price = 6 x = 1 }"
+    [c] = compare("w = { price = 4 x = 1 }", [old, new])
+    assert c.kind == "both_changed" and old[c.old.start:c.old.end] == "price = 8"
+
+
+def test_a_statement_you_commented_out_is_your_deletion():
+    mod = "w = {\n\ta = 1\n\t#b = 2   # not wanted\n}"
+    assert _changes(mod, "w = { a = 1 }", "w = { a = 1 b = 2 }") == [("mod_removed", "info", "b", None)]
+
+
+def test_a_prose_comment_is_not_a_commented_statement():
+    mod = "w = {\n\ta = 1\n\t# b = 2 is too much here\n}"
+    assert _changes(mod, "w = { a = 1 }", "w = { a = 1 b = 2 }") == [("vanilla_added", "mid", "b", 1)]
+
+
+def test_a_comment_holding_an_older_value_leaves_vanillas_change_to_report():
+    mod = "w = {\n\ta = 1\n\t#b = 1\n}"
+    assert _changes(mod, "w = { a = 1 b = 1 }", "w = { a = 1 b = 2 }") == [("removed_changed", "mid", "b", 1)]
+
+
 def test_layout_comments_and_number_spelling_are_not_differences():
     mod = "w = {\n\ta = 1\n\tb = {\n\t\tc = 2\n\t}\n}"
     assert _changes(mod, "w = { a = 1.0 b = {c=2} } # note") == []
@@ -33,14 +54,19 @@ def test_your_edit_in_a_nested_block_does_not_raise_its_parent():
         ("mod_changed", "info", "k", None), ("vanilla_changed", "mid", "a", 1)]
 
 
-def test_both_changed_is_high():
+def test_both_changed_is_mid():
     assert _changes("w = { a = 7 }", "w = { a = 1 }", "w = { a = 5 }") == [
-        ("both_changed", "high", "a", 1)]
+        ("both_changed", "mid", "a", 1)]
+
+
+def test_a_conflict_raises_the_vanilla_changes_beside_it():
+    assert _changes("w = { a = 7 b = 1 }", "w = { a = 1 b = 1 }", "w = { a = 5 b = 2 }") == [
+        ("both_changed", "mid", "a", 1), ("vanilla_changed", "high", "b", 1)]
 
 
 def test_vanilla_deleting_a_statement_you_changed_is_both_changed():
     assert _changes("w = { a = 1 b = 7 }", "w = { a = 1 b = 1 }", "w = { a = 1 }") == [
-        ("both_changed", "high", "b", 1)]
+        ("both_changed", "mid", "b", 1)]
 
 
 def test_vanilla_addition_you_lack():
@@ -62,9 +88,9 @@ def test_your_additions_and_removals_are_info():
         ("mod_added", "info", "z", None), ("mod_removed", "info", "b", None)]
 
 
-def test_vanilla_changing_a_statement_you_removed_is_high():
+def test_vanilla_changing_a_statement_you_removed_is_mid():
     assert _changes("w = { a = 1 }", "w = { a = 1 b = 2 }", "w = { a = 1 b = 3 }") == [
-        ("removed_changed", "high", "b", 1)]
+        ("removed_changed", "mid", "b", 1)]
 
 
 def test_copy_synced_to_a_middle_version_reads_later_changes_as_vanilla():
@@ -177,7 +203,7 @@ def test_block_vanilla_deleted_that_you_changed_is_yours_when_your_copy_came_aft
 
 def test_block_vanilla_deleted_after_your_copy_that_you_changed_is_both_changed():
     versions = ("w = { a = 1 u = { k = 1 } }", "w = { a = 1 u = { k = 1 } }", "w = { a = 1 }")
-    assert _changes("w = { a = 1 u = { k = 5 } }", *versions) == [("both_changed", "high", "u", 2)]
+    assert _changes("w = { a = 1 u = { k = 5 } }", *versions) == [("both_changed", "mid", "u", 2)]
 
 
 def test_block_vanilla_named_still_pairs_by_key():

@@ -7,7 +7,8 @@ in order: the same statement first, then the same key (a block that sets
 distinctive quoted value under another key (vanilla moving `onpressed = "[OnPause]"`
 to `on_action = "[OnPause]"`). What is still unpaired pairs by key out of order, so
 a moved block still pairs. Layout, comments and the spelling of numbers never count
-as a difference.
+as a difference. A statement vanilla has that the copy holds only as a one-line
+comment in the same block, word for word (`# cost = 5`), is the copy's own deletion.
 
 The copy's baseline is the tracked vanilla version it differs from least; a newer
 version must fit strictly better to be chosen. Each difference is attributed with
@@ -31,9 +32,10 @@ deleted text inside a block only the copy has.
 A block of your own wrapped around vanilla's statements moves them to a different
 place, so they are not linked to vanilla's history there.
 
-Priority: both_changed and removed_changed are high. The other vanilla changes are
-high when the block holding them also holds an edit of yours, since they compete
-with it, and mid otherwise. Your own edits are info.
+Priority: both_changed and removed_changed are mid: the copy's statement applies
+before and after vanilla's change, so the game behaves as it did. The other vanilla
+changes are high when the block holding them also holds an edit of yours, conflicts
+included, since they compete with it, and mid otherwise. Your own edits are info.
 
 History that starts after your copy was made cannot tell your edits from vanilla's
 earlier ones: a difference older than the oldest tracked version reads as yours."""
@@ -46,7 +48,8 @@ from pdx_utilities.script_parser import parse, tokenize
 
 from . import session
 
-Change = namedtuple("Change", "kind priority path mod new since parent after")
+Change = namedtuple("Change", "kind priority path mod new since parent after layer old")
+Change.__new__.__defaults__ = (None, None)
 Change.__doc__ = """One difference between a copy and vanilla's current text.
 
 kind, priority: see the module docstring. path: the keys of the blocks holding it.
@@ -54,7 +57,11 @@ mod, new: the Node in the copy and in vanilla's current text (either may be None
 with offsets into its own text. since: index into the history of the version where
 vanilla made the change, or None. parent, after: where a statement only vanilla has
 belongs in the copy: the copy's enclosing block Node (None at the top) and the
-copy's statement it follows (None when it comes first)."""
+copy's statement it follows (None when it comes first). layer: the layer of the
+version `since` names, when the history is a stack's (see changes.audit). old: for
+both_changed and removed_changed, vanilla's statement at the same place in the
+version before `since` that its current text no longer has, a Node with offsets into
+that version's text, or None."""
 
 HIGH, MID, INFO = "high", "mid", "info"
 VANILLA_KINDS = ("vanilla_changed", "vanilla_added", "vanilla_removed")
@@ -103,6 +110,24 @@ class Node:
         return f"Node({self.kind} {self.label!r} {self.value!r})"
 
 
+class Nodes(list):
+    """The Nodes of one level, with `commented`: the statements its one-line comments
+    hold, such as `# cost = 5`."""
+    __slots__ = ("commented",)
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.commented = []
+
+
+def _commented(comment):
+    """[Node] for the one statement a comment holds, or [] when the comment is anything
+    else, such as prose."""
+    text = comment.lstrip("#")
+    found = _build(parse(tokenize(text), text, strict=False, positions=True, keyless=True))
+    return list(found) if len(found) == 1 and found[0].kind in ("stmt", "block") else []
+
+
 def nodes(text):
     """The top-level Nodes of `text`. A run parses each text once."""
     text = text or ""
@@ -111,7 +136,7 @@ def nodes(text):
 
 
 def _build(parsed):
-    out, run = [], []
+    out, run = Nodes(), []
 
     def flush():
         if run:
@@ -122,6 +147,7 @@ def _build(parsed):
     for n in parsed:
         kind = n.get("type")
         if kind == "comment":
+            out.commented.extend(_commented(n["val"]))
             continue
         if kind == "node" and n.get("val") is None:
             run.append(n)
@@ -295,10 +321,10 @@ def _index(top):
 class _History:
     """Vanilla's versions of one text as place indexes, oldest first; the last is
     current. `floor` is where the text's latest unbroken run of versions starts;
-    `base` is the copy's baseline."""
+    `base` is the copy's baseline. `tops(k)` gives version k's compared Nodes, or None."""
 
-    def __init__(self, indexes, base):
-        self.idx, self.base = indexes, base
+    def __init__(self, indexes, base, tops=None):
+        self.idx, self.base, self.tops = indexes, base, tops
         self.cur = len(indexes) - 1
         self.floor = max((k + 1 for k, x in enumerate(indexes) if x is None), default=0)
 
@@ -343,6 +369,28 @@ class _History:
                 return k + 1
         return None
 
+    def before(self, k, place):
+        """Vanilla's statement at `place` in the version before `k` that its current
+        text no longer has, or None."""
+        if self.tops is None or k is None or k < 1 or len(place) != 2:
+            return None
+        top = self.tops(k - 1)
+        if top is None:
+            return None
+        path, key = place
+        found = []
+
+        def walk(ns, depth):
+            for n in ns:
+                if depth < len(path):
+                    if n.children is not None and n.key == path[depth]:
+                        walk(n.children, depth + 1)
+                elif n.key == key:
+                    found.append(n)
+        walk(top, 0)
+        now = self.idx[self.cur].get(place) or {}
+        return next((n for n in found if not now.get(n.sig)), None)
+
     def seen_before_copy(self, since):
         """True when vanilla's change came at or before the copy's baseline."""
         return since is not None and self.base is not None and since <= self.base
@@ -360,7 +408,8 @@ def compare(mod_text, versions, unwrap=False):
     indexes = [None if t is None else session.memo(("diff3.index", t, unwrap),
                                                    lambda t=t: _index(view(t)))
                for t in versions]
-    hist = _History(indexes, baseline(mod_text, versions, unwrap))
+    hist = _History(indexes, baseline(mod_text, versions, unwrap),
+                    lambda k: None if versions[k] is None else view(versions[k]))
     out = []
     _walk(view(mod_text), view(versions[-1]), (), None, hist, out)
     return out
@@ -372,12 +421,14 @@ def _walk(mine, theirs, path, parent, hist, out):
     of_theirs = {j: i for i, j in pairs}
     settled_mine, settled_theirs = _settle(mine, theirs, pairs)
     local, inner = [], []
+    commented = Counter(n.sig for n in getattr(mine, "commented", ()))
 
-    def add(kind, m, v, since, after=None):
+    def add(kind, m, v, since, after=None, place=None):
         if kind in CONFLICT_KINDS and hist.seen_before_copy(since):
             kind, since = ("mod_removed" if m is None else
                            "mod_changed" if v is not None else "mod_added"), None
-        local.append(Change(kind, None, path, m, v, since, parent, after))
+        old = hist.before(since, place) if kind in CONFLICT_KINDS and place else None
+        local.append(Change(kind, None, path, m, v, since, parent, after, None, old))
 
     after = None
     for j, v in enumerate(theirs):
@@ -388,12 +439,16 @@ def _walk(mine, theirs, path, parent, hist, out):
         if j in settled_theirs or (i is not None and mine[i].sig == v.sig):
             continue
         if i is None or i in settled_mine:
+            if commented[v.sig]:                   # you commented vanilla's statement out
+                commented[v.sig] -= 1
+                add("mod_removed", None, v, None, here)
+                continue
             place = (path, v.key)
             k = hist.introduced(path, place, v.sig)
             if k is None:
                 add("mod_removed", None, v, None, here)
             elif hist.count(k - 1, place) >= hist.count(hist.cur, place):
-                add("removed_changed", None, v, k, here)
+                add("removed_changed", None, v, k, here, place)
             else:
                 add("vanilla_added", None, v, k, here)
             continue
@@ -406,7 +461,7 @@ def _walk(mine, theirs, path, parent, hist, out):
             inner.append((m, v))
         else:
             kind, since = _classify_pair(hist, path, (path, m.key), m.sig, (path, v.key), v.sig)
-            add(kind, m, v, since)
+            add(kind, m, v, since, place=(path, v.key))
 
     for i, m in enumerate(mine):
         j = of_mine.get(i)
@@ -417,20 +472,20 @@ def _walk(mine, theirs, path, parent, hist, out):
         if k is not None:
             add("vanilla_removed", m, None, k)
         elif (k := hist.gone(place)) is not None:
-            add("both_changed", m, None, k)
+            add("both_changed", m, None, k, place=place)
         else:
             add("mod_added", m, None, None)
             if m.children is not None:
                 _stale_inside(m, path + (m.key,), hist, out)
 
-    yours = any(c.kind in MOD_KINDS for c in local)
+    yours = any(c.kind in MOD_KINDS + CONFLICT_KINDS for c in local)
     for c in local:
         if c.kind in MOD_KINDS:
             priority = INFO
-        elif c.kind in CONFLICT_KINDS or yours:
-            priority = HIGH
-        else:
+        elif c.kind in CONFLICT_KINDS or not yours:
             priority = MID
+        else:
+            priority = HIGH
         out.append(c._replace(priority=priority))
     for m, v in inner:
         _walk(m.children, v.children, path + (v.key,), m, hist, out)

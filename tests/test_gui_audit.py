@@ -27,10 +27,30 @@ def test_a_vanilla_change_the_copy_lacks_is_one_finding(world):
     assert "yours:    10 10" in out and "vanilla:  10 10  →  20 20  (1.1.0)" in out
 
 
-def test_a_change_meeting_your_edit_is_high(world):
+def test_a_definition_moved_out_of_a_replaced_file_is_compared_where_it_lives(tmp_path):
+    gui = "in_game/gui/markers.gui"
+    window = "window = {\n\tname = w\n}\n"
+    foo, baz = "template foo {\n\tsize = { 10 10 }\n}\n", "template baz {\n\tx = 1\n}\n"
+    tr = build_tracker(tmp_path, [("1.0", {gui: window + foo}), ("1.1", {gui: window + foo + baz})])
+    copy = {".metadata/metadata.json": '{"id": "t"}', gui: window}
+
+    def file_findings(mod):
+        with redirect_stdout(io.StringIO()):
+            found = run_gui_audit(mod, tr.repo, tr.hashes["1.0"], "1.0 Test", tr.hashes["1.1"], "1.1 Test",
+                                  audit_args(), make_ctx(tr.repo, "1.1"))
+        return [f.kind for f in found if f.location.startswith(gui)]
+
+    moved, lone = tmp_path / "moved", tmp_path / "lone"
+    _write_tree(moved, dict(copy, **{"in_game/gui/moved.gui": foo + baz}))
+    _write_tree(lone, copy)
+    assert file_findings(moved) == []
+    assert file_findings(lone) == ["gui_vanilla_added_high"]
+
+
+def test_a_change_meeting_your_edit_is_mid(world):
     (world.mod / "in_game/gui/aaa_mod.gui").write_text("template foo = {\n\tsize = { 30 30 }\n}\n")
     [f] = _run(world)[0]
-    assert f.kind == "gui_both_changed_high" and f.key["yours"] == "30 30"
+    assert f.kind == "gui_both_changed_mid" and f.key["yours"] == "30 30"
 
 
 def test_a_dismissal_holds_until_either_side_changes(world):

@@ -92,21 +92,32 @@ KIND = {
     "dupes_gui_definition": (
         SEV_BROKEN, "dupes", "GUI templates or types defined in more than one mod file",
         "keep one definition and delete the others"),
+    "dupes_loc_key": (
+        SEV_BROKEN, "dupes", "localization keys the mod defines more than once with different text",
+        "keep one copy and delete the others"),
+    "dupes_on_action_syntax": (
+        SEV_BROKEN, "dupes", "on_action blocks that set `effect` or `trigger` twice",
+        "merge the two into one block"),
+    "dupes_on_action_key": (
+        SEV_BROKEN, "dupes", "on_actions whose `effect` or `trigger` the mod sets in more than one block",
+        "keep one and merge the others into it, or move one into a new on_action it calls"),
     "override_orphaned": (
-        SEV_BROKEN, "override", "override targets a block vanilla no longer defines",
+        SEV_BROKEN, "override", "overrides whose target vanilla no longer defines",
         "remove the override, or point it at the block vanilla replaced it with"),
     "override_unreadable": (
         SEV_BROKEN, "override", "REPLACE blocks whose braces never close",
         "close the block so the game and the audit can read it"),
 }
 
-# Changes a copy lacks or conflicts with (see diff3). A vanilla change is high where
-# the block holding it also holds an edit of yours, and mid otherwise.
+# Changes a copy lacks or conflicts with (see diff3). A conflict is mid, since the
+# copy's statement still applies; any other vanilla change is high where the block
+# holding it also holds an edit of yours, and mid otherwise.
 _TAKE = "take vanilla's new value, or dismiss the finding if keeping the old one is deliberate"
 _ADD = "copy the statement in, or dismiss the finding if leaving it out is deliberate"
 _DELETE = "delete the statement, or dismiss the finding if keeping it is deliberate"
-_CHECK = "check your change still makes sense against vanilla's"
-_RESTORE = "check whether vanilla's new version belongs back in your copy"
+_CHECK = "your statement still applies as it did; dismiss the finding once you have seen vanilla's change"
+_RESTORE = ("your deletion still applies as it did; dismiss the finding once you have seen vanilla's change, "
+            "or copy its new version in")
 _BLOCK = "take vanilla's changes to the block, or dismiss the finding if keeping yours is deliberate"
 KIND.update({
     "gui_block_changed_high": (
@@ -120,10 +131,10 @@ KIND.update({
     "gui_vanilla_removed_high": (
         SEV_STALE, "gui", "statements vanilla deleted that your GUI copy still carries, beside an edit of yours",
         _DELETE),
-    "gui_both_changed_high": (
-        SEV_STALE, "gui", "statements you changed in your GUI copy that vanilla also changed or deleted", _CHECK),
-    "gui_removed_changed_high": (
-        SEV_STALE, "gui", "statements you deleted from your GUI copy that vanilla has since changed", _RESTORE),
+    "gui_both_changed_mid": (
+        SEV_REVIEW, "gui", "statements you changed in your GUI copy that vanilla also changed or deleted", _CHECK),
+    "gui_removed_changed_mid": (
+        SEV_REVIEW, "gui", "statements you deleted from your GUI copy that vanilla has since changed", _RESTORE),
     "override_vanilla_changed_high": (
         SEV_STALE, "override", "statements your REPLACE keeps at an old vanilla value, beside an edit of yours",
         _TAKE),
@@ -132,10 +143,11 @@ KIND.update({
     "override_vanilla_removed_high": (
         SEV_STALE, "override", "statements vanilla deleted that your REPLACE still carries, beside an edit of yours",
         _DELETE),
-    "override_both_changed_high": (
-        SEV_STALE, "override", "statements you changed in your REPLACE that vanilla also changed or deleted", _CHECK),
-    "override_removed_changed_high": (
-        SEV_STALE, "override", "statements you deleted from your REPLACE that vanilla has since changed", _RESTORE),
+    "override_both_changed_mid": (
+        SEV_REVIEW, "override", "statements you changed in your REPLACE that vanilla also changed or deleted",
+        _CHECK),
+    "override_removed_changed_mid": (
+        SEV_REVIEW, "override", "statements you deleted from your REPLACE that vanilla has since changed", _RESTORE),
     "gui_vanilla_changed_mid": (
         SEV_REVIEW, "gui", "statements your GUI copy keeps at an old vanilla value", _TAKE),
     "gui_vanilla_added_mid": (
@@ -152,8 +164,8 @@ KIND.update({
         SEV_STALE, "loc", "loc keys vanilla reworded that your override masks",
         "update your override to match, or drop it if the rewording matters"),
     "override_inject_overlap": (
-        SEV_REVIEW, "override", "INJECT targets where vanilla also changed a key you inject at the top level",
-        "check whether your injected key now duplicates or conflicts with vanilla's"),
+        SEV_STALE, "override", "INJECT targets where vanilla also changed a key you inject at the top level",
+        "check the key's final value, since vanilla's change alters what your injection produces"),
     "override_now_created": (
         SEV_REVIEW, "override", "_OR_CREATE overrides whose target vanilla removed, so the override now creates it",
         "confirm the created definition still belongs, since vanilla no longer has one"),
@@ -184,6 +196,18 @@ KIND.update({
     "dupes_plain_other_file": (
         SEV_REVIEW, "dupes", "plain definitions of a vanilla name in a file not at vanilla's path",
         "use REPLACE or INJECT, or give the file vanilla's path to replace the whole file"),
+    "dupes_loc_key_same": (
+        SEV_REVIEW, "dupes", "localization keys the mod defines more than once with the same text",
+        "delete the extra copies"),
+    "adopted_unit_removed": (
+        SEV_STALE, "adopted", "units the adopted source deleted that the mod still carries",
+        "remove the unit, or keep it as your own and dismiss"),
+    "adopted_unit_added": (
+        SEV_REVIEW, "adopted", "units the adopted source added to files the mod carries",
+        "adopt the unit, or dismiss"),
+    "foundation_duplicate": (
+        SEV_REVIEW, "layer", "mod units identical to a foundation's",
+        "delete them; the foundation provides them"),
     # informational: counted, never listed
     "override_inject_context": (SEV_INFO, "override", "", ""),
     "override_nonblock": (SEV_INFO, "override", "", ""),
@@ -191,12 +215,39 @@ KIND.update({
 })
 _KIND_ORDER = sorted(KIND, key=lambda k: _SEV_ORDER.index(KIND[k][0]))
 
+# Classes fixed file by file: the triage lists one line per mod file, naming each item in it.
+BY_FILE = frozenset({"dupes_loc_key", "dupes_loc_key_same", "dupes_on_action_syntax",
+                     "dupes_on_action_key", "adopted_unit_removed", "adopted_unit_added",
+                     "foundation_duplicate"})
+
 _AUDIT_NAME = {"overrides": "override", "deps": "dependency",
-               "gui": "GUI", "loc": "localization", "dupes": "duplicate"}
+               "gui": "GUI", "loc": "localization", "dupes": "duplicate", "adopted": "adopted source"}
 
 
 def finding_severity(f):
     return KIND[f.kind][0]
+
+
+# A class label names its items first ("GUI templates or types defined ..."); these
+# words end that naming.
+_LABEL_REST = frozenset({"that", "whose", "where", "defined", "vanilla", "the", "set", "with", "identical",
+                         "you", "your", "of", "in"})
+
+
+def count_label(n, label):
+    """A class label read after its count: for one item, the plural nouns naming it
+    become singular."""
+    if n != 1:
+        return label
+    words = label.split(" ")
+    for i, word in enumerate(words):
+        if word in _LABEL_REST:
+            if word == "that" and words[i + 1:i + 2] == ["set"]:
+                words[i + 1] = "sets"
+            break
+        if word.endswith("s") and word != "or":
+            words[i] = word[:-1]
+    return " ".join(words)
 
 
 def change_kind(kind):
@@ -212,11 +263,14 @@ def brief(text, width=120):
     return text if len(text) <= width else text[:width - 1] + "…"
 
 
-def value_pair(change, yours, vanilla, since):
-    """(yours, vanilla) texts for one change: your statement, and what vanilla did."""
+def value_pair(change, yours, vanilla, since, was=None):
+    """(yours, vanilla) texts for one change: your statement, and what vanilla did.
+    `was` is vanilla's statement before a change that meets an edit of yours."""
     tag = f"  ({since})" if since else ""
     yours = brief(yours) if yours is not None else None
     vanilla = brief(vanilla) if vanilla is not None else None
+    was = brief(was) if was is not None else None
+    changed = f"{was}  →  {vanilla}{tag}" if was is not None else f"changed to {vanilla}{tag}"
     if change == "vanilla_changed":
         return yours, f"{yours}  →  {vanilla}{tag}"
     if change == "vanilla_added":
@@ -224,8 +278,10 @@ def value_pair(change, yours, vanilla, since):
     if change == "vanilla_removed":
         return yours, f"deleted{tag}"
     if change == "both_changed":
-        return f"**{yours}**", (f"changed to {vanilla}{tag}" if vanilla is not None else f"deleted{tag}")
-    return "(removed)", f"changed to {vanilla}{tag}"
+        if vanilla is None:
+            return f"**{yours}**", f"deleted {was}{tag}" if was is not None else f"deleted{tag}"
+        return f"**{yours}**", changed
+    return "(removed)", changed
 
 
 def line_label(key):
@@ -237,8 +293,40 @@ def _is_value_finding(f):
     return change_kind(f.kind) is not None and "yours" in (f.key or {})
 
 
+def window_heading(old_msg, new_msg, selected, history_old=None, title=None):
+    """(window, note) naming what a run compared. `history_old` is the oldest version
+    REPLACE blocks and GUI copies were compared with. When it is older than `old_msg`
+    and other audits ran too, the window is the new version alone and the note names
+    both windows; otherwise the note is None. `title` replaces the window."""
+    history = [n for s, n in (("overrides", "REPLACE blocks"), ("gui", "GUI copies")) if s in selected]
+    others = [n for s, n in (("overrides", "INJECT targets"), ("deps", "dependencies"), ("loc", "localization"))
+              if s in selected]
+    if title:
+        return title, None
+    if history_old and history_old != old_msg and history:
+        if others:
+            return new_msg, (f"{' and '.join(history)} compared with every snapshot from {history_old}; "
+                             f"{', '.join(others)} from {old_msg}.")
+        return f"{history_old} → {new_msg}", None
+    return (f"{old_msg} → {new_msg}" if old_msg or new_msg else ""), None
+
+
+def upstream_text(text, source):
+    """A class's label or remedy worded for a finding measured against an adopted
+    source rather than vanilla."""
+    return (text.replace("your GUI copy", "your copy").replace("your REPLACE", "your copy")
+            .replace("vanilla's", f"{source}'s").replace("vanilla", source))
+
+
+def adopted_base(f, adopted):
+    """The adopted source a finding is measured against, or None."""
+    base = (f.key or {}).get("base")
+    return base if base in adopted else None
+
+
 def render_triage(findings, old_msg, new_msg, selected, detail_shown=True,
-                  new_tag=None, dismissed=0):
+                  new_tag=None, dismissed=0, remedies=None, patch_tags=None, adopted=(), title=None,
+                  history_old=None):
     """The cross-audit summary printed above the per-audit detail. `findings` is
     every audit's visible (not dismissed) Finding list. Returns Markdown (one
     string); the ColorWriter tints it when stdout is a terminal.
@@ -249,14 +337,38 @@ def render_triage(findings, old_msg, new_msg, selected, detail_shown=True,
     takes (duplicates, which cannot be dismissed, carry none). When `new_tag`
     is given, findings from an earlier patch than `new_tag` are listed in a
     separate "still open" section. Informational findings are counted but not
-    detailed; `dismissed` findings are only counted."""
+    detailed; `dismissed` findings are only counted.
+
+    A target compared against more than one base (vanilla or a foundation, and an
+    adopted source) is listed once, in its own group, with each base's findings under
+    it; `remedies` maps a target to the one remedy its group shows instead.
+
+    `patch_tags` holds every version tag that counts as this patch (in a stack, the
+    points placed on the newest vanilla version); by default it is `new_tag` alone.
+    Findings measured against a source in `adopted` get their own classes, worded
+    with that source's name, and are never split out as earlier patches, since their
+    tags belong to the source. `title` replaces the heading's version window.
+
+    `history_old` is the oldest version REPLACE blocks and GUI copies were compared
+    with, when that is older than `old_msg`; the heading then names both windows."""
     from .ledger import finding_id, is_dismissible, short_id
 
     ran = ", ".join(_AUDIT_NAME.get(s, s) for s in selected)
-    title = "# Audit summary"
-    if old_msg or new_msg:
-        title += f": {old_msg} → {new_msg}"
-    lines = [title, ""]
+    window, window_line = window_heading(old_msg, new_msg, selected, history_old, title)
+    heading = f"# Audit summary: {window}" if window else "# Audit summary"
+    lines = [heading, ""] + ([f"*{window_line}*", ""] if window_line else [])
+    adopted = set(adopted or ())
+    patch_tags = set(patch_tags) if patch_tags else ({new_tag} if new_tag else set())
+
+    def label_of(f):
+        _s, _a, label, fix = KIND[f.kind]
+        who = adopted_base(f, adopted)
+        return (upstream_text(label, who), upstream_text(fix, who)) if who else (label, fix)
+
+    def value_lines(f):
+        who = adopted_base(f, adopted)
+        yours, theirs = value_pair(change_kind(f.kind), f.key["yours"], f.key["vanilla"], f.since, f.key.get("was"))
+        return [f"      yours:    {yours}", f"      {'upstream:' if who else 'vanilla: '} {theirs}"]
     dismissed_line = (f"{dismissed} dismissed findings hidden; list them with "
                       f"`pdx-audit --show-dismissed`." if dismissed else None)
 
@@ -278,23 +390,77 @@ def render_triage(findings, old_msg, new_msg, selected, detail_shown=True,
                  f"{counts}.{info_note}")
     lines.append("")
 
-    earlier = [f for f in actionable if new_tag and f.since and f.since != new_tag]
-    earlier_ids = {id(f) for f in earlier}
-    current = [f for f in actionable if id(f) not in earlier_ids]
+    remedies = remedies or {}
+    target = lambda f: (f.key or {}).get("target") or f"{f.kind}:{f.name}"
+    bases_of = {}
+    for f in actionable:
+        bases_of.setdefault(target(f), set()).add((f.key or {}).get("base"))
+    multi = {t for t, bases in bases_of.items() if len(bases) > 1 or t in remedies}
+    grouped = [f for f in actionable if target(f) in multi]
+    rest = [f for f in actionable if target(f) not in multi]
 
-    def section(items, show_since):
+    earlier = [f for f in rest if patch_tags and f.since and f.since not in patch_tags
+               and not adopted_base(f, adopted)]
+    earlier_ids = {id(f) for f in earlier}
+    current = [f for f in rest if id(f) not in earlier_ids]
+
+    if grouped:
+        lines.append("## Compared with more than one base")
+        lines.append("")
+        by_target = {}
+        for f in sorted(grouped, key=lambda x: (target(x), (x.key or {}).get("base") or "", x.kind)):
+            by_target.setdefault(target(f), []).append(f)
+        for t, items in by_target.items():
+            sym = _SEV_SYMBOL.get(min((finding_severity(f) for f in items), key=_SEV_ORDER.index), "")
+            fix = remedies.get(t)
+            lines.append(f"{sym} **`{items[0].name}`** `{items[0].location}`" + (f" Fix: {fix}." if fix else ""))
+            for f in items:
+                sid = short_id(finding_id(f)) if is_dismissible(f) else None
+                fid = f"[{sid}] " if sid else ""
+                base = (f.key or {}).get("base") or "vanilla"
+                lines.append(f"  - {fid}{base}: {label_of(f)[0]}" + (f" ({f.detail})" if f.detail else ""))
+                if _is_value_finding(f):
+                    lines.extend(value_lines(f))
+            lines.append("")
+
+    def section(findings_here, show_since):
         for sev in _SEV_ORDER:
             sym = _SEV_SYMBOL.get(sev, "")
             for kind in _KIND_ORDER:
                 if KIND[kind][0] != sev:
                     continue
-                group = [f for f in items if f.kind == kind]
-                if not group:
-                    continue
-                _s, _a, label, fix = KIND[kind]
-                head = f"{sym} **{len(group)} {label}.**"
+                of_kind = [f for f in findings_here if f.kind == kind]
+                classes = {}
+                for f in of_kind:
+                    classes.setdefault(adopted_base(f, adopted), []).append(f)
+                for _who, group in sorted(classes.items(), key=lambda kv: kv[0] or ""):
+                    render_class(kind, group, sym, show_since)
+
+    def render_class(kind, group, sym, show_since):
+                label, fix = label_of(group[0])
+                head = f"{sym} **{len(group)} {count_label(len(group), label)}.**"
                 lines.append(head + (f" Fix: {fix}." if fix else ""))
                 first_id = None
+                if kind in BY_FILE:
+                    by_file = {}
+                    for f in sorted(group, key=lambda x: (x.location or "", x.name)):
+                        by_file.setdefault((f.location or "").rsplit(":", 1)[0], []).append(f)
+                    for file, in_file in sorted(by_file.items()):
+                        named = []
+                        for f in in_file:
+                            sid = short_id(finding_id(f)) if is_dismissible(f) else None
+                            first_id = first_id or sid
+                            # Places in this line's own file are named by line alone.
+                            here = "; ".join(f"line {p[len(file) + 1:]}" if p.startswith(f"{file}:") else p
+                                             for p in (f.detail or "").split("; ") if p)
+                            bits = [b for b in (here, f"since {f.since}" if show_since else "") if b]
+                            named.append((f"[{sid}] " if sid else "") + f"`{f.name}`"
+                                         + (f" ({'; '.join(bits)})" if bits else ""))
+                        lines.append(f"  - `{file}`: " + ", ".join(named))
+                    if first_id:
+                        lines.append(f'    To keep one as it is: `pdx-audit --dismiss {first_id} --reason "why"`')
+                    lines.append("")
+                    return
                 for f in sorted(group, key=lambda x: (x.name, x.detail or "")):
                     sid = short_id(finding_id(f)) if is_dismissible(f) else None
                     first_id = first_id or sid
@@ -302,11 +468,9 @@ def render_triage(findings, old_msg, new_msg, selected, detail_shown=True,
                     loc = (f" `{f.location}`"
                            if f.location and f.location != f.name else "")
                     if _is_value_finding(f):
-                        k = f.key
-                        label = line_label(k)
-                        lines.append(f"  - {fid}`{f.name}`{loc}" + (f" {label}" if label else ""))
-                        yours, vanilla = value_pair(change_kind(f.kind), k["yours"], k["vanilla"], f.since)
-                        lines.extend([f"      yours:    {yours}", f"      vanilla:  {vanilla}"])
+                        place = line_label(f.key)
+                        lines.append(f"  - {fid}`{f.name}`{loc}" + (f" {place}" if place else ""))
+                        lines.extend(value_lines(f))
                         continue
                     bits = [b for b in (f.detail, f"since {f.since}" if show_since else "") if b]
                     extra = f" ({'; '.join(bits)})" if bits else ""
@@ -315,9 +479,10 @@ def render_triage(findings, old_msg, new_msg, selected, detail_shown=True,
                     lines.append(f'    To keep one as it is: `pdx-audit --dismiss {first_id} --reason "why"`')
                 lines.append("")
 
+    patch_title = min(patch_tags, key=len) if patch_tags else None
     if earlier:
         if current:
-            lines.append(f"## This patch{f' ({new_tag})' if new_tag else ''} and current state")
+            lines.append(f"## This patch{f' ({patch_title or new_tag})' if new_tag else ''} and current state")
             lines.append("")
             section(current, False)
         lines.append("## Still open from earlier patches")
@@ -399,7 +564,7 @@ def _inline(s):
 
 _SYMBOLS = (("✗", "red"), ("⚠", "yellow"), ("✓", "green"), ("≈", "yellow"))
 
-_VALUE_LINE = re.compile(r"^(\s+)(yours:|vanilla:)(\s+)(.*)$")
+_VALUE_LINE = re.compile(r"^(\s+)(yours:|vanilla:|upstream:)(\s+)(.*)$")
 _PATCH_TAG = re.compile(r"^(.*?)(\s+)(\([^()]*\))$")
 
 
@@ -408,7 +573,7 @@ def _render_value_line(m):
     new or added value green, the patch tag dim, your value as written."""
     indent, label, gap, rest = m.groups()
     tag = ""
-    if label == "vanilla:":
+    if label in ("vanilla:", "upstream:"):
         t = _PATCH_TAG.match(rest)
         if t:
             rest, tag = t.group(1), t.group(2) + _wrap(("dim",), t.group(3))

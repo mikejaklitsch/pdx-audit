@@ -102,6 +102,34 @@ def test_an_orphaned_replace_names_the_patch_that_removed_its_block(tmp_path):
     assert (f.kind, f.since) == ("override_orphaned", "1.1")
 
 
+def test_the_side_by_side_view_lines_up_vanilla_and_the_replace(world):
+    findings, _out = _run(world, audit_args(results_file="r.json"))
+    rows = results.side_rows(findings[0].data)
+    side = lambda s: (s["state"], s["text"]) if s else None
+    assert [(side(r["left"]), side(r["right"]), r["mark"]) for r in rows] == [
+        (("same", "some_building = {"), ("same", "REPLACE:some_building = {"), None),
+        (("same", "\tcost = 100"), ("same", "\tcost = 100"), None),
+        (("del", "\tlegacy_mod = 1"), ("same", "\tlegacy_mod = 1"), "review"),
+        (("add", "\tupkeep = 5"), None, "review"),
+        (("same", "}"), ("same", "}"), None)]
+
+
+def test_an_inject_measured_from_a_carried_base_records_that_base(tmp_path):
+    b = "in_game/common/building_types/b.txt"
+    tr = build_tracker(tmp_path, [("1.0", {b: "thing = {\n\tcost = 1\n\tupkeep = 1\n}\n"}),
+                                  ("1.1", {b: "thing = {\n\tcost = 2\n\tupkeep = 2\n}\n"}),
+                                  ("1.2", {b: "thing = {\n\tcost = 2\n\tupkeep = 2\n\tx = 1\n}\n"})])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}',
+                      "in_game/common/building_types/i.txt": "INJECT:thing = {\n\tupkeep = 9\n}\n"})
+    target = "override:in_game/common/building_types/thing"
+    with redirect_stdout(io.StringIO()):
+        findings = run_override_audit(mod, tr.repo, tr.hashes["1.1"], "1.1 Test", tr.hashes["1.2"], "1.2 Test",
+                                      audit_args(), make_ctx(tr.repo, "1.2", bases={target: "1.0"}))
+    [f] = [f for f in findings if f.kind == "override_inject_overlap"]
+    assert (f.since, f.base) == ("1.1", "1.0")
+
+
 def test_an_inject_colliding_with_vanilla_marks_its_key_in_the_block(world):
     _write_tree(world.mod, {"in_game/common/building_types/i.txt":
                             "INJECT:some_building = {\n\tupkeep = 7\n}\n"})
@@ -109,8 +137,8 @@ def test_an_inject_colliding_with_vanilla_marks_its_key_in_the_block(world):
     [inject] = [f for f in findings if f.kind == "override_inject_overlap"]
     rows = results.block_rows(inject.data)
     assert [(r["text"], r["mark"], r["sign"]) for r in rows] == [
-        ("INJECT:some_building = {", None, None), ("\tupkeep = 7", "review", "-"),
-        ("\tupkeep = 5", "review", "+"), ("}", None, None)]
+        ("INJECT:some_building = {", None, None), ("\tupkeep = 7", "stale", "-"),
+        ("\tupkeep = 5", "stale", "+"), ("}", None, None)]
 
 
 def test_every_finding_of_a_block_points_at_one_stored_block(world):

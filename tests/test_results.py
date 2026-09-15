@@ -69,6 +69,63 @@ def _change(**kw):
     return base
 
 
+def test_side_by_side_compares_each_side_with_the_version_the_copy_matches():
+    block = {"line": 10, "lines": ["REPLACE:x = {", "\tprice = 4 # mine", "\textra = 1", "}"],
+             "vanilla_lines": ["x = {", "\tprice = 6", "}"], "base_lines": ["x = {", "\tprice = 8", "}"],
+             "changes": [_change(kind="both_changed", mark="review", first=11, last=11, vfirst=2, vlast=2)]}
+    rows = results.side_rows(block)
+    side = lambda s: (s["state"], s["text"].strip()) if s else None
+    assert [(side(r["left"]), side(r["right"]), r["mark"]) for r in rows] == [
+        (("same", "x = {"), ("same", "REPLACE:x = {"), None),
+        (("del", "price = 8"), ("del", "price = 8"), None),
+        (("add", "price = 6"), ("add", "price = 4 # mine"), "review"),
+        (None, ("add", "extra = 1"), None),
+        (("same", "}"), ("same", "}"), None)]
+    assert rows[2]["left"]["emph"] and rows[1]["left"]["emph"]     # 8 against 6, where one line replaced one
+    assert [r["lead"] for r in rows] == [False, False, True, False, False]
+
+
+def test_a_removed_block_takes_its_own_closing_brace():
+    base = ["t {", "\ta = {", "\t\tv = 1", "\t\tb = {", "\t\t}", "\t}", "\tc = {", "\t\tv = 1", "\t}", "}"]
+    mine = base[:6] + base[9:]
+    block = {"line": 1, "lines": mine, "vanilla_lines": base, "base_lines": base, "changes": []}
+    assert [r["right"]["text"] for r in results.side_rows(block) if r["right"]["state"] == "del"] == [
+        "\tc = {", "\t\tv = 1", "\t}"]
+
+
+def test_a_removed_sibling_block_takes_its_own_closing_brace():
+    base = ["t {", "\ta = {", "\t\tb = {", "\t\t}", "\t}", "\tc = {", "\t\tv = 1", "\t}", "",
+            "\td = {", "\t\tw = 1", "\t\tx = 2", "\t}", "}"]
+    mine = base[:5] + base[8:]
+    block = {"line": 1, "lines": mine, "vanilla_lines": base, "base_lines": base, "changes": []}
+    rows = results.side_rows(block)
+    assert [r["right"]["text"] for r in rows if r["right"]["state"] == "del"] == ["\tc = {", "\t\tv = 1", "\t}"]
+    assert [r["right"]["n"] for r in rows if r["right"]["state"] == "same"] == list(range(1, 12))
+
+
+def test_a_finding_takes_its_strongest_mark_and_the_blank_rows_inside_it():
+    base = ["x = {", "\ta = 1", "}"]
+    block = {"line": 1, "lines": ["x = {", "", "\ta = 2", "}"], "vanilla_lines": base, "base_lines": base,
+             "changes": [_change(kind="both_changed", mark="review", vfirst=2, vlast=2),
+                         _change(kind="both_changed", mark="stale", first=3, last=3)]}
+    rows = results.side_rows(block)
+    assert [(r["mark"], r["lead"]) for r in rows] == [
+        (None, False), ("stale", True), ("stale", False), ("stale", False), (None, False)]
+    assert rows[2]["right"]["quiet"] and rows[2]["fid"] == rows[1]["fid"]
+
+
+def test_flattening_strips_indentation_and_joins_runs_of_closing_braces():
+    rows = results.block_rows({"line": 1, "lines": ["a = {", "\tb = {", "\t\tc = 1", "\t}", "}"], "changes": []})
+    assert [(r["n"], r["text"]) for r in results.flatten_rows(rows)] == [
+        (1, "a = {"), (2, "b = {"), (3, "c = 1"), (4, "} }")]
+    nested = ["a = {", "\tb = {", "\t\tc = 1", "\t}", "}"]
+    block = {"line": 1, "lines": nested[:2] + ["\t\tc = 2"] + nested[3:], "vanilla_lines": nested,
+             "base_lines": nested, "changes": []}
+    flat = results.flatten_rows(results.side_rows(block))
+    assert [((r["left"] or {}).get("text"), (r["right"] or {}).get("text")) for r in flat] == [
+        ("a = {", "a = {"), ("b = {", "b = {"), ("c = 1", "c = 1"), (None, "c = 2"), ("} }", "} }")]
+
+
 def _rows(lines, *changes, line=10):
     rows = results.block_rows({"lines": lines, "line": line, "changes": list(changes)})
     return [(r["n"], r["text"], r["mark"], r["sign"]) for r in rows]

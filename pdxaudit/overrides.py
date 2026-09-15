@@ -10,9 +10,9 @@ from pathlib import Path
 from collections import defaultdict
 
 from . import changes, diff3, ledger, session
-from .gui import audit_window, commits_up_to
+from .gui import audit_window, commits_up_to, foundation_duplicate, owner_layer, print_duplicates
 from .report import diff_lines, diff_summary, Finding
-from .tracker import MODULE_ROOTS, _git_archive, full_hash
+from .tracker import MODULE_ROOTS, _git_archive, cache_location, cache_path, full_hash, tag_of
 from .config import should_skip
 
 REPLACE_TYPES = ("REPLACE", "TRY_REPLACE", "REPLACE_OR_CREATE")
@@ -117,24 +117,25 @@ def build_index(vanilla_repo, commit, categories, progress_label=""):
 
 BLOCK_CACHE_VERSION = 1
 
-def _block_cache_path(vanilla_repo, commit, categories):
+def _block_cache_path(source, commit, categories):
     """Cache file for a commit's block index, keyed by the full commit hash and
     the set of categories indexed. Commit content is immutable, so entries never
     go stale; the version bumps when the parser or index shape changes."""
-    full = full_hash(vanilla_repo, commit)
+    full = full_hash(cache_location(source)[0], commit)
     if not full:
         return None
     cat_key = hashlib.sha1(",".join(sorted(set(categories))).encode()).hexdigest()[:12]
-    return Path(vanilla_repo).parent / "cache" / \
-        f"blocks-v{BLOCK_CACHE_VERSION}-{full}-{cat_key}.json"
+    return cache_path(source, f"blocks-v{BLOCK_CACHE_VERSION}-{full}-{cat_key}.json")
 
-def build_index_cached(vanilla_repo, commit, categories, progress_label=""):
+def build_index_cached(source, commit, categories, progress_label=""):
     """build_index with a per-commit disk cache. A plain override run and a
-    later --diff run over the same overrides extract the same vanilla blocks; the
-    parsed index is memoized under <vanilla-tracker>/cache/ keyed by the
-    immutable commit hash so the second run reuses the first's work. Old entries
-    are pruned by prune_cache once their commit leaves the tracker."""
-    cache = _block_cache_path(vanilla_repo, commit, categories)
+    later --diff run over the same overrides extract the same blocks; the parsed
+    index is memoized in the source's cache folder keyed by the immutable commit
+    hash so the second run reuses the first's work. Old entries are pruned by
+    prune_cache once their commit leaves the source. `source` is a Source or the
+    vanilla tracker's path."""
+    vanilla_repo = cache_location(source)[0]
+    cache = _block_cache_path(source, commit, categories)
     if cache and cache.is_file():
         try:
             data = json.loads(cache.read_text())
@@ -157,13 +158,14 @@ def build_index_cached(vanilla_repo, commit, categories, progress_label=""):
             pass
     return idx
 
-def block_history(vanilla_repo, commits_old_first, categories, keys):
+def block_history(base, commits_old_first, categories, keys):
     """{(category, block): [text or None per commit]} oldest first, for just the
     wanted keys, loading one cached block index at a time."""
+    from .base import as_base
+    base = as_base(base)
     hist = {k: [] for k in keys}
     for i, (h, _msg) in enumerate(commits_old_first):
-        idx = build_index_cached(vanilla_repo, h, categories,
-                                 f"history {i + 1}/{len(commits_old_first)} ({h[:7]})")
+        idx = base.block_index(h, categories, f"history {i + 1}/{len(commits_old_first)} ({h[:7]})")
         for k in keys:
             e = idx.get(k)
             hist[k].append(e[1] if e else None)
@@ -314,20 +316,21 @@ def mod_referenced_values(mod_root):
 
 VOCAB_CACHE_VERSION = 1
 
-def _vocab_cache_path(vanilla_repo, commit):
+def _vocab_cache_path(source, commit):
     """Cache file for a commit's vocabulary, keyed by the full commit hash;
     commit content is immutable, so entries never go stale. The version bumps
     when the tokenizer changes."""
-    full = full_hash(vanilla_repo, commit)
+    full = full_hash(cache_location(source)[0], commit)
     if not full:
         return None
-    return Path(vanilla_repo).parent / "cache" / \
-        f"vocab-v{VOCAB_CACHE_VERSION}-{full}.json"
+    return cache_path(source, f"vocab-v{VOCAB_CACHE_VERSION}-{full}.json")
 
-def build_vocab(vanilla_repo, commit, label=""):
-    """token -> total `token =` occurrences across all vanilla .txt at `commit`.
-    Cached under <vanilla-tracker>/cache/ per commit hash."""
-    cache = _vocab_cache_path(vanilla_repo, commit)
+def build_vocab(source, commit, label=""):
+    """token -> total `token =` occurrences across a source's .txt at `commit`.
+    Cached in the source's cache folder per commit hash. `source` is a Source or
+    the vanilla tracker's path."""
+    vanilla_repo = cache_location(source)[0]
+    cache = _vocab_cache_path(source, commit)
     if cache and cache.is_file():
         try:
             vocab = json.loads(cache.read_text())
@@ -365,7 +368,7 @@ def build_vocab(vanilla_repo, commit, label=""):
         print(f" {len(vocab)} tokens.", file=sys.stderr)
     if cache and vocab:
         try:
-            cache.parent.mkdir(exist_ok=True)
+            cache.parent.mkdir(parents=True, exist_ok=True)
             tmp = cache.with_suffix(".tmp")
             tmp.write_text(json.dumps(vocab, separators=(",", ":")))
             tmp.replace(cache)
@@ -397,12 +400,15 @@ def mod_top_level_names(mod_root):
             depth = max(0, depth + code.count("{") - code.count("}"))
     return names
 
-def run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, ctx=None):
-    """Names the mod uses that vanilla used at some tracked version up to the new
+def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=None):
+    """Names the mod uses that the base used at some tracked version up to the new
     version but no longer uses at it, each with the patch that dropped it. The
     default run looks across every tracked version; a fixed window (--old,
     --full, or no run context) only looks from the old version onward. Names
-    the mod itself defines at top level are its own and never flagged."""
+    the mod itself defines at top level are its own and never flagged. `base` is a
+    Base or the vanilla tracker's path."""
+    from .base import as_base
+    base = as_base(base)
     keys = mod_referenced_tokens(mod_root)
     refs = mod_referenced_values(mod_root)
     own = mod_top_level_names(mod_root)
@@ -411,7 +417,7 @@ def run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg,
     print(f"Scanning {len(keys)} keys and {len(refs)} references in {mod_root.name}...",
           file=sys.stderr)
 
-    commits = ctx.commits if ctx is not None else _all_commits(vanilla_repo)
+    commits = ctx.commits if ctx is not None else base.commits()
     old_first = list(reversed(commits_up_to(commits, new_hash)))
     fixed_window = ctx.fixed_window if ctx is not None else True
     if fixed_window:
@@ -421,7 +427,7 @@ def run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg,
                 break
     vocabs = []
     for i, (h, msg) in enumerate(old_first):
-        v = build_vocab(vanilla_repo, h, f"vocabulary {i + 1}/{len(old_first)} ({h[:7]})")
+        v = base.vocab(h, f"vocabulary {i + 1}/{len(old_first)} ({h[:7]})")
         if v:
             vocabs.append((_tag(msg), v))
     if not vocabs or not old_first or vocabs[-1][0] != _tag(old_first[-1][1]):
@@ -487,10 +493,6 @@ def run_deps_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg,
                                     {"target": f"deps:{name}", "use": use}, gone))
     return findings
 
-def _all_commits(vanilla_repo):
-    from .tracker import get_commits
-    return get_commits(vanilla_repo)
-
 def names_defined_in_vanilla(vanilla_repo, commit, categories, names):
     """Subset of `names` that appear as an assignment target ('name =') anywhere
     in vanilla's .txt files under `categories` at `commit`, even when not as a
@@ -528,8 +530,7 @@ def override_target(ov):
     return f"override:{ov['category']}/{ov['block']}"
 
 def _tag(msg):
-    parts = (msg or "").split()
-    return parts[0] if parts else ""
+    return tag_of(msg)
 
 def print_inject_section(items, show_diff, mod_root):
     if not items:
@@ -552,7 +553,7 @@ def print_inject_section(items, show_diff, mod_root):
         if status == "ok" and overlaps:
             shown = ", ".join(f"`{k}`" for k, _, _ in overlaps[:8])
             more = f" (+{len(overlaps) - 8} more)" if len(overlaps) > 8 else ""
-            print(f"  **Injection-point collision:** ⚠ vanilla also defines or "
+            print(f"  **Injection-point collision:** ✗ vanilla also defines or "
                   f"changed top-level {shown}{more}, the level this INJECT adds "
                   f"to; check for a duplicate or conflict")
         elif status == "ok":
@@ -636,8 +637,8 @@ def _same_statements(a, b):
 
 def inject_block(mod_root, ov, overlaps, finding, vanilla_file):
     """The block view of an INJECT whose top-level keys vanilla also changed: each
-    of your top-level statements with such a key is marked for review, with
-    vanilla's current statement under it."""
+    of your top-level statements with such a key is marked stale, since the key's
+    final value is no longer what it was, with vanilla's current statement under it."""
     text = extract_mod_block(mod_root, ov) or ""
     fid = ledger.finding_id(finding)
     new_of = {k: n for k, _o, n in overlaps}
@@ -647,16 +648,19 @@ def inject_block(mod_root, ov, overlaps, finding, vanilla_file):
     for node in diff3.body(diff3.nodes(text)):
         if node.key not in new_of:
             continue
-        rows.append({"kind": "inject_overlap", "mark": "review", "fid": fid, "since": finding.since,
+        rows.append({"kind": "inject_overlap", "mark": "stale", "fid": fid, "since": finding.since,
                      "first": line_at(node.start), "last": line_at(max(node.end - 1, node.start)),
                      "cols": [col(node.start), col(node.end)], "anchor": None, "inside": False,
                      "vanilla": new_of[node.key]})
     return {"type": "INJECT", "file": ov["file"], "line": ov["line"], "lines": text.split("\n"),
             "vanilla_file": vanilla_file, "changes": rows}
 
-def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args, ctx=None):
-    """Compare each REPLACE with vanilla's versions of its block from the window's
-    start through the new version, and check each INJECT's injection point."""
+def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx=None):
+    """Compare each REPLACE with the base's versions of its block from the window's
+    start through the new version, and check each INJECT's injection point. `base`
+    is a Base or the vanilla tracker's path."""
+    from .base import as_base
+    base = as_base(base)
     print(f"Scanning overrides in {mod_root.name}...", file=sys.stderr)
     overrides = find_overrides(mod_root)
 
@@ -690,13 +694,15 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
     replaces = [o for o in unique if o["type"] in REPLACE_TYPES]
     injects = [o for o in unique if o["type"] not in REPLACE_TYPES]
 
-    window = audit_window(vanilla_repo, old_hash, new_hash, args, ctx)
+    window = audit_window(base, old_hash, new_hash, args, ctx)
     tags = [_tag(m) for _h, m in window]
-    new_idx = build_index_cached(vanilla_repo, new_hash, categories, f"new ({new_hash[:7]})")
-    history = block_history(vanilla_repo, window, categories,
+    layers = [base.layer_of(h) for h, _m in window] if base.stacked else None
+    new_idx = base.block_index(new_hash, categories, f"new ({new_hash[:7]})")
+    owners = base.block_owners(new_hash, categories)
+    history = block_history(base, window, categories,
                             {(o["category"], o["block"]) for o in replaces}) if replaces else {}
 
-    removed, changed_replace, unchanged, not_found, unreadable = [], [], [], [], []
+    removed, changed_replace, unchanged, not_found, unreadable, duplicates = [], [], [], [], [], []
     for ov in replaces:
         key = (ov["category"], ov["block"])
         texts = history[key]
@@ -705,7 +711,7 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
             if not present:
                 not_found.append(ov)
                 continue
-            was = build_index_cached(vanilla_repo, window[present[-1]][0], categories).get(key)
+            was = base.block_index(window[present[-1]][0], categories).get(key)
             removed.append((ov, (was or ("?",))[0], tags[present[-1] + 1], None))
             continue
         mod_block = extract_mod_block(mod_root, ov)
@@ -713,37 +719,67 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
             unreadable.append(ov)
             continue
         vfile = (new_idx.get(key) or ("?",))[0]
+        owner = owners.get(key)
         result = changes.audit("override", ov["block"], override_target(ov), mod_block, texts, tags,
                                ov["file"], ov["line"], unwrap=True, want=want, block_type="REPLACE",
-                               vanilla_file=vfile)
+                               vanilla_file=vfile, layers=layers, owner=owner_layer(owner))
         if result.flagged:
             changed_replace.append((ov, vfile, texts, result))
+        elif owner_layer(owner) and not diff3.distance(diff3.body(diff3.nodes(mod_block)),
+                                                       diff3.body(diff3.nodes(texts[-1]))):
+            duplicates.append(foundation_duplicate(ov["block"], f"{ov['file']}:{ov['line']}", owner,
+                                                   override_target(ov)))
         else:
             unchanged.append(ov)
 
     # INJECT targets compare the window's old version, or an open finding's base,
-    # with the new version.
-    changed_inject = []
+    # with the new version. A change is dated by the first version after that one
+    # whose block differs.
+    changed_inject, inject_when = [], {}
     if injects:
-        old_idx = build_index_cached(vanilla_repo, old_hash, categories, f"old ({old_hash[:7]})")
-        all_first = (list(reversed(commits_up_to(ctx.commits, new_hash)))
-                     if ctx is not None and not fixed_window else [])
+        old_idx = base.block_index(old_hash, categories, f"old ({old_hash[:7]})")
+        all_first = list(reversed(commits_up_to(ctx.commits, new_hash))) if ctx is not None else []
         all_tags = [_tag(m) for _h, m in all_first]
+        old_pos = next((i for i, (h, _m) in enumerate(all_first)
+                        if old_hash.startswith(h) or h.startswith(old_hash)), None)
+
+        def dated(key, start, old_e):
+            for j in range(start + 1, len(all_first)):
+                e = base.block_index(all_first[j][0], categories).get(key)
+                if not e or not old_e or not _same_statements(old_e[1], e[1]):
+                    return all_tags[j]
+            return new_tag
+
         for ov in injects:
             key = (ov["category"], ov["block"])
             new_e, old_e = new_idx.get(key), old_idx.get(key)
-            target_tag = bases.get(override_target(ov))
+            start, base_tag = old_pos, old_tag
+            target_tag = None if fixed_window else bases.get(override_target(ov))
             if target_tag in all_tags:
-                h = all_first[len(all_tags) - 1 - all_tags[::-1].index(target_tag)][0]
-                old_e = build_index_cached(vanilla_repo, h, categories).get(key) or old_e
+                start, base_tag = len(all_tags) - 1 - all_tags[::-1].index(target_tag), target_tag
+                old_e = base.block_index(all_first[start][0], categories).get(key) or old_e
+            since = dated(key, start, old_e) if start is not None and old_e else new_tag
             if old_e and not new_e:
-                removed.append((ov, old_e[0], new_tag, old_tag))
+                removed.append((ov, old_e[0], since, base_tag))
             elif not old_e and not new_e:
                 not_found.append(ov)
             elif old_e and _same_statements(old_e[1], new_e[1]):
                 unchanged.append(ov)
             else:
                 changed_inject.append((ov, old_e, new_e))
+                inject_when[id(ov)] = (start, base_tag)
+
+    def overlap_since(ov, old_e):
+        """The first version after the INJECT's start whose block changes a key it injects."""
+        start, key = inject_when[id(ov)][0], (ov["category"], ov["block"])
+        if start is None or not old_e:
+            return new_tag
+        for j in range(start + 1, len(all_first)):
+            e = base.block_index(all_first[j][0], categories).get(key)
+            status, found = inject_overlap(mod_root, ov, old_e[1], e[1] if e else None)
+            if status == "ok" and found:
+                return all_tags[j]
+        return new_tag
 
     # Single-value REPLACEs (`REPLACE:name = value`), which have no block to index.
     hard_misses = list(not_found)
@@ -751,8 +787,7 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
     scalar_ovs = [(o, t) for o, t in scalar_ovs if t is not None]
     scalar_results, scalar_seen = [], set()
     if scalar_ovs:
-        values = [vanilla_scalar_values(vanilla_repo, h, {o["category"] for o, _ in scalar_ovs},
-                                        {o["block"] for o, _ in scalar_ovs})
+        values = [base.scalar_values(h, {o["category"] for o, _ in scalar_ovs}, {o["block"] for o, _ in scalar_ovs})
                   for h, _m in window]
         for ov, text in scalar_ovs:
             key = (ov["category"], ov["block"])
@@ -767,7 +802,7 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
             texts = [e[1] if e else None for e in entries]
             result = changes.audit("override", ov["block"], override_target(ov), text, texts, tags,
                                    ov["file"], ov["line"], want=want, block_type="REPLACE",
-                                   vanilla_file=entries[-1][0])
+                                   vanilla_file=entries[-1][0], layers=layers)
             if result.block is not None:
                 result.block["lines"] = [_mod_lines(mod_root, ov["file"])[ov["line"] - 1]]
             if result.flagged:
@@ -780,9 +815,8 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
     defined_elsewhere, absent = [], []
     if hard_misses:
         # A hard miss is only alarming if the name is truly gone from vanilla.
-        present = names_defined_in_vanilla(
-            vanilla_repo, new_hash, {o["category"] for o in hard_misses},
-            {o["block"] for o in hard_misses})
+        present = base.names_defined(new_hash, {o["category"] for o in hard_misses},
+                                     {o["block"] for o in hard_misses})
         defined_elsewhere = [o for o in hard_misses if o["block"] in present]
         absent = [o for o in hard_misses if o["block"] not in present]
 
@@ -791,10 +825,15 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
     created = [r for r in removed if r[0]["type"].endswith("_OR_CREATE")]
     removed = [r for r in removed if not r[0]["type"].endswith("_OR_CREATE")]
 
-    n_changes = sum(len(item[-1].flagged) for item in changed_replace + scalar_results)
+    fixed = iter(changes.distinct([item[-1] for item in changed_replace + scalar_results]))
+    changed_replace = [(*item[:-1], next(fixed)) for item in changed_replace]
+    scalar_results = [(*item[:-1], next(fixed)) for item in scalar_results]
+
+    n_changes =sum(len(item[-1].flagged) for item in changed_replace + scalar_results)
     summary = [
         f"# Override Audit: {tags[0]} → {tags[-1]}",
-        f"*each REPLACE compared with vanilla's {len(window)} tracked versions up to {new_msg}*",
+        (f"*each REPLACE compared with the {len(window)} points of vanilla and its foundations up to {new_msg}*"
+         if base.stacked else f"*each REPLACE compared with vanilla's {len(window)} tracked versions up to {new_msg}*"),
         "",
         f"**{len(unique)}** unique overrides scanned ({len(replaces)} REPLACE-type, "
         f"{len(injects)} INJECT-type)",
@@ -805,6 +844,7 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
         f"- **{len(removed)}** vanilla blocks removed: override orphaned",
         f"- **{len(created)}** vanilla blocks removed that an _OR_CREATE override now creates",
         f"- **{len(absent)}** not found in vanilla, **{len(defined_elsewhere)}** defined but not as a block",
+        *([f"- **{len(duplicates)}** REPLACE blocks identical to a foundation's"] if base.stacked else []),
         f"- **{len(unchanged)}** current with vanilla",
         "",
     ]
@@ -843,7 +883,7 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
         for ov, vfile, texts, result in changed_replace:
             changes.print_target(ov["block"], [("Type", ov["type"]), ("Mod", f"`{ov['file']}:{ov['line']}`"),
                                                ("Vanilla", f"`{vfile}`")],
-                                 result, texts, tags, args.diff, dismissed)
+                                 result, texts, tags, args.diff, dismissed, base.stacked)
 
     if scalar_results:
         print(f"## Changed Single-Value REPLACEs ({len(scalar_results)})")
@@ -851,9 +891,10 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
         for ov, vfile, texts, result in scalar_results:
             changes.print_target(ov["block"], [("Type", ov["type"]), ("Mod", f"`{ov['file']}:{ov['line']}`"),
                                                ("Vanilla", f"`{vfile}`")],
-                                 result, texts, tags, args.diff, dismissed)
+                                 result, texts, tags, args.diff, dismissed, base.stacked)
 
     print_inject_section(changed_inject, args.diff, mod_root)
+    print_duplicates(duplicates)
 
     if absent:
         print(f"## Not Found in Vanilla ({len(absent)})")
@@ -910,7 +951,8 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
                 " ..." if len(overlaps) > 3 else "")
             gap = hashlib.sha1(json.dumps([[k, o, n] for k, o, n in overlaps]).encode()).hexdigest()
             f = Finding("override_inject_overlap", ov["block"], loc, f"top-level {shown}", None,
-                        {"target": override_target(ov), "overlap": gap}, new_tag, old_tag)
+                        {"target": override_target(ov), "overlap": gap}, overlap_since(ov, old_e),
+                        inject_when[id(ov)][1])
             if want:
                 f = f._replace(data=inject_block(mod_root, ov, overlaps, f, (new_e or old_e)[0]))
             findings.append(f)
@@ -925,6 +967,7 @@ def run_override_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_
     for ov in defined_elsewhere:
         findings.append(Finding("override_nonblock", ov["block"], f"{ov['file']}:{ov['line']}",
                                 "", None, {"target": override_target(ov)}))
+    findings += duplicates
 
     if (not n_changes and not overlaps_found and not removed and not created and not absent
             and not unreadable):

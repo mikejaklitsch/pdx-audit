@@ -10,9 +10,9 @@ import json
 import hashlib
 from pathlib import Path
 
-from . import changes, session
+from . import changes, diff3, session
 from .report import Finding
-from .tracker import MODULE_ROOTS, _git_archive, full_hash, get_commits
+from .tracker import MODULE_ROOTS, _git_archive, cache_location, cache_path, full_hash, tag_of
 from .config import should_skip
 
 GUI_DEF_HEAD = re.compile(r"^\s*(template|local_template|types)\s+([A-Za-z_][\w.]*)")
@@ -91,6 +91,28 @@ def parse_gui_defs(text):
         clean = False
     return defs, clean
 
+def _top_defs(text):
+    """(kind, name, first line, last line) of each top-level definition in .gui `text`;
+    a `type` inside a `types` group is not top-level."""
+    defs = parse_gui_defs(text)[0]
+    span = lambda d: (d["line"], d["line"] + d["text"].count("\n"))
+    groups = [span(d) for d in defs if d["kind"] == "types"]
+    return [(d["kind"], d["name"], *span(d)) for d in defs
+            if not (d["kind"] == "type" and any(lo < d["line"] <= hi for lo, hi in groups))]
+
+
+def _without(text, names):
+    """`text` with its top-level definitions named in `names` ({(kind, name)}) blanked
+    out line for line, so the lines left keep their numbers."""
+    if text is None or not names:
+        return text
+    lines = text.split("\n")
+    for kind, name, first, last in _top_defs(text):
+        if (kind, name) in names:
+            lines[first - 1:last] = [""] * (last - first + 1)
+    return "\n".join(lines)
+
+
 def mod_gui_files(mod_root):
     """[(rel_path, text), ...] for the mod's .gui files under <module>/gui/."""
     out = []
@@ -154,22 +176,23 @@ def build_gui_vanilla(vanilla_repo, commit, modules, label=""):
 
 GUI_CACHE_VERSION = 1
 
-def _gui_cache_path(vanilla_repo, commit, modules):
+def _gui_cache_path(source, commit, modules):
     """Cache file for a commit's parsed GUI index, keyed by the full commit hash
     and the module set. Commit content is immutable, so entries never go stale;
     the version bumps when the parser or index shape changes."""
-    full = full_hash(vanilla_repo, commit)
+    full = full_hash(cache_location(source)[0], commit)
     if not full:
         return None
     mod_key = hashlib.sha1(",".join(sorted(modules)).encode()).hexdigest()[:12]
-    return Path(vanilla_repo).parent / "cache" / \
-        f"gui-v{GUI_CACHE_VERSION}-{full}-{mod_key}.json"
+    return cache_path(source, f"gui-v{GUI_CACHE_VERSION}-{full}-{mod_key}.json")
 
-def build_gui_vanilla_cached(vanilla_repo, commit, modules, label=""):
+def build_gui_vanilla_cached(source, commit, modules, label=""):
     """build_gui_vanilla with a per-commit disk cache. The audit reads the GUI index
-    at every tracked commit in its window, so the parsed index is memoized under
-    <vanilla-tracker>/cache/ keyed by the immutable commit hash."""
-    cache = _gui_cache_path(vanilla_repo, commit, modules)
+    at every tracked commit in its window, so the parsed index is memoized in the
+    source's cache folder keyed by the immutable commit hash. `source` is a Source
+    or the vanilla tracker's path."""
+    vanilla_repo = cache_location(source)[0]
+    cache = _gui_cache_path(source, commit, modules)
     if cache and cache.is_file():
         try:
             data = json.loads(cache.read_text())
@@ -195,8 +218,7 @@ def build_gui_vanilla_cached(vanilla_repo, commit, modules, label=""):
     return def_idx, file_idx, bad
 
 def _tag(msg):
-    parts = (msg or "").split()
-    return parts[0] if parts else ""
+    return tag_of(msg)
 
 def gui_def_target(key):
     """Record target name for a shadowed GUI definition (module, kind, name)."""
@@ -224,11 +246,34 @@ def version_window(commits, new_hash, old_hash=None):
                 return list(reversed(newest_first[:i + 1]))
     return list(reversed(newest_first))
 
-def audit_window(vanilla_repo, old_hash, new_hash, args, ctx=None):
+def audit_window(base, old_hash, new_hash, args, ctx=None):
     """The versions the GUI and override audits compare a copy with: from --old,
     else the oldest snapshot, through the new version."""
-    commits = ctx.commits if ctx is not None else get_commits(vanilla_repo)
+    from .base import as_base
+    commits = ctx.commits if ctx is not None else as_base(base).commits()
     return version_window(commits, new_hash, old_hash if getattr(args, "old", None) else None)
+
+
+def owner_layer(owner):
+    """The source id of a unit's owner, or None when vanilla owns it."""
+    return owner["layer"] if owner and owner.get("layer") != "vanilla" else None
+
+
+def foundation_duplicate(name, location, owner, target):
+    """A mod unit identical to one a foundation provides."""
+    return Finding("foundation_duplicate", name, location, f"identical to {owner['layer']} {owner['version']}",
+                   None, {"target": target, "base": owner["layer"]})
+
+
+def print_duplicates(duplicates):
+    """The detail section for mod units identical to a foundation's."""
+    if not duplicates:
+        return
+    print(f"## Identical to a Foundation's ({len(duplicates)})")
+    print()
+    for f in duplicates:
+        print(f"- ⚠ **{f.name}**, `{f.location}`: {f.detail}; the foundation provides it")
+    print()
 
 def _mod_defs(files):
     mdefs, skipped = [], 0
@@ -247,10 +292,12 @@ def _mod_defs(files):
                 skipped += 1
     return mdefs, skipped
 
-def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, args, ctx=None):
-    """Compare each mod GUI definition that shadows vanilla's, and each mod .gui file
-    at a vanilla file's path, with vanilla's versions from the window's start through
-    the new version."""
+def run_gui_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx=None):
+    """Compare each mod GUI definition that shadows the base's, and each mod .gui file
+    at a base file's path, with the base's versions from the window's start through
+    the new version. `base` is a Base or the vanilla tracker's path."""
+    from .base import as_base
+    base = as_base(base)
     files = mod_gui_files(mod_root)
     if not files:
         print("No mod .gui files found.", file=sys.stderr)
@@ -267,13 +314,14 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         ctx.scanned["gui"] = len(mdefs) + len(files_audited)
 
     modules = sorted({rel.split("/", 1)[0] for rel, _ in files})
-    window = audit_window(vanilla_repo, old_hash, new_hash, args, ctx)
+    window = audit_window(base, old_hash, new_hash, args, ctx)
     tags = [_tag(m) for _h, m in window]
+    layers = [base.layer_of(h) for h, _m in window] if base.stacked else None
     print(f"Scanning {len(mdefs)} GUI definitions in {len(files)} mod .gui files "
-          f"against {len(window)} vanilla versions...", file=sys.stderr)
-    indexes = [build_gui_vanilla_cached(vanilla_repo, h, modules,
-                                        f"version {i + 1}/{len(window)} ({h[:7]})")
+          f"against {len(window)} {'stack points' if base.stacked else 'vanilla versions'}...", file=sys.stderr)
+    indexes = [base.gui_index(h, modules, f"version {i + 1}/{len(window)} ({h[:7]})")
                for i, (h, _m) in enumerate(window)]
+    owners, file_owners = base.gui_owners(window[-1][0], modules)
     new_defs, new_files, _bad = indexes[-1]
     if not new_defs and not new_files:
         print("Could not read vanilla .gui files (archive failed).", file=sys.stderr)
@@ -289,7 +337,7 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
     dismissed = getattr(ctx, "dismissed", frozenset())
     same_path = {rel for rel, _ in files if any(rel in fi for _d, fi, _b in indexes)}
 
-    shadowed, new_coll, van_removed = [], [], []
+    shadowed, new_coll, van_removed, duplicates = [], [], [], []
     current = mod_only = 0
     for d in mdefs:
         if d["file"] in same_path:
@@ -306,13 +354,21 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         if len(entries) > 1 and entries[-2] is None:
             new_coll.append((d, entries[-1][0], tags[-1]))
         versions = [e[1] if e else None for e in entries]
+        owner = owners.get(key)
         result = changes.audit("gui", d["name"], gui_def_target(key), d["text"], versions, tags,
-                               d["file"], d["line"], want=want, vanilla_file=entries[-1][0])
+                               d["file"], d["line"], want=want, vanilla_file=entries[-1][0],
+                               layers=layers, owner=owner_layer(owner))
         if result.flagged:
             shadowed.append((d, entries[-1][0], versions, result))
+        elif owner_layer(owner) and not diff3.distance(diff3.nodes(d["text"]), diff3.nodes(versions[-1])):
+            duplicates.append(foundation_duplicate(d["name"], f"{d['file']}:{d['line']}", owner,
+                                                   gui_def_target(key)))
         else:
             current += 1
 
+    # Each mod file's top-level definitions: a definition a replaced file's copy lacks
+    # but another mod file of its module defines was moved there, and is compared there.
+    made = {rel: {(kind, name) for kind, name, _first, _last in _top_defs(text)} for rel, text in files}
     replaced, file_review = [], []
     for rel, text in files_audited:
         versions = [fi.get(rel) for _d, fi, _b in indexes]
@@ -325,15 +381,27 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
             continue
         if len(present) > 1 and not present[-2]:
             file_review.append((rel, "added", tags[-1]))
+        module = rel.split("/", 1)[0]
+        moved = {name for other, names in made.items() if other != rel and other.split("/", 1)[0] == module
+                 for name in names} - made[rel]
+        versions = [_without(v, moved) for v in versions]
+        owner = file_owners.get(rel)
         result = changes.audit("gui", rel, gui_file_target(rel), text, versions, tags, rel, 1,
-                               want=want, vanilla_file=rel)
+                               want=want, vanilla_file=rel, layers=layers, owner=owner_layer(owner))
         if result.flagged:
             replaced.append((rel, versions, result))
+        elif owner_layer(owner) and not diff3.distance(diff3.nodes(text), diff3.nodes(versions[-1])):
+            duplicates.append(foundation_duplicate(rel, rel, owner, gui_file_target(rel)))
         else:
             current += 1
 
+    fixed = iter(changes.distinct([item[-1] for item in shadowed + replaced]))
+    shadowed = [(*item[:-1], next(fixed)) for item in shadowed]
+    replaced = [(*item[:-1], next(fixed)) for item in replaced]
+
     print(f"# GUI Override Audit: {tags[0]} → {tags[-1]}")
-    print(f"*each copy compared with vanilla's {len(window)} tracked versions up to {new_msg}*")
+    print(f"*each copy compared with the {len(window)} points of vanilla and its foundations up to {new_msg}*"
+          if base.stacked else f"*each copy compared with vanilla's {len(window)} tracked versions up to {new_msg}*")
     print()
     shadow_defs = [d for d in mdefs if d["file"] not in same_path]
     n_tmpl = sum(1 for d in shadow_defs if d["kind"] == "template")
@@ -354,6 +422,7 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         f"- **{len(file_review)}** same-path files vanilla added or removed",
         f"- **{len(new_coll)}** new name collisions (vanilla added a same-name definition)",
         f"- **{len(van_removed)}** shadowed definitions removed from vanilla",
+        *([f"- **{len(duplicates)}** copies identical to a foundation's"] if base.stacked else []),
         f"- **{current}** copies current with vanilla, **{mod_only}** mod-only definitions",
         "",
     ]))
@@ -364,7 +433,7 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
         for d, vfile, versions, result in shadowed:
             changes.print_target(d["name"], [("Kind", d["kind"]), ("Mod", f"`{d['file']}:{d['line']}`"),
                                              ("Vanilla", f"`{vfile}`")],
-                                 result, versions, tags, args.diff, dismissed)
+                                 result, versions, tags, args.diff, dismissed, base.stacked)
 
     if replaced:
         print(f"## Same-Path File Replacements Vanilla Changed ({len(replaced)})")
@@ -373,7 +442,7 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
               "inside it is measured here, not as a shadow.")
         print()
         for rel, versions, result in replaced:
-            changes.print_target(rel, [], result, versions, tags, args.diff, dismissed)
+            changes.print_target(rel, [], result, versions, tags, args.diff, dismissed, base.stacked)
 
     if file_review:
         print(f"## Same-Path Files Vanilla Added or Removed ({len(file_review)})")
@@ -400,6 +469,8 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
             print(f"- **{d['kind']}:{d['name']}**, mod `{d['file']}:{d['line']}` "
                   f"(was in `{vfile}`, removed in {since}); the mod copy is now the only definition")
         print()
+
+    print_duplicates(duplicates)
 
     if not shadowed and not replaced and not file_review and not new_coll and not van_removed:
         print("**All GUI overrides are current with vanilla.**")
@@ -434,4 +505,4 @@ def run_gui_audit(mod_root, vanilla_repo, old_hash, old_msg, new_hash, new_msg, 
                                 "", {"vanilla_file": vfile} if want else None,
                                 {"target": gui_def_target((d["module"], d["kind"], d["name"]))},
                                 since))
-    return findings
+    return findings + duplicates
