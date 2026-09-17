@@ -29,7 +29,9 @@ stops there, since a block vanilla deleted and later put back is two blocks.
   vanilla_removed   you carry a statement vanilla had here and has deleted
   both_changed      vanilla changed a statement you changed too, or deleted one you
                     changed, after your baseline
-  removed_changed   vanilla changed a statement you deleted, after your baseline
+  removed_changed   vanilla changed a statement you deleted, after your baseline; the
+                    copy has no such statement either way, so this is the copy's own
+                    edit and is not reported
   mod_changed, mod_added, mod_removed
                     your own edits: vanilla never touched the statement, or touched it
                     at or before your baseline, so your copy was made seeing it
@@ -41,10 +43,13 @@ deleted text inside a block only the copy has.
 A block of your own wrapped around vanilla's statements moves them to a different
 place, so they are not linked to vanilla's history there.
 
-Priority: both_changed and removed_changed are mid: the copy's statement applies
-before and after vanilla's change, so the game behaves as it did. The other vanilla
-changes are high when the block holding them also holds an edit of yours, conflicts
-included, since they compete with it, and mid otherwise. Your own edits are info.
+Priority: both_changed is mid, since the copy's statement applies before and after
+vanilla's change, so the game behaves as it did. removed_changed is info: a statement
+the copy deleted is deleted whatever vanilla later does to it, so vanilla editing it
+changes nothing about the copy, exactly as for a statement vanilla never touched. The
+other vanilla changes are high when the block holding them also holds an edit of
+yours, conflicts and deletions included, since they compete with it, and mid
+otherwise. Your own edits are info.
 
 History that starts after your copy was made cannot tell your edits from vanilla's
 earlier ones: a difference older than the oldest tracked version reads as yours."""
@@ -456,6 +461,19 @@ class _History:
         return (self.matches(level, k - 1, lambda n: n.key == key)
                 >= self.matches(level, self.cur, lambda n: n.key == key))
 
+    def held_at_baseline(self, level, same, since):
+        """True when the copy's baseline already held as many nodes `same` accepts here as
+        current vanilla holds, and vanilla's change came later. Vanilla can move a
+        statement out of a block and back again, which makes it look newer than the copy;
+        whoever wrote the copy saw it at the baseline, so the copy lacking it is their own
+        deletion and not a change to take. Vanilla holding more of them than the baseline
+        did is still an addition, and a change at the baseline itself is not later."""
+        if since is None or self.base is None or since <= self.base:
+            return False
+        if not 0 <= self.base < len(level):
+            return False
+        return self.matches(level, self.base, same) >= self.matches(level, self.cur, same)
+
     def seen_before_copy(self, since):
         """True when vanilla's change came at or before the copy's baseline."""
         return since is not None and self.base is not None and since <= self.base
@@ -505,8 +523,9 @@ def _walk(mine, theirs, path, level, parent, hist, out, dialect):
                 commented[v.sig] -= 1
                 add("mod_removed", None, v, None, here)
                 continue
-            k = hist.introduced(level, j, lambda n, v=v: n.sig == v.sig)
-            if k is None:
+            same = lambda n, v=v: n.sig == v.sig                       # noqa: E731
+            k = hist.introduced(level, j, same)
+            if k is None or hist.held_at_baseline(level, same, k):
                 add("mod_removed", None, v, None, here)
             elif hist.replaced(k, level, v.key):
                 add("removed_changed", None, v, k, here, v.key)
@@ -539,7 +558,7 @@ def _walk(mine, theirs, path, level, parent, hist, out, dialect):
 
     yours = any(c.kind in MOD_KINDS + CONFLICT_KINDS for c in local)
     for c in local:
-        if c.kind in MOD_KINDS:
+        if c.kind in MOD_KINDS or c.kind == "removed_changed":
             priority = INFO
         elif c.kind in CONFLICT_KINDS or not yours:
             priority = MID

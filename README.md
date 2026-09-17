@@ -262,7 +262,7 @@ If it is not a valid JSON object, a warning says so and its settings are ignored
 A copy of vanilla text is usually taken from some game version and then edited. Each REPLACE block, shadowed GUI definition and replaced `.gui` file is compared with vanilla's text of it at every snapshot from `--old` (the oldest snapshot by default) through `--new` (the newest). The copy's baseline is the snapshot it differs from least; among equally close snapshots the oldest wins. Each difference from vanilla's newest text is then looked up in vanilla's history at the same place:
 
 - a value your copy keeps that vanilla has since changed, a statement vanilla added that your copy lacks, or a statement vanilla deleted that your copy still carries, is a change to take;
-- a statement you changed or deleted that vanilla also changed after your baseline is a conflict to check;
+- a statement you changed that vanilla also changed after your baseline is a conflict to check; a statement you *deleted* that vanilla later changed is not reported, since your copy has no such statement either way;
 - a vanilla statement your copy holds as a one-line comment in the same block, word for word (`#trade_income = 0.1`), is your own deletion;
 - anything else is your own edit and is not reported.
 

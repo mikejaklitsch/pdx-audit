@@ -28,9 +28,11 @@ def test_a_prose_comment_is_not_a_commented_statement():
     assert _changes(mod, "w = { a = 1 }", "w = { a = 1 b = 2 }") == [("vanilla_added", "mid", "b", 1)]
 
 
-def test_a_comment_holding_an_older_value_leaves_vanillas_change_to_report():
+def test_a_comment_holding_an_older_value_is_still_your_deletion():
+    # The comment records what you took out; vanilla changing it afterwards does not
+    # put it back, so there is nothing for you to do.
     mod = "w = {\n\ta = 1\n\t#b = 1\n}"
-    assert _changes(mod, "w = { a = 1 b = 1 }", "w = { a = 1 b = 2 }") == [("removed_changed", "mid", "b", 1)]
+    assert _changes(mod, "w = { a = 1 b = 1 }", "w = { a = 1 b = 2 }") == [("removed_changed", "info", "b", 1)]
 
 
 def test_layout_comments_and_number_spelling_are_not_differences():
@@ -88,9 +90,11 @@ def test_your_additions_and_removals_are_info():
         ("mod_added", "info", "z", None), ("mod_removed", "info", "b", None)]
 
 
-def test_vanilla_changing_a_statement_you_removed_is_mid():
+def test_vanilla_changing_a_statement_you_removed_is_your_own_edit():
+    # Deleted is deleted: the copy behaves the same whatever vanilla does to the
+    # statement afterwards, so it is info, as a deletion vanilla never touched is.
     assert _changes("w = { a = 1 }", "w = { a = 1 b = 2 }", "w = { a = 1 b = 3 }") == [
-        ("removed_changed", "mid", "b", 1)]
+        ("removed_changed", "info", "b", 1)]
 
 
 def test_copy_synced_to_a_middle_version_reads_later_changes_as_vanilla():
@@ -325,3 +329,17 @@ def test_a_change_vanilla_made_inside_a_selector_is_still_reported():
     kinds = [(c.kind, c.mod.label if c.mod else c.new.label)
              for c in compare(mod, [old, new]) if c.kind.startswith("vanilla")]
     assert ("vanilla_removed", "culture") in kinds or ("vanilla_changed", "culture") in kinds
+
+
+def test_a_statement_vanilla_moved_out_and_back_is_not_an_addition_you_missed():
+    # Vanilla wrapped a trigger in a block for two versions and then unwrapped it, so
+    # following it back stops at the unwrapping. The copy's baseline held it at that
+    # place all along, so the copy dropping it is the copy's own edit, not a change to
+    # take. (MEIOU's decline_of_empire can_end.)
+    versions = ["d = { can_end = { end_trigger = yes } }",                    # baseline
+                "d = { can_end = { end_reason = { trigger = end_trigger } } }",
+                "d = { can_end = { end_trigger = yes } }"]
+    mod = "d = { can_end = { OR = { stability > 0 } } }"
+    kinds = [(c.kind, c.priority) for c in compare(mod, versions)
+             if (c.new or c.mod).label == "end_trigger"]
+    assert kinds == [("mod_removed", "info")]
