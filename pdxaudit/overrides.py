@@ -635,10 +635,28 @@ def _same_statements(a, b):
     """True when two texts read the same statement for statement."""
     return [n.sig for n in diff3.nodes(a)] == [n.sig for n in diff3.nodes(b)]
 
-def inject_block(mod_root, ov, overlaps, finding, vanilla_file):
+def _statements_of(text, keys, first_line):
+    """{key: [(line number, line text)]} for every top-level statement of `text` whose
+    key is in `keys`, numbering from `first_line`. A key can be written more than once
+    in one block, and every one of them belongs to the injection point."""
+    out = defaultdict(list)
+    lines = (text or "").split("\n")
+    for node in diff3.body(diff3.nodes(text or "")):
+        if node.key not in keys:
+            continue
+        a = text.count("\n", 0, node.start)
+        b = text.count("\n", 0, max(node.end - 1, node.start))
+        out[node.key] += [(first_line + i, lines[i]) for i in range(a, b + 1)]
+    return out
+
+def inject_block(mod_root, ov, overlaps, finding, vanilla_file, vanilla_text=None):
     """The block view of an INJECT whose top-level keys vanilla also changed: each
     of your top-level statements with such a key is marked stale, since the key's
-    final value is no longer what it was, with vanilla's current statement under it."""
+    final value is no longer what it was, with vanilla's current statement under it.
+
+    `pairs` holds, for each of those keys, your statements and vanilla's current ones
+    side by side. Only the keys you inject are there: the rest of vanilla's block is
+    not an injection point, and your INJECT not holding it is not a difference."""
     text = extract_mod_block(mod_root, ov) or ""
     fid = ledger.finding_id(finding)
     new_of = {k: n for k, _o, n in overlaps}
@@ -652,8 +670,13 @@ def inject_block(mod_root, ov, overlaps, finding, vanilla_file):
                      "first": line_at(node.start), "last": line_at(max(node.end - 1, node.start)),
                      "cols": [col(node.start), col(node.end)], "anchor": None, "inside": False,
                      "vanilla": new_of[node.key]})
+    mine = _statements_of(text, set(new_of), ov["line"])
+    theirs = _statements_of(vanilla_text, set(new_of), 1) if vanilla_text else {}
+    pairs = [{"key": k, "fid": fid, "mark": "stale", "since": finding.since,
+              "yours": mine.get(k, []), "vanilla": theirs.get(k, [])}
+             for k in sorted(new_of) if mine.get(k) or theirs.get(k)]
     return {"type": "INJECT", "file": ov["file"], "line": ov["line"], "lines": text.split("\n"),
-            "vanilla_file": vanilla_file, "changes": rows}
+            "vanilla_file": vanilla_file, "changes": rows, "pairs": pairs}
 
 def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx=None):
     """Compare each REPLACE with the base's versions of its block from the window's
@@ -954,7 +977,8 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
                         {"target": override_target(ov), "overlap": gap}, overlap_since(ov, old_e),
                         inject_when[id(ov)][1])
             if want:
-                f = f._replace(data=inject_block(mod_root, ov, overlaps, f, (new_e or old_e)[0]))
+                f = f._replace(data=inject_block(mod_root, ov, overlaps, f, (new_e or old_e)[0],
+                                                 new_e[1] if new_e else None))
             findings.append(f)
         else:
             # vanilla changed the block but not the keys this INJECT adds: the

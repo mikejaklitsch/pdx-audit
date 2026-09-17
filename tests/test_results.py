@@ -352,3 +352,31 @@ def test_results_file_never_writes_into_the_mod(cli):
     payload = _payload(cli)
     results.dismiss(cli.world.mod, payload["records"], [payload["records"][0]["fid"]], None)
     assert _files(cli.world.mod) == before
+
+
+def test_an_inject_pairs_your_statements_with_vanillas_side_by_side():
+    # An INJECT adds to vanilla's block, so neither side deleted anything: every line is
+    # current text, and only the keys the INJECT writes are shown. Vanilla writing the
+    # key over three lines against your one leaves the extra lines alone on its side.
+    block = {"type": "INJECT", "file": "m.txt", "line": 139, "lines": [],
+             "pairs": [{"key": "possible_production_methods", "fid": "f" * 40, "mark": "stale",
+                        "since": 1,
+                        "yours": [(140, "\tpossible_production_methods = { mine }")],
+                        "vanilla": [(32, "\t\tpossible_production_methods ="),
+                                    (33, "\t\t\testate_building_input"), (34, "\t\t}")]}]}
+    rows = results.inject_side_rows(block)
+    assert len(rows) == 3
+    assert rows[0]["left"]["n"] == 32 and rows[0]["right"]["n"] == 140
+    assert rows[0]["mark"] == "stale" and rows[0]["lead"] and rows[0]["cause"] == "inject"
+    assert [r["right"] for r in rows[1:]] == [None, None]     # yours has no more lines
+    assert {r["left"]["state"] for r in rows} == {"same"}     # nothing added or deleted
+    assert not rows[1]["lead"]
+
+
+def test_an_inject_pair_of_one_line_each_marks_the_words_that_differ():
+    block = {"type": "INJECT", "file": "m.txt", "line": 5, "lines": [],
+             "pairs": [{"key": "max_levels", "fid": "a" * 40, "mark": "stale", "since": 1,
+                        "yours": [(5, "\tmax_levels = beer_guild_max_level")],
+                        "vanilla": [(9, "\tmax_levels = 4")]}]}
+    [row] = results.inject_side_rows(block)
+    assert row["left"]["emph"] and row["right"]["emph"]

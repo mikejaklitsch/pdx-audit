@@ -193,7 +193,13 @@ def resolve_ref(vanilla_repo, ref, commits, side):
             if resolved.startswith(h):
                 return msg
         return ""
-    versions = [msg.split()[0] for _, msg in commits if msg]
+    # A snapshot git cannot resolve still has the name the reports and the app show
+    # it by: its version tag, or the first word of its message when it carries no tag.
+    named = [(tag_of(msg), msg) for _h, msg in commits if msg]
+    exact = next((msg for tag, msg in named if tag == ref), None)
+    if exact is not None:
+        return exact
+    versions = [tag for tag, _msg in named]
     hits = [v for v in versions if v.startswith(ref)]
     if not hits:
         hits = difflib.get_close_matches(ref, versions, n=3, cutoff=0.4)

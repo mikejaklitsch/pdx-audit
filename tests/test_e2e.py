@@ -25,6 +25,23 @@ def test_tracker_commits_newest_first(world):
     assert resolve_ref(world.repo, "1.1.0", commits, "new") == "1.1.0 Test"
 
 
+def test_a_snapshot_with_no_tag_resolves_by_the_name_it_is_shown_by(world):
+    # The first snapshot of a hand-built tracker can carry no tag; the app's version
+    # list and --list-commits still show it by the first word of its message, and
+    # --old/--new have to accept what they show.
+    untagged = "Pre-patch snapshot — txt/yml/gui only"
+    commits = [("aaaaaaa", "1.1.0 Test"), ("bbbbbbb", untagged)]
+    assert resolve_ref(world.repo, "Pre-patch", commits, "old") == untagged
+
+
+def test_a_ref_that_matches_nothing_still_suggests_the_near_ones(world, capsys):
+    import pytest
+    commits = [("aaaaaaa", "1.1.0 Test"), ("bbbbbbb", "1.2.0 Test")]
+    with pytest.raises(SystemExit):
+        resolve_ref(world.repo, "1.1.5", commits, "old")
+    assert "did you mean: 1.1.0" in capsys.readouterr().err
+
+
 def test_override_audit_flags_stale_replace(world):
     out = _out(run_override_audit, world.mod, world.repo,
                world.old, "1.0.0", world.new, "1.1.0", world.args)

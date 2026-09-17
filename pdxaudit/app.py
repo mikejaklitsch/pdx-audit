@@ -1896,8 +1896,8 @@ class MainWindow(QMainWindow):
             combo.blockSignals(True)
             combo.clear()
             combo.addItem(default, "")
-            for _h, msg in self.commits:
-                combo.addItem(msg, msg.split()[0] if msg else "")
+            for h, msg in self.commits:
+                combo.addItem(msg, h)
             i = combo.findData(keep)
             combo.setCurrentIndex(i if i >= 0 else 0)
             combo.blockSignals(False)
@@ -1907,14 +1907,13 @@ class MainWindow(QMainWindow):
 
     def _update_window_label(self):
         msgs = [m for _h, m in self.commits]
-        by_tag = {m.split()[0]: m for m in msgs if m}
-        new_tag = self.new_combo.currentData()
-        new = by_tag.get(new_tag, msgs[0] if msgs else "")
+        by_commit = {h: m for h, m in self.commits}
+        new = by_commit.get(self.new_combo.currentData(), msgs[0] if msgs else "")
         tip = ""
         if self.full_box.isChecked():
             old = msgs[-1] if msgs else ""
         elif self.old_combo.currentData():
-            old = by_tag.get(self.old_combo.currentData(), "")
+            old = by_commit.get(self.old_combo.currentData(), "")
         else:
             # REPLACE blocks and GUI copies reach back to the oldest snapshot, so the
             # pill names only the new version and the tooltip names both windows.
@@ -2791,17 +2790,24 @@ class MainWindow(QMainWindow):
             self.yours_label.setText(yours)
             self.vanilla_label.setText(vanilla)
 
-        self.side_by_side.setVisible(bool(block) and block.get("vanilla_lines") is not None)
+        pairs = bool(block) and bool(block.get("pairs"))
+        self.side_by_side.setVisible(bool(block) and (block.get("vanilla_lines") is not None or pairs))
         if block is not None:
             who = rec.get("source") if rec["audit"] == "adopted" else None
-            side = self.side_by_side.isChecked() and block.get("vanilla_lines") is not None
+            side = self.side_by_side.isChecked() and (block.get("vanilla_lines") is not None or pairs)
             flatten = self.flatten.isChecked()
             key = (rec["block"], side, flatten)
             columns = ((f"{who or 'vanilla'} {block.get('vanilla_tag') or ''} · {block.get('vanilla_file') or ''}",
                         f"yours · {block['file']}") if side else None)
+            if side and pairs:
+                columns = (f"{who or 'vanilla'}, the keys you inject · {block.get('vanilla_file') or ''}",
+                           f"yours · {block['file']}")
 
             def build():
-                rows = results.side_rows(block) if side else results.block_rows(block)
+                if side and pairs:
+                    rows = results.inject_side_rows(block)
+                else:
+                    rows = results.side_rows(block) if side else results.block_rows(block)
                 return BlockView.prepare(results.flatten_rows(rows) if flatten else rows)
 
             def show(prepared):

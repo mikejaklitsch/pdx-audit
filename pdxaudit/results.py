@@ -444,6 +444,38 @@ def _diff(base, side):
     return same, deleted, inserted, partner
 
 
+def inject_side_rows(block):
+    """Rows for the side-by-side view of an INJECT: vanilla's current statements for the
+    keys you inject on the left, yours on the right, one key after another.
+
+    An INJECT adds statements to vanilla's block, so neither side deleted anything and
+    no line is an addition: every line is current text, and only the keys you inject are
+    shown, since the rest of vanilla's block is not an injection point. A key written
+    more than once on either side brings all of its statements. Rows carry the same
+    shape as side_rows, so the block view draws them the same way; `state` is always
+    'same' and the finding's mark carries the severity."""
+    rows = []
+    for pair in block.get("pairs") or ():
+        left, right = pair["vanilla"], pair["yours"]
+        one_each = len(left) == 1 and len(right) == 1
+        for i in range(max(len(left), len(right))):
+            cells = []
+            for side in (left, right):
+                if i >= len(side):
+                    cells.append(None)
+                    continue
+                n, text = side[i]
+                cells.append({"n": n, "text": text, "state": "same", "quiet": not text.split("#")[0].strip(),
+                              "emph": None})
+            if one_each and cells[0] and cells[1]:
+                spans = word_spans(cells[1]["text"], cells[0]["text"])
+                cells[0]["emph"], cells[1]["emph"] = spans[1], spans[0]
+            rows.append({"left": cells[0], "right": cells[1], "mark": pair["mark"],
+                         "fid": pair["fid"], "id": ledger.short_id(pair["fid"]),
+                         "cause": "inject", "lead": i == 0})
+    return rows
+
+
 def side_rows(block):
     """Rows for the side-by-side view of one target: vanilla's current text on the left
     and the copy on the right, each compared with vanilla's text at the version the copy
