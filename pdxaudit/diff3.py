@@ -2,18 +2,27 @@
 difference.
 
 The copy is lined up against vanilla's current text block by block. Siblings pair
-in order: the same statement first, then the same key (a block that sets
-`name = "..."` is known by that name first, then by its key alone), then the same
-distinctive quoted value under another key (vanilla moving `onpressed = "[OnPause]"`
-to `on_action = "[OnPause]"`). What is still unpaired pairs by key out of order, so
-a moved block still pairs. Layout, comments and the spelling of numbers never count
-as a difference. A statement vanilla has that the copy holds only as a one-line
-comment in the same block, word for word (`# cost = 5`), is the copy's own deletion.
+in order: the same statement first, then the same name (a block that sets
+`name = "..."`), then in script the same selector (the `limit`, `trigger` or `id`
+that says what a block applies to), then the same key, then the same distinctive
+quoted value under another key (vanilla moving `onpressed = "[OnPause]"` to
+`on_action = "[OnPause]"`). What is still unpaired pairs by those same identities
+out of order, so a moved block still pairs. Layout, comments and the spelling of
+numbers never count as a difference. A statement vanilla has that the copy holds
+only as a one-line comment in the same block, word for word (`# cost = 5`), is the
+copy's own deletion.
 
 The copy's baseline is the tracked vanilla version it differs from least; a newer
-version must fit strictly better to be chosen. Each difference is attributed with
-vanilla's tracked history, looked up at the same place: the keys of the enclosing
-blocks plus the statement's own key.
+version must fit strictly better to be chosen.
+
+Each difference is attributed with vanilla's tracked history, read at the same place
+in each older version. That place is derived, never named: vanilla's versions are
+aligned to each other the same way the copy is aligned to the current one, and a
+node's counterpart in the version before is whatever that alignment pairs it with,
+followed back one version at a time. So two blocks repeated under one key are told
+apart by what they hold, and a section vanilla inserted moves nothing: it simply has
+no counterpart in the version before it. Where a version has no such block the trail
+stops there, since a block vanilla deleted and later put back is two blocks.
 
   vanilla_changed   your value is one vanilla had at this place; vanilla has changed it
   vanilla_added     vanilla added the statement after the block existed; you lack it
@@ -47,20 +56,6 @@ from decimal import Decimal, InvalidOperation
 from pdx_utilities.script_parser import parse, tokenize
 
 from . import session
-
-Place = namedtuple("Place", "ident pooled")
-Place.__doc__ = """Where to read a node in vanilla's history, in two spellings.
-
-`ident` names the enclosing blocks by their selectors, so two same-key siblings are
-counted apart. `pooled` names them by key alone. A version that does not hold the
-identified place is read at the pooled one, because a selector vanilla edited cannot
-identify the block it belongs to across that change, and the change it made inside
-that selector still has to be reported."""
-
-def _place(ipath, key, *rest):
-    """A Place for `key` inside the blocks `ipath` names, in both spellings."""
-    return Place((ipath, key, *rest), (_pooled(ipath), key, *rest))
-
 
 Change = namedtuple("Change", "kind priority path mod new since parent after layer old")
 Change.__new__.__defaults__ = (None, None)
@@ -227,32 +222,6 @@ def selector(node, dialect):
     return None
 
 
-def _idents(ns, dialect):
-    """The place component of each block in a sibling list, None for a statement.
-
-    A script block is told apart from its same-key siblings by its selector; a block
-    without one, and every GUI block, is placed by its key alone, as before identities
-    existed. Only the selector serves, because a component has to name the same block
-    in every version: a position does not survive vanilla inserting a sibling, a name
-    does not survive vanilla adding one, and how many siblings share a key does not
-    survive vanilla removing one. A selector vanilla edits leaves its block unfindable
-    in the older version, which reads as history the copy predates, so the difference
-    is attributed to the copy rather than to a patch it did not come from."""
-    out = []
-    for n in ns:
-        if n.children is None:
-            out.append(None)
-            continue
-        sel = selector(n, dialect)
-        out.append((n.key, sel[1]) if sel else (n.key,))
-    return out
-
-
-def _pooled(ipath):
-    """An identity path with its selectors dropped: the same place named by key alone."""
-    return tuple((c[0],) for c in ipath)
-
-
 def _level_keys(dialect):
     """How siblings pair, strongest first: the same statement, the same name, then in
     script the same selector, then the same key, then the same distinctive value. A
@@ -374,113 +343,118 @@ def _baseline(mod_text, versions, unwrap, dialect):
     return best and best[1]
 
 
-def _index(top, dialect):
-    """{place: Counter of sigs} for one version, where a place is (the identities of
-    the enclosing blocks, key) for a node and (..., key, 'head') for a block's head.
-    A block's identity is its selector (_idents), not its position in the file, so a
-    sibling vanilla inserted leaves the others' places untouched. Every place is held
-    twice, identified and pooled by key, since a version that predates a selector
-    vanilla edited only has the pooled spelling (see Place)."""
-    idx = defaultdict(Counter)
-
-    def walk(ns, ipath, identify):
-        idents = _idents(ns, dialect) if identify else [None] * len(ns)
-        for n, ident in zip(ns, idents):
-            idx[(ipath, n.key)][n.sig] += 1
-            if n.children is not None:
-                idx[(ipath, n.key, "head")][hash(n.value)] += 1
-                walk(n.children, ipath + (ident or (n.key,),), identify)
-
-    walk(top, (), True)
-    walk(top, (), False)      # the same counts pooled by key, for the fallback
-    return idx
-
-
 class _History:
-    """Vanilla's versions of one text as place indexes, oldest first; the last is
-    current. `floor` is where the text's latest unbroken run of versions starts;
-    `base` is the copy's baseline. `tops(k)` gives version k's compared Nodes, or None."""
+    """Vanilla's versions of one text, oldest first, the last current, each aligned to
+    the one before it.
 
-    def __init__(self, indexes, base, tops=None, dialect=SCRIPT):
-        self.idx, self.base, self.tops, self.dialect = indexes, base, tops, dialect
-        self.cur = len(indexes) - 1
-        self.floor = max((k + 1 for k, x in enumerate(indexes) if x is None), default=0)
+    A place is never named. The sibling list at the same place in an older version is
+    whatever the alignments pair the current one with, followed back a version at a
+    time (`inside`), so blocks repeated under one key are told apart by what they hold
+    rather than by a path that cannot tell them apart at all. Where a version has no
+    such block the level is None and the trail stops: a block vanilla deleted and
+    later put back is two blocks, not one with a gap in the middle.
 
-    def _spelling(self, k, place):
-        """The place to read in version k: identified when that version holds it."""
-        if not isinstance(place, Place):
-            return place
-        x = self.idx[k]
-        return place.ident if x is not None and place.ident in x else place.pooled
+    `floor` is where the text's latest unbroken run of versions starts; `base` is the
+    copy's baseline."""
 
-    def count(self, k, place, sig=None):
-        x = self.idx[k]
-        c = x.get(self._spelling(k, place)) if x is not None else None
-        if not c:
-            return 0
-        return sum(c.values()) if sig is None else c.get(sig, 0)
+    def __init__(self, tops, base, dialect=SCRIPT):
+        self.tops, self.base, self.dialect = list(tops), base, dialect
+        self.cur = len(self.tops) - 1
+        self.floor = max((k + 1 for k, t in enumerate(self.tops) if t is None), default=0)
+        self._pairs = {}
 
-    def _parent_exists(self, k, ipath):
-        if not ipath:
-            return self.idx[k] is not None
-        return self.count(k, _place(ipath[:-1], ipath[-1][0])) > 0
+    def top(self):
+        """The level at the top of the text: each version's own Nodes."""
+        return tuple(self.tops)
 
-    def introduced(self, ipath, place, sig):
-        """The version where vanilla put its current number of `sig` at `place`
-        inside a block that already existed, or None when they have been there
-        since the block appeared."""
-        need = self.count(self.cur, place, sig)
-        k = self.cur
-        while k >= self.floor and self.count(k, place, sig) >= need:
-            k -= 1
-        k += 1
-        if k > self.cur or k <= self.floor or not self._parent_exists(k - 1, ipath):
-            return None
-        return k
+    def _pair(self, a, b):
+        """{index in a: index in b} between two adjacent versions' siblings, once each."""
+        key = (id(a), id(b))
+        got = self._pairs.get(key)
+        if got is None:
+            got = self._pairs[key] = dict(align(a, b, self.dialect))
+        return got
 
-    def stale(self, place, sig):
-        """The version after the newest one that had more of `sig` at `place` than
-        current vanilla has, or None when vanilla never had more."""
-        now = self.count(self.cur, place, sig)
-        for k in range(self.cur - 1, -1, -1):
-            if self.count(k, place, sig) > now:
+    def inside(self, level, j):
+        """The level inside the current version's block at index j of `level`: the same
+        block in each older version, reached by following each version's alignment with
+        the one before it."""
+        out = [None] * len(level)
+        idx = j
+        for k in range(self.cur, self.floor - 1, -1):
+            ns = level[k]
+            if ns is None or idx is None or ns[idx].children is None:
+                idx = None
+                continue
+            out[k] = ns[idx].children
+            prev = level[k - 1] if k > self.floor else None
+            idx = self._pair(ns, prev).get(idx) if prev is not None else None
+        return out
+
+    def matches(self, level, k, same):
+        """How many nodes at this place in version k `same` accepts."""
+        ns = level[k] if 0 <= k < len(level) else None
+        return sum(1 for n in (ns or ()) if same(n))
+
+    def introduced(self, level, j, same):
+        """The version where vanilla put the node at index j of `level` here, inside a
+        block that already existed, or None when it has been here since the block
+        appeared. The node is followed back by the alignments; the first version whose
+        counterpart `same` rejects, or that has none, is where vanilla put it."""
+        idx, k = j, self.cur
+        while k > self.floor:
+            ns, prev = level[k], level[k - 1]
+            if ns is None or prev is None:
+                return None
+            nxt = self._pair(ns, prev).get(idx)
+            if nxt is None or not same(prev[nxt]):
+                return k
+            idx, k = nxt, k - 1
+        return None
+
+    def removed(self, level, same):
+        """The version after the newest one that held more nodes `same` accepts here
+        than current vanilla holds, or None when vanilla never held more."""
+        now = self.matches(level, self.cur, same)
+        for k in range(self.cur - 1, self.floor - 1, -1):
+            if level[k] is None:
+                return None
+            if self.matches(level, k, same) > now:
                 return k + 1
         return None
 
-    def gone(self, place):
-        """The version after the newest one with more statements at `place` than
-        current vanilla has, or None when vanilla never had more."""
-        now = self.count(self.cur, place)
-        for k in range(self.cur - 1, -1, -1):
-            if self.count(k, place) > now:
+    def moved_out(self, level, sig):
+        """The version after the newest one that held `sig` at this level while current
+        vanilla holds it here no longer, or None. A block of your own wrapped around
+        vanilla's statements moves them one level in, so they are looked for where they
+        used to sit: beside the wrapper, not anywhere beneath it. Deeper than that the
+        copy's block has no counterpart of vanilla's at all, and nothing in it can be
+        attributed to vanilla's history."""
+        if self.matches(level, self.cur, lambda n: n.sig == sig):
+            return None
+        for k in range(self.cur - 1, self.floor - 1, -1):
+            if level[k] is None:
+                return None
+            if self.matches(level, k, lambda n: n.sig == sig):
                 return k + 1
         return None
 
-    def before(self, k, place):
-        """Vanilla's statement at `place` in the version before `k` that its current
-        text no longer has, or None."""
-        if self.tops is None or k is None or k < 1 or len(place) != 2:
+    def before(self, k, level, key):
+        """Vanilla's statement of `key` in the version before `k` that its current text
+        no longer has, or None."""
+        if k is None or k < 1 or level[k - 1] is None:
             return None
-        top = self.tops(k - 1)
-        if top is None:
-            return None
-        ipath, key = place.ident if isinstance(place, Place) else place
-        found = []
+        now = {n.sig for n in (level[self.cur] or ()) if n.key == key}
+        return next((n for n in level[k - 1] if n.key == key and n.sig not in now), None)
 
-        def walk(ns, depth, strict):
-            idents = _idents(ns, self.dialect)
-            for n, ident in zip(ns, idents):
-                if depth < len(ipath):
-                    same = ident == ipath[depth] if strict else n.key == ipath[depth][0]
-                    if n.children is not None and same:
-                        walk(n.children, depth + 1, strict)
-                elif n.key == key:
-                    found.append(n)
-        walk(top, 0, True)
-        if not found:
-            walk(top, 0, False)
-        now = self.idx[self.cur].get(self._spelling(self.cur, place)) or {}
-        return next((n for n in found if not now.get(n.sig)), None)
+    def replaced(self, k, level, key):
+        """True when vanilla held as many statements of `key` here before the change at
+        `k` as it holds now, so what it put here took one's place rather than joining
+        them."""
+        if k is None or k < 1 or level[k - 1] is None:
+            return False
+        return (self.matches(level, k - 1, lambda n: n.key == key)
+                >= self.matches(level, self.cur, lambda n: n.key == key))
 
     def seen_before_copy(self, since):
         """True when vanilla's change came at or before the copy's baseline."""
@@ -496,30 +470,26 @@ def compare(mod_text, versions, unwrap=False, dialect=SCRIPT):
     if not versions or versions[-1] is None:
         raise ValueError("vanilla's current text is required")
     view = (lambda t: body(nodes(t))) if unwrap else nodes
-    indexes = [None if t is None else session.memo(("diff3.index", t, unwrap, dialect),
-                                                   lambda t=t: _index(view(t), dialect))
-               for t in versions]
-    hist = _History(indexes, baseline(mod_text, versions, unwrap, dialect),
-                    lambda k: None if versions[k] is None else view(versions[k]), dialect)
+    tops = [None if t is None else view(t) for t in versions]
+    hist = _History(tops, baseline(mod_text, versions, unwrap, dialect), dialect)
     out = []
-    _walk(view(mod_text), view(versions[-1]), (), (), None, hist, out, dialect)
+    _walk(view(mod_text), tops[-1], (), hist.top(), None, hist, out, dialect)
     return out
 
 
-def _walk(mine, theirs, path, ipath, parent, hist, out, dialect):
+def _walk(mine, theirs, path, level, parent, hist, out, dialect):
     pairs = align(mine, theirs, dialect)
-    mine_idents, their_idents = _idents(mine, dialect), _idents(theirs, dialect)
     of_mine = {i: j for i, j in pairs}
     of_theirs = {j: i for i, j in pairs}
     settled_mine, settled_theirs = _settle(mine, theirs, pairs)
     local, inner = [], []
     commented = Counter(n.sig for n in getattr(mine, "commented", ()))
 
-    def add(kind, m, v, since, after=None, place=None):
+    def add(kind, m, v, since, after=None, key=None):
         if kind in CONFLICT_KINDS and hist.seen_before_copy(since):
             kind, since = ("mod_removed" if m is None else
                            "mod_changed" if v is not None else "mod_added"), None
-        old = hist.before(since, place) if kind in CONFLICT_KINDS and place else None
+        old = hist.before(since, level, key) if kind in CONFLICT_KINDS and key else None
         local.append(Change(kind, None, path, m, v, since, parent, after, None, old))
 
     after = None
@@ -535,42 +505,37 @@ def _walk(mine, theirs, path, ipath, parent, hist, out, dialect):
                 commented[v.sig] -= 1
                 add("mod_removed", None, v, None, here)
                 continue
-            place = _place(ipath, v.key)
-            k = hist.introduced(ipath, place, v.sig)
+            k = hist.introduced(level, j, lambda n, v=v: n.sig == v.sig)
             if k is None:
                 add("mod_removed", None, v, None, here)
-            elif hist.count(k - 1, place) >= hist.count(hist.cur, place):
-                add("removed_changed", None, v, k, here, place)
+            elif hist.replaced(k, level, v.key):
+                add("removed_changed", None, v, k, here, v.key)
             else:
                 add("vanilla_added", None, v, k, here)
             continue
         m = mine[i]
         if m.kind == v.kind == "block" and m.key == v.key:
             if m.value != v.value:
-                head = _place(ipath, v.key, "head")
-                kind, since = _classify_pair(hist, ipath, head, hash(m.value),
-                                             head, hash(v.value))
+                kind, since = _classify_pair(hist, level, j, m, v, head=True)
                 add(kind, m, v, since)
-            inner.append((m, v, their_idents[j]))
+            inner.append((m, v, j))
         else:
-            kind, since = _classify_pair(hist, ipath, _place(ipath, m.key), m.sig,
-                                        _place(ipath, v.key), v.sig)
-            add(kind, m, v, since, place=_place(ipath, v.key))
+            kind, since = _classify_pair(hist, level, j, m, v)
+            add(kind, m, v, since, key=v.key)
 
     for i, m in enumerate(mine):
         j = of_mine.get(i)
         if i in settled_mine or (j is not None and j not in settled_theirs):
             continue
-        place = _place(ipath, m.key)
-        k = hist.stale(place, m.sig)
+        k = hist.removed(level, lambda n, m=m: n.sig == m.sig)
         if k is not None:
             add("vanilla_removed", m, None, k)
-        elif (k := hist.gone(place)) is not None:
-            add("both_changed", m, None, k, place=place)
+        elif (k := hist.removed(level, lambda n, m=m: n.key == m.key)) is not None:
+            add("both_changed", m, None, k, key=m.key)
         else:
             add("mod_added", m, None, None)
             if m.children is not None:
-                _stale_inside(m, path + (m.key,), ipath + (mine_idents[i],), hist, out, dialect)
+                _stale_inside(m, path + (m.key,), level, hist, out)
 
     yours = any(c.kind in MOD_KINDS + CONFLICT_KINDS for c in local)
     for c in local:
@@ -581,30 +546,34 @@ def _walk(mine, theirs, path, ipath, parent, hist, out, dialect):
         else:
             priority = HIGH
         out.append(c._replace(priority=priority))
-    for m, v, ident in inner:
-        _walk(m.children, v.children, path + (v.key,), ipath + (ident,), m, hist, out, dialect)
+    for m, v, j in inner:
+        _walk(m.children, v.children, path + (v.key,), hist.inside(level, j), m, hist, out,
+              dialect)
 
 
-def _stale_inside(block, path, ipath, hist, out, dialect):
+def _stale_inside(block, path, level, hist, out):
     """Flag what a block only your copy has still carries of vanilla's deleted text:
-    statements vanilla had at the same place and has since removed. They compete
-    with the block around them, so they are high."""
-    idents = _idents(block.children, dialect)
-    for n, ident in zip(block.children, idents):
-        k = hist.stale(_place(ipath, n.key), n.sig)
+    the statements vanilla held beside the block and has since removed, which your copy
+    wrapped. They compete with the block around them, so they are high."""
+    for n in block.children:
+        k = hist.moved_out(level, n.sig)
         if k is not None:
             out.append(Change("vanilla_removed", HIGH, path, n, None, k, block, None))
-        elif n.children is not None:
-            _stale_inside(n, path + (n.key,), ipath + (ident,), hist, out, dialect)
 
 
-def _classify_pair(hist, ipath, m_place, m_sig, v_place, v_sig):
+def _classify_pair(hist, level, j, m, v, head=False):
     """(kind, since) for a statement of yours lined up with a different one of
-    vanilla's."""
-    k = hist.stale(m_place, m_sig)
+    vanilla's. `head` compares the two blocks' heads rather than their whole text."""
+    if head:
+        same_m = lambda n: n.key == m.key and n.value == m.value        # noqa: E731
+        same_v = lambda n: n.key == v.key and n.value == v.value        # noqa: E731
+    else:
+        same_m = lambda n: n.sig == m.sig                               # noqa: E731
+        same_v = lambda n: n.sig == v.sig                               # noqa: E731
+    k = hist.removed(level, same_m)
     if k is not None:
         return "vanilla_changed", k
-    k = hist.introduced(ipath, v_place, v_sig)
+    k = hist.introduced(level, j, same_v)
     if k is not None:
         return "both_changed", k
     return "mod_changed", None

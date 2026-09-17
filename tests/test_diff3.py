@@ -186,11 +186,21 @@ def test_baseline_is_the_closest_version_and_the_oldest_among_equals():
 
 
 def test_block_only_you_have_still_shows_vanilla_text_vanilla_deleted_inside_it():
+    # The copy wrapped vanilla's statement in a block of its own, and vanilla has
+    # since deleted the statement: it is still vanilla's deleted text, one level in.
+    versions = ("w = { t = 1 u = 2 }", "w = { u = 2 }")
+    assert _changes("w = { if = { t = 1 } u = 2 }", *versions) == [
+        ("mod_added", "info", "if", None), ("vanilla_removed", "high", "t", 1)]
+
+
+def test_a_block_vanilla_deleted_that_you_had_edited_is_one_finding():
+    # Not a block only the copy has: it is vanilla's block, edited by the copy, that
+    # vanilla deleted. Reported once against the block, not as a new block of yours
+    # that happens to carry deleted text.
     versions = ("w = { x = { s = { t = 1 } } x = { s = { q = 1 } } }",
                 "w = { x = { } x = { s = { q = 1 } s = { r = 1 } } }")
     mod = "w = { x = { s = { t = 1 z = 9 } } x = { s = { q = 1 } s = { r = 1 } } }"
-    assert _changes(mod, *versions) == [
-        ("mod_added", "info", "s", None), ("vanilla_removed", "high", "t", 1)]
+    assert _changes(mod, *versions) == [("both_changed", "mid", "s", 1)]
 
 
 def test_block_vanilla_deleted_that_you_changed_is_yours_when_your_copy_came_after():
