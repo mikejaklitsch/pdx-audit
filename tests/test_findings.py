@@ -27,9 +27,11 @@ def test_change_classes_follow_priority():
         for change in ("vanilla_changed", "vanilla_added", "vanilla_removed"):
             assert KIND[f"{audit}_{change}_high"][0] == SEV_STALE
             assert KIND[f"{audit}_{change}_mid"][0] == SEV_REVIEW
-        for change in ("both_changed", "removed_changed"):
-            assert KIND[f"{audit}_{change}_mid"][0] == SEV_REVIEW
-            assert f"{audit}_{change}_high" not in KIND
+        assert KIND[f"{audit}_both_changed_mid"][0] == SEV_REVIEW
+        assert f"{audit}_both_changed_high" not in KIND
+        # A statement the copy deleted is its own edit whatever vanilla did to it after,
+        # so nothing produces this kind any more; it stays for records written before.
+        assert KIND[f"{audit}_removed_changed_mid"][0] == SEV_REVIEW
     assert KIND["override_inject_overlap"][0] == SEV_STALE
 
 
