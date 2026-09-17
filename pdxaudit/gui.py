@@ -357,10 +357,11 @@ def run_gui_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
         owner = owners.get(key)
         result = changes.audit("gui", d["name"], gui_def_target(key), d["text"], versions, tags,
                                d["file"], d["line"], want=want, vanilla_file=entries[-1][0],
-                               layers=layers, owner=owner_layer(owner))
+                               layers=layers, owner=owner_layer(owner), dialect=diff3.GUI)
         if result.flagged:
             shadowed.append((d, entries[-1][0], versions, result))
-        elif owner_layer(owner) and not diff3.distance(diff3.nodes(d["text"]), diff3.nodes(versions[-1])):
+        elif owner_layer(owner) and not diff3.distance(diff3.nodes(d["text"]),
+                                                      diff3.nodes(versions[-1]), diff3.GUI):
             duplicates.append(foundation_duplicate(d["name"], f"{d['file']}:{d['line']}", owner,
                                                    gui_def_target(key)))
         else:
@@ -387,10 +388,12 @@ def run_gui_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
         versions = [_without(v, moved) for v in versions]
         owner = file_owners.get(rel)
         result = changes.audit("gui", rel, gui_file_target(rel), text, versions, tags, rel, 1,
-                               want=want, vanilla_file=rel, layers=layers, owner=owner_layer(owner))
+                               want=want, vanilla_file=rel, layers=layers, owner=owner_layer(owner),
+                               dialect=diff3.GUI)
         if result.flagged:
             replaced.append((rel, versions, result))
-        elif owner_layer(owner) and not diff3.distance(diff3.nodes(text), diff3.nodes(versions[-1])):
+        elif owner_layer(owner) and not diff3.distance(diff3.nodes(text),
+                                                      diff3.nodes(versions[-1]), diff3.GUI):
             duplicates.append(foundation_duplicate(rel, rel, owner, gui_file_target(rel)))
         else:
             current += 1

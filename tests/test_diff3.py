@@ -227,3 +227,91 @@ def test_moved_block_pairs_and_compares_its_contents():
 def test_another_copy_of_an_existing_statement_is_an_addition():
     assert _changes("w = { t = a }", "w = { t = a }", "w = { t = a t = a }") == [
         ("vanilla_added", "mid", "t", 1)]
+
+
+# --- repeated same-key siblings ----------------------------------------------------
+# A script block's children are an unordered set: two `trigger_if` blocks are told
+# apart by their selector, never by where they sit. Vanilla inserting one must not
+# re-date or re-pair the others. (In GUI, order is identity; see test_gui_audit.)
+
+
+def _sections(*goods, extra=""):
+    """A block holding one selector-carrying section per good, in the order given."""
+    body = "".join(
+        "\ttrigger_if = {\n"
+        f"\t\tlimit = {{ good = {g} }}\n"
+        f"\t\tOR = {{ climate = arid climate = tropical }}{extra if g == 'wool' else ''}\n"
+        "\t}\n" for g in goods)
+    return "act = {\n" + body + "}\n"
+
+
+def test_a_sibling_vanilla_inserted_does_not_re_date_the_others():
+    old = _sections("cotton", "horses", "livestock")
+    new = _sections("cotton", "horses", "wool", "livestock")     # inserted in the middle
+    mod = _sections("cotton", "horses", "livestock")             # the copy predates it
+    # The copy lacks only vanilla's new section; nothing inside the sections it has
+    # changed, so no statement of theirs may be reported at all.
+    reported = [(c.kind, c.path, c.since) for c in compare(mod, [old, new])
+                if c.kind.startswith("vanilla")]
+    assert [r for r in reported if "OR" in r[1]] == []
+
+
+def test_a_sibling_vanilla_inserted_is_reported_once_as_added():
+    old = _sections("cotton", "livestock")
+    new = _sections("cotton", "wool", "livestock")
+    added = [c for c in compare(_sections("cotton", "livestock"), [old, new])
+             if c.kind == "vanilla_added"]
+    assert len(added) == 1 and added[0].new.key == "trigger_if" and added[0].since == 1
+
+
+def test_a_change_inside_a_shifted_sibling_is_still_reported():
+    # Vanilla inserts a section AND changes a later one: the change must survive the shift.
+    old = _sections("cotton", "livestock")
+    new = (_sections("cotton", "wool", "livestock")
+           .replace("limit = { good = livestock }\n\t\tOR = { climate = arid climate = tropical }",
+                    "limit = { good = livestock }\n\t\tOR = { climate = arid climate = oceanic }"))
+    kinds = [(c.kind, c.new.label if c.new else c.mod.label)
+             for c in compare(_sections("cotton", "livestock"), [old, new])
+             if c.kind.startswith("vanilla")]
+    # vanilla swapped tropical for oceanic in the section the insertion shifted
+    assert ("vanilla_changed", "climate") in kinds
+    assert ("vanilla_added", "trigger_if") in kinds     # and the section it inserted
+    assert len(kinds) == 2
+
+
+def test_the_copys_own_substitution_inside_one_sibling_is_its_own_edit():
+    # The mod translated vanilla's climate checks into its own triggers, and vanilla
+    # has not touched that section since the copy was made.
+    old = new = _sections("cotton", "livestock")
+    mod = _sections("cotton", "livestock").replace(
+        "OR = { climate = arid climate = tropical }",
+        "OR = { arid_climate_trigger = yes tropical_climate_trigger = yes }")
+    assert [c.kind for c in compare(mod, [old, new]) if c.kind.startswith("vanilla")] == []
+
+
+def test_a_substitution_is_not_re_dated_by_a_sibling_vanilla_inserted():
+    # MEIOU's shape: the copy translated vanilla's climate checks into its own
+    # triggers, and vanilla later inserted another section carrying the same checks.
+    # The inserted section raises vanilla's count of every climate statement, which
+    # must not date the copy's untouched section to that patch.
+    old = _sections("cotton", "livestock")
+    new = _sections("cotton", "wool", "livestock")
+    mod = _sections("cotton", "livestock").replace(
+        "OR = { climate = arid climate = tropical }",
+        "OR = { arid_climate_trigger = yes tropical_climate_trigger = yes }")
+    inside = [(c.kind, c.new.label, c.since) for c in compare(mod, [old, new])
+              if c.kind.startswith("vanilla") and c.new is not None and c.new.key == "climate"]
+    assert inside == []
+
+
+def test_a_change_vanilla_made_inside_a_selector_is_still_reported():
+    # The selector identifies its block, so it cannot identify a change to itself:
+    # `if` blocks are told apart by their `limit`, and vanilla edited that `limit`.
+    old = ("e = { opinion = { if = { limit = { NOT = { culture = root } } o = 1 }\n"
+           "                  if = { limit = { is_ruler = yes } o = 2 } } }")
+    new = ("e = { opinion = { if = { limit = { NOT = { culture = prev } } o = 1 }\n"
+           "                  if = { limit = { is_ruler = yes } o = 2 } } }")
+    mod = old
+    kinds = [(c.kind, c.mod.label if c.mod else c.new.label)
+             for c in compare(mod, [old, new]) if c.kind.startswith("vanilla")]
+    assert ("vanilla_removed", "culture") in kinds or ("vanilla_changed", "culture") in kinds

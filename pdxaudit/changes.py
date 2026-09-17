@@ -96,17 +96,19 @@ def layer_label(change):
 
 
 def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
-          unwrap=False, want=False, block_type=None, vanilla_file=None, layers=None, owner=None):
+          unwrap=False, want=False, block_type=None, vanilla_file=None, layers=None, owner=None,
+          dialect=diff3.SCRIPT):
     """Compare one copy with vanilla's versions (oldest first, the last current) and
     return an Audited. tags names each version. line is the copy's first line in
     `file`. In a stack run `layers` names each version's layer, and `owner` is the id
     of the foundation owning the compared text, which each finding's key holds as `base`.
-    No two findings of the copy share an id (ledger.distinct); `distinct` does the same
-    across an audit's copies."""
-    changes = diff3.compare(mod_text, versions, unwrap)
+    `dialect` says whether the text is script or GUI, which decides how siblings pair
+    and how a place is named (see diff3). No two findings of the copy share an id
+    (ledger.distinct); `distinct` does the same across an audit's copies."""
+    changes = diff3.compare(mod_text, versions, unwrap, dialect)
     if layers:
         changes = [c._replace(layer=layers[c.since]) if c.since is not None else c for c in changes]
-    base_i = diff3.baseline(mod_text, versions, unwrap)
+    base_i = diff3.baseline(mod_text, versions, unwrap, dialect)
     base = tags[base_i] if base_i is not None else None
     new_text = versions[-1]
     lines, outer = _Lines(mod_text, line), _outer(mod_text, unwrap)

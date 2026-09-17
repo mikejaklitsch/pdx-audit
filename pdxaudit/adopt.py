@@ -135,13 +135,14 @@ def layer_report(stack, source, commit, rules=(), protected=frozenset(), merging
 
     def classify(unit, text, texts_at, unwrap=False):
         seen = False
+        dialect = diff3.GUI if unit[0] in ("gui", "guifile") else diff3.SCRIPT
         view = (lambda t: diff3.body(diff3.nodes(t))) if unwrap else diff3.nodes
         for pid in reversed(history):
             theirs = texts_at(pid)
             if theirs is None:
                 continue
             seen = True
-            if not diff3.distance(view(text), view(theirs)):
+            if not diff3.distance(view(text), view(theirs), dialect):
                 report[unit] = "same"
                 return
         report[unit] = "changed" if seen else "new"
@@ -320,7 +321,8 @@ def _compare(src, mine, history, tags, skip, want, in_vanilla=lambda kind, key: 
             findings.append(removed(name, f"{file}:{line}" if line else file, _first_gone(texts, tags), target))
             return True
         result = changes.audit(audit_name, name, target, text, texts, tags, file, line or 1, unwrap=unwrap,
-                               want=want, block_type=block_type, vanilla_file=file, owner=src.id)
+                               want=want, block_type=block_type, vanilla_file=file, owner=src.id,
+                               dialect=diff3.GUI if audit_name == "gui" else diff3.SCRIPT)
         findings.extend(result.findings)
         if result.flagged:
             where = f"`{file}:{line}`" if line else f"`{file}`"
