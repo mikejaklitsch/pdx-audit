@@ -168,6 +168,19 @@ def run_dupes_audit(mod_root, base, new_hash, new_msg, args, ctx=None):
     category = getattr(args, "category", None)
     block = getattr(args, "block", None)
 
+    # Which object a name refers to is settled by where vanilla defines it, not by the
+    # folder the mod's file sits in: a REPLACE in common/buildings and a definition in
+    # common/building_types are one definition twice, however the mod files them.
+    vanilla_types = defaultdict(set)
+    for vt, names in vanilla["names"].items():
+        for n in names:
+            vanilla_types[n].add(vt)
+    of_vanilla = {n: next(iter(ts)) for n, ts in vanilla_types.items() if len(ts) == 1}
+    # A name the mod alone defines stays with its folder. The engine namespaces names by
+    # object type, and mods reuse one name across types on purpose: a modifier icon and
+    # a modifier type definition must share it, as must a game concept and the value it
+    # documents. Those are not one definition twice.
+
     entries = defaultdict(list)       # (type, name) -> [(prefix, rel, line)]
     file_names = {}                   # rel -> names defined in that mod file
     define_keys = defaultdict(list)   # (namespace, key) -> [(rel, line)]
@@ -185,7 +198,7 @@ def run_dupes_audit(mod_root, base, new_hash, new_msg, args, ctx=None):
         file_names[rel] = {n for _p, n, _l in found}
         for prefix, name, line in found:
             if not block or name == block:
-                entries[(t, name)].append((prefix, rel, line))
+                entries[(of_vanilla.get(name, t), name)].append((prefix, rel, line))
         if t == "common/defines":
             for ns, key, line in keys:
                 if not block or f"{ns}.{key}" == block or key == block:

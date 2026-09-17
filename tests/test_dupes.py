@@ -204,3 +204,30 @@ def test_new_duplicate_kinds_cannot_be_dismissed():
     from pdxaudit.ledger import NOT_DISMISSIBLE
     assert {"dupes_loc_key", "dupes_loc_key_same", "dupes_on_action_syntax",
             "dupes_on_action_key"} <= NOT_DISMISSIBLE
+
+
+def test_one_name_in_two_folders_is_one_definition_when_vanilla_names_the_type(
+        tmp_path, monkeypatch):
+    # Vanilla defines `toll_castle` under common/building_types, so an INJECT filed in
+    # another common/ folder is still the same definition twice, whatever folder it is in.
+    tr = build_tracker(tmp_path, [("1.0", VANILLA)])
+    mod = tmp_path / "foldermod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "foldermod"}',
+                      "in_game/common/building_types/a.txt": "REPLACE:toll_castle = {\n\tcost = 1\n}\n",
+                      "in_game/common/buildings/b.txt": "INJECT:toll_castle = {\n\tcost = 2\n}\n"})
+    findings, out, _ctx = _run(tr, mod, monkeypatch)
+    assert _by_name(findings)["toll_castle"] == {"dupes_multiple_sources"}
+    assert "toll_castle (common/building_types)" in out
+    assert "common/buildings/b.txt" in out
+
+
+def test_a_name_only_the_mod_has_may_sit_in_two_folders(tmp_path, monkeypatch):
+    # The engine namespaces names by object type, and a mod reuses one name across types
+    # on purpose: a modifier icon and a modifier type definition must share it.
+    tr = build_tracker(tmp_path, [("1.0", VANILLA)])
+    mod = tmp_path / "iconmod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "iconmod"}',
+                      "main_menu/common/modifier_icons/a.txt": "my_modifier = {\n\ticon = x\n}\n",
+                      "main_menu/common/modifier_type_definitions/b.txt": "my_modifier = {\n\tcolor = y\n}\n"})
+    findings, _out, _ctx = _run(tr, mod, monkeypatch)
+    assert "my_modifier" not in _by_name(findings)
