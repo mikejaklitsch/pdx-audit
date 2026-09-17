@@ -1,8 +1,10 @@
 """The command line end to end against the synthetic tracker: argument rules,
 dismissals, the per-user report location, and that no run writes into the mod."""
 import io
+import json
 import re
 import sys
+import types
 from contextlib import redirect_stdout, redirect_stderr
 
 import pytest
@@ -274,3 +276,106 @@ def test_orphan_note_and_forced_removal_through_cli(cli, monkeypatch):
 def test_show_dismissed_when_empty(cli):
     code, out, _ = cli("--show-dismissed")
     assert code == 0 and "No dismissed findings" in out
+
+
+# --- the config commands ----------------------------------------------------------
+
+
+@pytest.fixture
+def cfg_cli(cli, tmp_path, monkeypatch):
+    """`cli` with the config files under tmp_path, so --set writes nothing real."""
+    monkeypatch.delenv("PDX_AUDIT_CONFIG", raising=False)
+    monkeypatch.delenv("PDX_GAME_ROOT", raising=False)
+    home, data, repo = (tmp_path / n for n in ("home.json", "data.json", "repo.json"))
+    monkeypatch.setattr(config, "_home_config", lambda: home)
+    monkeypatch.setattr(config, "writable_path", lambda: data)
+    monkeypatch.setattr(config, "_repo_config", lambda: repo)
+    monkeypatch.setattr(config, "_CACHE", None)
+    cli.config = types.SimpleNamespace(home=home, data=data, repo=repo)
+    return cli
+
+
+def test_config_lists_settings_and_files(cfg_cli):
+    code, out, _ = cfg_cli("--config")
+    assert code == 0
+    assert "`vanilla_repo`" in out and "`patch_name`" in out
+    assert str(cfg_cli.config.data) in out and "written by --set and the app" in out
+
+
+def test_set_and_unset_a_tracker_under_any_name(cfg_cli, tmp_path):
+    tracker = tmp_path / "eu5-history.git"
+    (tracker / "objects").mkdir(parents=True)
+    (tracker / "HEAD").write_text("ref: refs/heads/master\n")
+    code, out, _ = cfg_cli("--set", "vanilla_repo", str(tracker))
+    assert code == 0 and f"Set vanilla_repo to {tracker}" in out
+    assert json.loads(cfg_cli.config.data.read_text())["vanilla_repo"] == str(tracker)
+    code, out, _ = cfg_cli("--config")
+    assert str(tracker) in out
+    code, out, _ = cfg_cli("--unset", "vanilla_repo")
+    assert code == 0 and "Removed vanilla_repo" in out
+    assert "vanilla_repo" not in json.loads(cfg_cli.config.data.read_text())
+
+
+def test_set_reports_a_bad_value_and_writes_nothing(cfg_cli, tmp_path):
+    code, _out, err = cfg_cli("--set", "game_root", str(tmp_path / "missing"))
+    assert code == 1 and "not a folder" in err
+    assert not cfg_cli.config.data.exists()
+
+
+def test_a_config_command_runs_on_its_own(cfg_cli):
+    code, _out, err = cfg_cli("--config", "--display")
+    assert code == 2 and "does its own thing and exits" in err
+    code, _out, err = cfg_cli("--config", "--unset", "patch_name")
+    assert code == 2 and "cannot be combined" in err
+
+
+def test_patch_name_for_a_snapshot_comes_from_the_config(cfg_cli, tmp_path, monkeypatch):
+    cfg_cli.config.data.write_text('{"patch_name": "Cortes"}')
+    monkeypatch.setattr(config, "_CACHE", None)
+    seen = {}
+    monkeypatch.setattr("pdxaudit.cli.do_snapshot",
+                        lambda repo, tag, patch, game=None: seen.update(patch=patch, tag=tag))
+    assert cfg_cli("--snapshot", "1.3.12")[0] == 0
+    assert seen == {"patch": "Cortes", "tag": "1.3.12"}
+    monkeypatch.setenv("PDX_PATCH_NAME", "FromEnv")
+    cfg_cli("--snapshot", "1.3.13")
+    assert seen["patch"] == "FromEnv"
+    cfg_cli("--snapshot", "1.3.14", "--patch-name", "FromFlag")
+    assert seen["patch"] == "FromFlag"
+
+
+def test_a_config_command_does_not_swallow_another_command(cfg_cli):
+    for argv, named in ((("--config", "--list-commits"), "--list-commits"),
+                        (("--config", "--overrides"), "--overrides"),
+                        (("--set", "patch_name", "X", "--dismiss", "abc12345"), "--dismiss")):
+        code, out, err = cfg_cli(*argv)
+        assert code == 2 and named in err and "does its own thing and exits" in err
+        assert "## Config" not in out
+
+
+def test_set_refuses_an_empty_value_instead_of_storing_the_working_directory(cfg_cli):
+    code, _out, err = cfg_cli("--set", "game_root", "")
+    assert code == 1 and "needs a value" in err
+    assert not cfg_cli.config.data.exists()
+
+
+def test_a_snapshot_creates_the_tracker_in_a_folder_that_already_exists(cfg_cli, tmp_path):
+    # A folder dialog can only return a folder that exists, so an empty one must work.
+    game = tmp_path / "game" / "in_game" / "common" / "x"
+    game.mkdir(parents=True)
+    (game / "a.txt").write_text("a = {\n\tb = 1\n}\n")
+    empty = tmp_path / "picked-in-a-dialog.git"
+    empty.mkdir()
+    code, out, _err = cfg_cli("--snapshot", "1.0.0", "--vanilla-repo", str(empty),
+                              "--game-root", str(tmp_path / "game"))
+    assert code == 0 and "Created tracker repo" in out
+    assert (empty / "HEAD").is_file()
+
+
+def test_a_snapshot_refuses_a_folder_that_holds_something_else(cfg_cli, tmp_path):
+    used = tmp_path / "not-a-tracker"
+    used.mkdir()
+    (used / "notes.txt").write_text("mine")
+    code, _out, err = cfg_cli("--snapshot", "1.0.0", "--vanilla-repo", str(used))
+    assert code == 1 and "is not a tracker repository and is not empty" in err
+    assert (used / "notes.txt").read_text() == "mine"

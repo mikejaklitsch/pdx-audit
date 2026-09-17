@@ -37,7 +37,7 @@ import argparse
 import types
 from contextlib import redirect_stdout
 
-from . import ledger, session
+from . import config, ledger, session
 from .dupes import run_dupes_audit
 from .gui import run_gui_audit
 from .loc import run_loc_audit
@@ -45,7 +45,8 @@ from .overrides import run_deps_audit, run_override_audit
 from .report import ColorWriter, color_enabled, render_triage, window_heading
 from .results import build_payload, mod_fingerprint
 from .store import open_store, orphan_note, remove_orphaned_records
-from .tracker import do_snapshot, find_mod_root, find_vanilla_repo, get_commits, prune_cache, resolve_ref, resolve_tracker_path, warn_if_tracker_stale
+from .tracker import (do_snapshot, find_mod_root, find_vanilla_repo, get_commits, locate_vanilla_repo,
+                      patch_name, prune_cache, resolve_ref, resolve_tracker_path, warn_if_tracker_stale)
 
 ALL_AUDITS = ["overrides", "deps", "gui", "loc", "dupes"]
 # Commands on a mod's sources; each matches one action in the app's sources panel.
@@ -55,6 +56,9 @@ SOURCE_COMMANDS = ("sources", "add_source", "remove_source", "relocate_source", 
 # Commands that do their own thing and exit; the --display app has a button for each.
 APP_COMMANDS = ("dismiss", "undismiss", "show_dismissed", "remove_orphaned_records",
                 "snapshot", "list_commits", "results_file") + SOURCE_COMMANDS
+
+# Config commands, which need no mod and no tracker, so they run before either is found.
+CONFIG_COMMANDS = ("config", "set_value", "unset_value")
 
 
 def _usage_error(msg):
@@ -130,15 +134,32 @@ def build_parser():
                     help="Snapshot the current vanilla install into the "
                          "tracker as version TAG (creates the tracker repo "
                          "on first use), then exit")
-    ap.add_argument("--patch-name", default="Pavia",
-                    help="Patch name used in the snapshot commit message "
-                         "(default: Pavia)")
+    ap.add_argument("--patch-name",
+                    help="Patch name used in the snapshot commit message (default: "
+                         "$PDX_PATCH_NAME, the config file's patch_name, or Pavia)")
     ap.add_argument("--game-root", metavar="DIR",
                     help="Game 'game' directory to snapshot from (default: "
-                         "$PDX_GAME_ROOT or the Steam install). Point at an "
-                         "extracted old-version copy to back-populate history")
+                         "$PDX_GAME_ROOT, the config file's game_root, or the Steam "
+                         "install). Point at an extracted old-version copy to "
+                         "back-populate history")
     # The source options sit in their own group, below the main options, which stay as they were.
     ap.usage = ap.format_usage()[len("usage: "):].strip().replace(ap.prog, "%(prog)s", 1)
+    setgrp = ap.add_argument_group(
+        "settings",
+        "Stable per-machine settings, stored for every mod in the per-user config file. The "
+        "tracker is a bare git repository under any name, in any folder. Each option below does "
+        "its own thing and exits; the app's Settings page writes the same file. Precedence for "
+        "every setting: a command-line option, then the environment variable, then the config "
+        f"file, then the built-in default. Settable: {', '.join(config.SETTABLE)}.")
+    setgrp.add_argument("--config", action="store_true",
+                        help="Show the settings in use, where each comes from, and the config "
+                             "files read")
+    setgrp.add_argument("--set", nargs=2, metavar=("KEY", "VALUE"), dest="set_value",
+                        help="Store a setting in the per-user config file, for example "
+                             "`--set vanilla_repo /path/to/my-tracker.git`")
+    setgrp.add_argument("--unset", metavar="KEY", dest="unset_value",
+                        help="Remove a setting from the per-user config file, so the setting "
+                             "below it applies again")
     src = ap.add_argument_group(
         "sources",
         "Foundations are dependencies that load before the mod, in the order you store; a run "
@@ -294,6 +315,23 @@ def _source_command(args, mod_root):
     return 0
 
 
+def _config_command(args):
+    """Run one config option: --config, --set or --unset. Returns the exit code."""
+    if args.config:
+        print(config.render_config(config.config_view()), end="")
+        return 0
+    try:
+        if args.set_value:
+            messages = config.set_value(*args.set_value)
+        else:
+            messages = config.unset_value(args.unset_value)
+    except config.ConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    _print_messages(messages)
+    return 0
+
+
 def _show_dismissed(store):
     entries = store.state["dismissed"]
     if not entries:
@@ -312,7 +350,7 @@ def _show_dismissed(store):
               "was fixed. `pdx-audit --undismiss <id>` removes it.")
 
 
-def _open_app(mod_root, vanilla_repo, args):
+def _open_app(mod_root, vanilla_repo, args, missing=None):
     try:
         from .app import launch
     except ImportError:
@@ -320,6 +358,7 @@ def _open_app(mod_root, vanilla_repo, args):
               "or `pipx inject pdx-audit PySide6` for a pipx install.", file=sys.stderr)
         return 1
     return launch(mod_root, vanilla_repo, {
+        "missing_tracker": missing, "tracker_override": args.vanilla_repo,
         "audits": [a for a in ALL_AUDITS if getattr(args, a)], "full": args.full,
         "old": args.old, "new": args.new, "block": args.block, "category": args.category,
         "base": "vanilla" if args.vanilla_only else (f"adopted:{args.adopted}" if args.adopted else "")})
@@ -346,6 +385,20 @@ def _main():
     commands = [c for c in SOURCE_COMMANDS if getattr(args, c)]
     if len(commands) > 1:
         _usage_error(f"{' and '.join('--' + c.replace('_', '-') for c in commands)} cannot be combined")
+    config_commands = [c for c in CONFIG_COMMANDS if getattr(args, c)]
+    if len(config_commands) > 1:
+        _usage_error(f"{' and '.join('--' + c.split('_')[0] for c in config_commands)} cannot be "
+                     f"combined; set one setting at a time")
+    if config_commands:
+        # A config command exits before a run, so anything else asked for would be
+        # dropped without a word.
+        others = ([f"--{c.replace('_', '-')}" for c in APP_COMMANDS if getattr(args, c)]
+                  + [f"--{a}" for a in ALL_AUDITS if getattr(args, a)]
+                  + [f"--{f}" for f in ("display", "summary", "diff", "full", "block",
+                                        "category", "old", "new") if getattr(args, f)])
+        if others:
+            _usage_error(f"--{config_commands[0].split('_')[0]} cannot be combined with "
+                         f"{', '.join(others)}; it does its own thing and exits")
     if args.vanilla_only and args.adopted:
         _usage_error("--vanilla-only and --adopted cannot be combined")
     if args.full and args.old:
@@ -361,9 +414,12 @@ def _main():
     if color_enabled(args.color):
         sys.stdout = ColorWriter(sys.stdout)
 
+    if config_commands:
+        sys.exit(_config_command(args))
+
     if args.snapshot:
         repo = resolve_tracker_path(args.mod_root, args.vanilla_repo)
-        do_snapshot(repo, args.snapshot, args.patch_name, args.game_root)
+        do_snapshot(repo, args.snapshot, patch_name(args.patch_name), args.game_root)
         sys.exit(0)
 
     mod_root = find_mod_root(args.mod_root)
@@ -403,9 +459,11 @@ def _main():
     if args.remove_orphaned_records:
         sys.exit(remove_orphaned_records(store, force=args.force))
 
-    vanilla_repo = find_vanilla_repo(mod_root, args.vanilla_repo)
     if args.display:
-        sys.exit(_open_app(mod_root, vanilla_repo, args))
+        # The app opens without a tracker, on its Settings page, so one can be chosen there.
+        vanilla_repo, missing = locate_vanilla_repo(mod_root, args.vanilla_repo)
+        sys.exit(_open_app(mod_root, vanilla_repo, args, missing))
+    vanilla_repo = find_vanilla_repo(mod_root, args.vanilla_repo)
     commits = get_commits(vanilla_repo)
     if not commits:
         print("No commits in vanilla-tracker.", file=sys.stderr)

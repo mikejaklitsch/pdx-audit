@@ -10,12 +10,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from pdx_utilities.git import git, git_archive
-from pdx_utilities.paths import (find_mod_root_or_exit, vanilla_root,
+from pdx_utilities.paths import (canonical_path, find_mod_root_or_exit, vanilla_root,
                                   DEFAULT_VANILLA_ROOT)
 from pdx_utilities.constants import SCAN_TOPDIRS as MODULE_ROOTS  # noqa: F401
 
 from . import session
-from .config import cfg
+from .config import cfg, config_file, setting, SETTINGS
 from .safety import remove_file, RefusedRemoval
 
 # Every cache file name pdx-audit writes under a source's cache folder. A source
@@ -29,34 +29,46 @@ SNAPSHOT_INDEX_RE = r"pdx-audit-snapshot\.index"
 def find_mod_root(override: str | None = None) -> Path:
     return find_mod_root_or_exit(override=override)
 
-def find_vanilla_repo(mod_root: Path, override: str | None = None) -> Path:
+def locate_vanilla_repo(mod_root: Path, override: str | None = None):
+    """(the tracker repo, None), or (None, why it was not found). The tracker can sit
+    anywhere under any name: `--vanilla-repo`, then $PDX_VANILLA_REPO, then the config
+    file's `vanilla_repo`, then `<mod-parent>/vanilla-tracker/repo.git`."""
     if override:
-        p = Path(override).resolve()
+        p = Path(canonical_path(override))
         if p.exists():
-            return p
-        print(f"Vanilla repo not found at {p}", file=sys.stderr)
-        sys.exit(1)
+            return p, None
+        return None, f"Vanilla repo not found at {p}"
 
     for name, src in (("$PDX_VANILLA_REPO", os.environ.get("PDX_VANILLA_REPO")),
-                      ("The config file's vanilla_repo", cfg("vanilla_repo"))):
+                      (f"The config file's vanilla_repo ({config_file()})", cfg("vanilla_repo"))):
         if src:
-            p = Path(src).resolve()
+            p = Path(canonical_path(src))
             if p.exists():
-                return p
-            print(f"Error: {name} points at {p}, which does not exist. Correct it, or pass "
-                  f"--vanilla-repo <path>.", file=sys.stderr)
-            sys.exit(1)
+                return p, None
+            return None, (f"Error: {name} points at {p}, which does not exist. Correct it with "
+                          f"`pdx-audit --set vanilla_repo <path>`, or pass --vanilla-repo <path>.")
 
-    candidate = mod_root.parent / "vanilla-tracker" / "repo.git"
-    if candidate.exists():
-        return candidate
+    candidate = mod_root.parent / "vanilla-tracker" / "repo.git" if mod_root else None
+    if candidate and candidate.exists():
+        return candidate, None
 
-    print("Error: vanilla-tracker repo not found. Searched:\n"
-          "  $PDX_VANILLA_REPO\n"
-          "  config file (vanilla_repo)\n"
-          f"  {candidate}\n"
-          "Use --vanilla-repo <path> to specify.", file=sys.stderr)
-    sys.exit(1)
+    return None, ("Error: vanilla-tracker repo not found. Searched:\n"
+                  "  $PDX_VANILLA_REPO\n"
+                  f"  the config file (vanilla_repo){f' at {config_file()}' if config_file() else ''}\n"
+                  f"  {candidate}\n"
+                  "Point pdx-audit at a tracker under any name with "
+                  "`pdx-audit --set vanilla_repo <path>` (or --vanilla-repo <path> for one run), "
+                  "or create one with `pdx-audit --snapshot <version>`.")
+
+
+def find_vanilla_repo(mod_root: Path, override: str | None = None) -> Path:
+    """The tracker repo, or an error and exit. `--display` uses locate_vanilla_repo
+    instead, so the app can open on its Settings page and be pointed at one."""
+    repo, err = locate_vanilla_repo(mod_root, override)
+    if repo is None:
+        print(err, file=sys.stderr)
+        sys.exit(1)
+    return repo
 
 class Message(str):
     """A version's message carrying its tag, for a tag that is not the message's
@@ -193,6 +205,18 @@ def resolve_ref(vanilla_repo, ref, commits, side):
 
 DEFAULT_GAME_ROOT = DEFAULT_VANILLA_ROOT
 
+def game_root(override: str | None = None) -> Path:
+    """The game install to read, at the usual precedence: `--game-root`, then
+    $PDX_GAME_ROOT, then the config file's `game_root`, then the Steam default."""
+    value, _origin = setting("game_root", override)
+    return Path(canonical_path(value or str(DEFAULT_GAME_ROOT)))
+
+def patch_name(override: str | None = None) -> str:
+    """The patch name a snapshot records: `--patch-name`, then $PDX_PATCH_NAME, then
+    the config file's `patch_name`, then the built-in default."""
+    value, _origin = setting("patch_name", override)
+    return value or SETTINGS["patch_name"]["default"]
+
 STALE_SENTINEL_DIRS = ("main_menu/localization/english", "in_game/gui",
                        "in_game/common", "main_menu/common",
                        "loading_screen/common/defines")
@@ -200,9 +224,8 @@ STALE_SENTINEL_DIRS = ("main_menu/localization/english", "in_game/gui",
 def warn_if_tracker_stale(vanilla_repo, newest_hash, sample_size=40):
     """Warn if game files differ from the newest tracked commit. Returns the
     warning, or None."""
-    game_root = Path(os.environ.get("PDX_GAME_ROOT")
-                     or cfg("game_root") or str(DEFAULT_GAME_ROOT))
-    if not game_root.is_dir():
+    root = game_root()
+    if not root.is_dir():
         return
     checked = stale = 0
     for sd in STALE_SENTINEL_DIRS:
@@ -216,7 +239,7 @@ def warn_if_tracker_stale(vanilla_repo, newest_hash, sample_size=40):
         step = max(1, len(entries) // sample_size)
         for path, sha in entries[::step][:sample_size]:
             try:
-                data = (game_root / path).read_bytes()
+                data = (root / path).read_bytes()
             except OSError:
                 continue
             checked += 1
@@ -239,10 +262,10 @@ def _git_archive(vanilla_repo, commit, paths=None, timeout=60):
 def resolve_tracker_path(mod_root_arg, vanilla_repo_arg) -> Path:
     """Where the tracker repo lives (or should live)."""
     if vanilla_repo_arg:
-        return Path(vanilla_repo_arg).resolve()
+        return Path(canonical_path(vanilla_repo_arg))
     for src in (os.environ.get("PDX_VANILLA_REPO"), cfg("vanilla_repo")):
         if src:
-            return Path(src).resolve()
+            return Path(canonical_path(src))
     mod_root = find_mod_root(mod_root_arg)
     return mod_root.parent / "vanilla-tracker" / "repo.git"
 
@@ -291,19 +314,23 @@ def _version_key(tag: str):
     suffix = re.sub(r"[\d.]+", "", tag)
     return (nums, 0 if suffix else 1, suffix)
 
-def do_snapshot(repo: Path, tag: str, patch_name: str,
+def do_snapshot(repo: Path, tag: str, patch: str,
                 game_root_arg: str | None = None) -> None:
     """Snapshot a vanilla install's .txt/.yml/.gui files into the tracker."""
-    game_root = Path(game_root_arg or os.environ.get("PDX_GAME_ROOT")
-                     or cfg("game_root") or str(DEFAULT_GAME_ROOT))
-    if not game_root.is_dir():
-        print(f"Error: game directory not found: {game_root}\n"
-              "Set $PDX_GAME_ROOT or pass --game-root pointing at the "
-              "game's 'game' directory.",
+    root = game_root(game_root_arg)
+    if not root.is_dir():
+        print(f"Error: game directory not found: {root}\n"
+              "Point pdx-audit at the game's 'game' directory with "
+              "`pdx-audit --set game_root <path>`, or pass --game-root for one run.",
               file=sys.stderr)
         sys.exit(1)
 
-    if not repo.exists():
+    if not (repo / "HEAD").is_file():
+        if repo.exists() and any(repo.iterdir()):
+            print(f"Error: {repo} is not a tracker repository and is not empty; nothing was "
+                  f"written. Point pdx-audit at a tracker, or at a new path, with "
+                  f"`pdx-audit --set vanilla_repo <path>`.", file=sys.stderr)
+            sys.exit(1)
         repo.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "init", "--bare", "--quiet", str(repo)], check=True)
         subprocess.run(["git", "--git-dir", str(repo), "symbolic-ref",
@@ -331,12 +358,12 @@ def do_snapshot(repo: Path, tag: str, patch_name: str,
                   file=sys.stderr)
             sys.exit(1)
 
-    print(f"Snapshotting {game_root} as {tag}...")
+    print(f"Snapshotting {root} as {tag}...")
     files = sorted({f for ext in ("*.txt", "*.yml", "*.gui")
-                    for f in game_root.rglob(ext) if f.is_file()})
+                    for f in root.rglob(ext) if f.is_file()})
     n_files = len(files)
     try:
-        tree = snapshot_tree(repo, game_root, files)
+        tree = snapshot_tree(repo, root, files)
     except SnapshotError:
         print("Error: git did not hash every game file; nothing committed.",
               file=sys.stderr)
@@ -346,7 +373,7 @@ def do_snapshot(repo: Path, tag: str, patch_name: str,
     if head and git(repo, "rev-parse", "HEAD^{tree}").strip() == tree:
         print("No changes from the previous snapshot; nothing committed.")
         return
-    msg = f"{tag} {patch_name}".strip()
+    msg = f"{tag} {patch}".strip()
     commit = commit_tree(repo, tree, head or None, msg)
     subprocess.run(["git", "--git-dir", str(repo), "update-ref", "refs/heads/master", commit],
                    check=True, capture_output=True)

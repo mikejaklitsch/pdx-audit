@@ -28,10 +28,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from pdx_utilities.constants import SCAN_TOPDIRS
-from pdx_utilities.paths import DEFAULT_VANILLA_ROOT, canonical_path, path_key
+from pdx_utilities.paths import canonical_path, path_key
 
 from . import tracker
-from .config import cfg
 from .safety import RefusedRemoval, remove_file
 from .store import data_root, read_mod_id
 
@@ -969,7 +968,8 @@ def parse_vdf(text):
 
 
 def _game_root():
-    return Path(os.environ.get("PDX_GAME_ROOT") or cfg("game_root") or str(DEFAULT_VANILLA_ROOT))
+    from .tracker import game_root
+    return game_root()
 
 
 def steam_layout(game_root=None):

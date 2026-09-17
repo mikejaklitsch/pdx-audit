@@ -50,6 +50,8 @@ cef54d2  1.3.10 Pavia
 741b7ea  1.2.0 Echinades   <- oldest
 ```
 
+The repository can sit anywhere under any name; where it is comes from `--vanilla-repo`, then `$PDX_VANILLA_REPO`, then the config file's `vanilla_repo` (written by `--set` or the app's Settings page), then `<mod-parent>/vanilla-tracker/repo.git`.
+
 Each commit holds the `.txt`, `.yml`, and `.gui` files from that version's install. `--snapshot <version>` reads the live install and adds a commit: every matching file is hashed straight from the game folder into git (`git hash-object --stdin-paths --no-filters`, so bytes are stored exactly), an index is built from those hashes, and a commit is written. Nothing is copied to a temporary folder; the only temporary item is one index file inside the tracker repo, removed afterwards. If the resulting tree equals the previous snapshot's, nothing is committed.
 
 On every run a sample of live game files, from localization, `gui`, and the `common` script folders, is hashed and compared with the newest snapshot. A mismatch means the game patched but the tracker was not updated, and a warning tells you to run `--snapshot`.

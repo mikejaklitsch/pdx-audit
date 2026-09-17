@@ -44,6 +44,12 @@ pdx-audit --color never       # plain output; auto colours a terminal, never a p
 pdx-audit --list-commits      # list snapshots you can pass to --old/--new
 pdx-audit --snapshot 1.3.12   # record the current install as a new snapshot, then exit
 
+pdx-audit --config            # the settings in use, where each comes from, and the files read
+pdx-audit --set vanilla_repo /path/to/my-tracker.git   # point at a tracker under any name
+pdx-audit --set game_root "/path/to/Europa Universalis V/game"
+pdx-audit --set patch_name Cortes     # the patch name new snapshots record
+pdx-audit --unset patch_name          # back to the setting below it
+
 pdx-audit --dismiss 3f9a1c2b --reason "halved on purpose"   # hide a finding
 pdx-audit --undismiss 3f9a1c2b                               # bring it back
 pdx-audit --show-dismissed                                   # list dismissed findings
@@ -77,7 +83,9 @@ The per-audit detail follows below the summary, and `--summary` prints the summa
 
 `--display` opens the desktop app instead. Every run from the app covers all five audits, and the chips in its top bar show how many findings each audit has and hide or show them without a new run. The version window sits beside the chips, and the arrow on **Run audits** holds the category, block and oldest-snapshot choices; a run with a category covers the override and duplicate audits, the two a category applies to. Findings are listed as expandable folders or as a flat list of files, with findings from earlier patches in their own section.
 
-Selecting a finding shows your statement against what vanilla did and, for a REPLACE or GUI copy, vanilla's current text beside your copy. Both sides are compared with vanilla's text at the version your copy matches, the way a three-way merge shows two edits of one base: a green `+` line is one that side added since then, and a red `−` line one it deleted, shown with that version's text. Lines both sides kept share a row, so vanilla's edits only appear on the left and yours only on the right; lines are compared without layout, comments or number spelling. A finding's first line carries its severity icon at the left edge, the one the summary prints: `✗` where vanilla changed a block you also edited, `⚠` otherwise. Everything else folds, and each fold says how many of its lines hold changes outside the findings. The header says which patch vanilla changed it in and which version your copy matches. Clear **Side by side** to show your copy alone instead, as an INJECT always is: `−` marks your copy's line and `+` vanilla's current line, shown faintly right under your line or where it belongs, indented the way your copy indents. **Flatten** drops each line's indentation and joins runs of lines that only close blocks into one line, for deeply nested GUI text, and **Wrap lines** wraps long lines to the width of the view instead of scrolling sideways. When both sides are one line, the words that differ are highlighted. Statements line up by key and order, so layout, comments and the spelling of numbers never mark a line, and your own edits carry no mark. Long unchanged stretches fold. The commands above are buttons in the app: **Dismiss** on each finding, **Restore** on the Dismissed page, and **Take snapshot** and **Remove orphaned records** on the Tracker page. Audit flags given with `--display` choose which chips start switched on, and `--old`, `--new`, `--full`, `--block` and `--category` fill in the first run. A duplicate finding shows the source code of each definition open; clear **Expand source code** to show them collapsed.
+Selecting a finding shows your statement against what vanilla did and, for a REPLACE or GUI copy, vanilla's current text beside your copy. Both sides are compared with vanilla's text at the version your copy matches, the way a three-way merge shows two edits of one base: a green `+` line is one that side added since then, and a red `−` line one it deleted, shown with that version's text. Lines both sides kept share a row, so vanilla's edits only appear on the left and yours only on the right; lines are compared without layout, comments or number spelling. A finding's first line carries its severity icon at the left edge, the one the summary prints: `✗` where vanilla changed a block you also edited, `⚠` otherwise. Everything else folds, and each fold says how many of its lines hold changes outside the findings. The header says which patch vanilla changed it in and which version your copy matches. Clear **Side by side** to show your copy alone instead, as an INJECT always is: `−` marks your copy's line and `+` vanilla's current line, shown faintly right under your line or where it belongs, indented the way your copy indents. **Flatten** drops each line's indentation and joins runs of lines that only close blocks into one line, for deeply nested GUI text, and **Wrap lines** wraps long lines to the width of the view instead of scrolling sideways. When both sides are one line, the words that differ are highlighted. Statements line up by key and order, so layout, comments and the spelling of numbers never mark a line, and your own edits carry no mark. Long unchanged stretches fold. The commands above are buttons in the app: **Dismiss** on each finding, **Restore** on the Dismissed page, **Take snapshot** and **Remove orphaned records** on the Tracker page, and the settings on the **Settings** page. Audit flags given with `--display` choose which chips start switched on, and `--old`, `--new`, `--full`, `--block` and `--category` fill in the first run. A duplicate finding shows the source code of each definition open; clear **Expand source code** to show them collapsed.
+
+The **Settings** page holds the same settings `--set` writes, one box each: the tracker, the game folder and the default patch name, with **Browse** for the two paths and **Clear** to fall back to the setting below. Under each box is where the value in use comes from, or a note when a file read earlier is read instead of the one the page writes. It also lists the config files read, marking the one in effect and the one it writes. The patch name is what the Tracker page's snapshot records unless you type another. A change applies at once, so pointing the app at another tracker reloads the snapshots without reopening it, and a `--set` from a terminal is picked up when the page is opened. The boxes are held while a run is reading the tracker they name. With no tracker at all the app still opens, on that page, with the audits switched off until one is chosen or the first snapshot is taken.
 
 When you come back to the app after editing the mod, a note beside **Run audits** says how many files changed since the run it is showing; the list stays as it was until you run the audits again. Script in the app is coloured with the EU5 grammar and Paradox Dark theme of the [Paradox Highlight](https://marketplace.visualstudio.com/items?itemName=dragon-archer.paradox-highlight) extension for VS Code by dragon-archer, used under its MIT licence; the copied files and the licence are in `pdxaudit/syntax`.
 
@@ -89,9 +97,10 @@ pdx-audit remembers what you decided and what is still open, without ever writin
 - Windows: `%LOCALAPPDATA%\pdx-audit`
 - macOS: `~/Library/Application Support/pdx-audit`
 
-Inside it, records are keyed by the mod's `id` from `.metadata/metadata.json` and by git commit:
+Inside it, records are keyed by the mod's `id` from `.metadata/metadata.json` and by git commit, and the settings sit beside them:
 
 ```
+<data folder>/config.json                           # the settings, for every mod
 <data folder>/<mod id>/commits/<commit hash>.json   # a record as of that commit
 <data folder>/<mod id>/record.json                  # a mod that is not in git
 <data folder>/<mod id>/results.json                 # the last run the --display app made
@@ -115,14 +124,14 @@ pdx-audit --snapshot 1.3.10
 
 The first run creates the tracker and commits the current install's `.txt`/`.yml`/`.gui` files, hashed straight from the game folder into git. Run it again after each patch to grow the history. The audits need at least two snapshots, and if the install has not changed, nothing is committed. Every run samples game files against the newest snapshot and warns when the game has patched since.
 
-The tracker is located on each run by the following precedence:
+The tracker is a bare git repository under any name, in any folder. It is located on each run by the following precedence:
 
 1. `--vanilla-repo <path>`
 2. `$PDX_VANILLA_REPO`
-3. config file (`vanilla_repo`)
+3. the config file's `vanilla_repo`, which `pdx-audit --set vanilla_repo <path>` and the app's Settings page write
 4. `<mod-parent>/vanilla-tracker/repo.git`
 
-The install to snapshot is found the same way, in the order `--game-root`, `$PDX_GAME_ROOT`, config `game_root`, then a Steam default. `--patch-name` sets the patch name in the commit message, which defaults to `Pavia`.
+The install to snapshot is found the same way, in the order `--game-root`, `$PDX_GAME_ROOT`, config `game_root`, then a Steam default; the patch name a snapshot records follows `--patch-name`, `$PDX_PATCH_NAME`, config `patch_name`, then `Pavia`. See [Config file](#config-file).
 
 ### Getting a second snapshot
 
@@ -219,23 +228,34 @@ A stored source that no mod chooses any more is orphaned. Each run prints a note
 
 ## Config file
 
-To avoid repeating paths on the command line, copy `config.sample.json` to `config.json` and fill in the values you use:
+Settings that do not change between runs live in a config file: where the tracker is, where the game is installed, and the patch name new snapshots record. Set them on the command line or on the app's Settings page, and they are stored for every mod:
 
-```json
-{
-  "game_root": "/path/to/Steam/steamapps/common/Europa Universalis V/game",
-  "vanilla_repo": "/path/to/vanilla-tracker/repo.git",
-  "skip_dirs": ["backup", "wip", "in_game/gui/experimental"],
-  "skip_files": ["*.bak", "*_disabled.txt"],
-  "merge_types": ["some_type"]
-}
+```bash
+pdx-audit --config                                     # every setting and where it comes from
+pdx-audit --set vanilla_repo /path/to/my-tracker.git   # a tracker under any name, in any folder
+pdx-audit --set game_root "/path/to/Europa Universalis V/game"
+pdx-audit --set patch_name Cortes
+pdx-audit --unset patch_name                           # back to the setting below it
 ```
+
+`--set` writes the per-user file, `<data folder>/config.json`, beside the findings records. A value it cannot use is refused with the reason and nothing is written: a game folder that is not there, a tracker path that holds something other than a bare git repository, an empty value. A tracker path that does not exist yet, or an empty folder you made in a file dialog, is stored, and `--snapshot` creates the repository there.
+
+The settable keys are `vanilla_repo`, `game_root` and `patch_name`. The rest are edited in the file itself:
 
 - **`skip_dirs`**: lists directories to exclude from every scan. An entry matches that directory anywhere (`backup`) or one specific subtree (`in_game/gui/experimental`).
 - **`skip_files`**: lists filename globs to exclude from every scan, matched against both the basename and the full path.
 - **`merge_types`**: `common/` folders the engine merges across files, in addition to the ones worked out from vanilla (see the duplicate audit in HOW_IT_WORKS.md).
 
-Every setting follows the same precedence: a CLI flag overrides an environment variable, which overrides the config file, which overrides the built-in default. A `$PDX_VANILLA_REPO` or `vanilla_repo` that points at a missing folder is an error. The config file is the first of `$PDX_AUDIT_CONFIG`, `~/.config/pdx-audit.json` and `config.json` next to the tool that exists; if it is not a valid JSON object, a warning says so and its settings are ignored.
+`config.sample.json` shows every key. Copy it to `config.json` next to the tool to keep settings with the repository instead.
+
+Every setting follows the same precedence: a CLI flag overrides an environment variable (`$PDX_VANILLA_REPO`, `$PDX_GAME_ROOT`, `$PDX_PATCH_NAME`), which overrides the config file, which overrides the built-in default. A `$PDX_VANILLA_REPO` or `vanilla_repo` that points at a missing folder is an error. The config file is the first of these that exists, and it provides every setting:
+
+1. `$PDX_AUDIT_CONFIG`
+2. `~/.config/pdx-audit.json`
+3. `<data folder>/config.json`, which `--set` and the app write
+4. `config.json` next to the tool
+
+If it is not a valid JSON object, a warning says so and its settings are ignored, and `--config` still reports every setting so the file can be found and fixed. Because one file provides everything, creating the per-user file copies in the settings of any file below it that it shadows, so removing a file never loses settings, and `--set` says when a file read before it is read instead of what it just wrote. `--config` marks which file is in effect, and names the path runs fall back to for a setting no file holds.
 
 ## Baselines
 

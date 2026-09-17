@@ -7,6 +7,8 @@ import json
 import os
 import threading
 import time
+import types
+from pathlib import Path
 
 import pytest
 
@@ -354,3 +356,158 @@ def test_the_window_opens_before_the_mods_overrides_are_read(world, tmp_path, mo
     assert options["category"] == "common/building_types" and options["block"] == "some_building"
     win.close()
     app.processEvents()
+
+
+# --- the Settings page ------------------------------------------------------------
+
+
+@pytest.fixture
+def cfg_files(tmp_path, monkeypatch):
+    """The config files under tmp_path, so the app writes nothing real."""
+    from pdxaudit import config
+    monkeypatch.delenv("PDX_AUDIT_CONFIG", raising=False)
+    for key in ("PDX_VANILLA_REPO", "PDX_GAME_ROOT", "PDX_PATCH_NAME"):
+        monkeypatch.delenv(key, raising=False)
+    home, data, repo = (tmp_path / n for n in ("home.json", "data.json", "repo.json"))
+    monkeypatch.setattr(config, "_home_config", lambda: home)
+    monkeypatch.setattr(config, "writable_path", lambda: data)
+    monkeypatch.setattr(config, "_repo_config", lambda: repo)
+    config.invalidate()
+    yield types.SimpleNamespace(home=home, data=data, repo=repo)
+    config.invalidate()
+
+
+def _open_window(world, tmp_path, monkeypatch, repo=None):
+    from pdxaudit import app as appmod
+    from pdxaudit.app import MainWindow
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    ini = str(tmp_path / "settings.ini")
+    monkeypatch.setattr(appmod, "_settings", lambda: appmod.QSettings(ini, appmod.QSettings.Format.IniFormat))
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    win = MainWindow(world.mod, repo, {}, autorun=False)
+    _settle(win)
+    return win
+
+
+def test_the_settings_page_shows_each_value_and_where_it_comes_from(window, cfg_files):
+    window.refresh_settings()
+    assert set(window.setting_edits) == {"vanilla_repo", "game_root", "patch_name"}
+    assert window.setting_notes["patch_name"].text() == "from the built-in default"
+    assert window.setting_edits["patch_name"].text() == "Pavia"    # the value in use
+    listed = [window.config_files.item(i).text() for i in range(window.config_files.count())]
+    assert any(str(cfg_files.data) in line and "written here" in line for line in listed)
+    assert all("not present" in line for line in listed)
+
+
+def test_saving_a_tracker_writes_the_config_and_the_window_uses_it(window, cfg_files, world):
+    window.setting_edits["vanilla_repo"].setText(str(world.repo))
+    assert window.save_setting("vanilla_repo")
+    assert json.loads(cfg_files.data.read_text())["vanilla_repo"] == str(world.repo)
+    assert str(window.vanilla_repo) == str(world.repo)
+    assert window.commits                       # the tracker's history was read
+    assert str(world.repo) in window.snapshot_card.hint.text()
+    assert window.setting_edits["vanilla_repo"].text() == str(world.repo)
+    assert window.setting_notes["vanilla_repo"].text() == ""      # it is stored here now
+
+
+def test_saving_a_setting_the_app_cannot_use_says_why(window, cfg_files, tmp_path):
+    window.setting_edits["game_root"].setText(str(tmp_path / "nowhere"))
+    assert window.save_setting("game_root") is False
+    assert "not a folder" in window.settings_message.text()
+    assert not cfg_files.data.exists()
+
+
+def test_clearing_a_setting_removes_it(window, cfg_files):
+    window.setting_edits["patch_name"].setText("Cortes")
+    assert window.save_setting("patch_name")
+    assert json.loads(cfg_files.data.read_text())["patch_name"] == "Cortes"
+    window.setting_edits["patch_name"].setText("")
+    assert window.save_setting("patch_name")    # an empty box clears the setting
+    assert "patch_name" not in json.loads(cfg_files.data.read_text())
+    assert window.setting_notes["patch_name"].text() == "from the built-in default"
+
+
+def test_a_terminal_set_shows_on_the_page(window, cfg_files):
+    cfg_files.data.write_text('{"patch_name": "Cortes"}')
+    window._open_page(5)                        # opening the page re-reads the files
+    assert window.setting_edits["patch_name"].text() == "Cortes"
+
+
+def test_without_a_tracker_the_window_opens_on_settings_and_cannot_run(world, tmp_path, monkeypatch,
+                                                                       cfg_files):
+    # No tracker anywhere: only the setting can supply one, as it does once saved.
+    from pdxaudit import config as cfgmod
+
+    def only_from_the_setting(_mod_root, override=None):
+        stored = cfgmod.cfg("vanilla_repo")
+        return (Path(stored), None) if stored else (None, "Error: vanilla-tracker repo not found.")
+
+    monkeypatch.setattr("pdxaudit.tracker.locate_vanilla_repo", only_from_the_setting)
+    win = _open_window(world, tmp_path, monkeypatch, repo=None)
+    assert win.pages.currentIndex() == 5
+    assert not win.run_button.isEnabled() and not win.commits
+    texts = [win.banner_box.itemAt(i).widget().findChild(QtWidgets.QLabel).text()
+             for i in range(win.banner_box.count())]
+    assert any("No vanilla tracker yet" in t for t in texts)
+
+    win.setting_edits["vanilla_repo"].setText(str(world.repo))
+    assert win.save_setting("vanilla_repo")
+    _settle(win)
+    assert str(win.vanilla_repo) == str(world.repo) and win.commits
+    assert win.run_button.isEnabled()
+    win.close()
+    QtWidgets.QApplication.instance().processEvents()
+
+
+def test_the_patch_name_setting_reaches_a_snapshot_taken_in_the_app(window, cfg_files):
+    window.setting_edits["patch_name"].setText("Cortes")
+    assert window.save_setting("patch_name")
+    assert window.snap_patch.placeholderText() == "Cortes"
+    assert window.snap_patch.text() == ""        # empty means "use the setting"
+    started = []
+    window._start = lambda argv, on_done, text: started.append(argv)
+    window.snap_version.setText("1.3.12")
+    window.take_snapshot()
+    assert "--patch-name" not in started[0]      # so the CLI resolves the setting
+
+
+def test_a_terminal_set_of_the_tracker_is_applied_to_the_open_window(window, cfg_files, world,
+                                                                     monkeypatch):
+    from pdxaudit import config as cfgmod
+    other = world.repo
+
+    def only_from_the_setting(_mod_root, override=None):
+        stored = cfgmod.cfg("vanilla_repo")
+        return (Path(stored), None) if stored else (None, "Error: not found.")
+
+    monkeypatch.setattr("pdxaudit.tracker.locate_vanilla_repo", only_from_the_setting)
+    cfg_files.data.write_text(json.dumps({"vanilla_repo": str(other)}))
+    window._open_page(5)
+    _settle(window)
+    assert window.setting_edits["vanilla_repo"].text() == str(other)
+    assert window.vanilla_repo == str(other)     # applied, not only displayed
+    assert str(other) in window.snapshot_card.hint.text()
+
+
+def test_the_run_tooltip_goes_once_a_tracker_is_chosen(window):
+    window.vanilla_repo = ""
+    window._set_busy(False)
+    assert "Choose a tracker" in window.run_button.toolTip()
+    window.vanilla_repo = "/somewhere/my-tracker.git"
+    window._set_busy(False)
+    assert window.run_button.toolTip() == ""
+
+
+def test_settings_cannot_be_edited_while_a_run_is_reading_the_tracker(window):
+    window._set_busy(True)
+    assert window.setting_buttons and not any(b.isEnabled() for b in window.setting_buttons)
+    window._set_busy(False)
+    assert all(b.isEnabled() for b in window.setting_buttons)
+
+
+def test_a_value_another_file_shadows_is_marked_on_the_page(window, cfg_files):
+    cfg_files.data.write_text(json.dumps({"patch_name": "FromData"}))
+    cfg_files.home.write_text(json.dumps({"patch_name": "FromHome"}))
+    window._open_page(5)
+    assert "is read instead" in window.setting_notes["patch_name"].text()
+    assert str(cfg_files.home) in window.setting_notes["patch_name"].text()

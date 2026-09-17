@@ -26,10 +26,10 @@ from PySide6.QtWidgets import (
     QSplitter, QStackedWidget, QStyle, QStyledItemDelegate, QTextBrowser, QToolButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from . import highlight, results
+from . import config, highlight, results
 from .report import KIND
 from .store import open_store
-from .tracker import get_commits
+from .tracker import get_commits, patch_name as tracker_patch_name
 
 HERE = Path(__file__).parent
 ROLE = Qt.ItemDataRole.UserRole
@@ -50,8 +50,8 @@ C = {"bg": "#14161a", "rail": "#101215", "bar": "#171a1f", "list": "#16191d", "c
      "faint": "#6d7584", "dim": "#5d6573", "gutter": "#3c424c",
      "accent": "#5fb3c8", "accent_ink": "#0d1a1e", "accent_bg": "#1f3a41",
      "accent_edge": "#2d5660", "accent_text": "#9ad8e6", "added": "#7fd39a",
-     "broken": "#f06b5f", "stale": "#ff9a52", "review": "#f5d65c", "danger": "#d8483e"}
-TINT = {"stale": QColor(255, 154, 82, 43), "review": QColor(245, 214, 92, 36)}
+     "broken": "#f06b5f", "stale": "#ff9a52", "review": "#7aa2f7", "danger": "#d8483e"}
+TINT = {"stale": QColor(255, 154, 82, 43), "review": QColor(122, 162, 247, 40)}
 # The words that differ between your line and vanilla's, drawn over the tint. Neutral,
 # so script coloured like the severity (orange keys on an orange row) stays readable.
 EMPH = {"stale": QColor(255, 255, 255, 34), "review": QColor(255, 255, 255, 34)}
@@ -78,6 +78,16 @@ def _settings():
     return QSettings("pdx-audit", "pdx-audit")
 _fonts_loaded = False
 
+# The rail's pages, in order: icon, and what the page is for, since it has no labels.
+RAIL_PAGES = (
+    ("findings", "Findings: what to fix, from the last run"),
+    ("dismissed", "Dismissed: findings you hid, and how to bring them back"),
+    ("snapshots", "Tracker: the vanilla versions to compare with, and taking a new one"),
+    ("output", "Output: the run's report and its log"),
+    ("sources", "Sources: mods yours loads after, or took code from"),
+    ("settings", "Settings: where the tracker and the game are"),
+)
+
 ICONS = {
     "findings": '<path d="M3 4h10M3 8h10M3 12h6"/>',
     "dismissed": '<path d="M2.5 5h11v8h-11z"/><path d="M2 2.5h12V5H2z"/><path d="M6.5 8h3"/>',
@@ -90,6 +100,8 @@ ICONS = {
     "chevron": '<path d="M4.5 6.5L8 10l3.5-3.5"/>',
     "sources": '<path d="M8 2.5l5.5 3L8 8.5 2.5 5.5z"/><path d="M2.5 8.5L8 11.5l5.5-3"/>'
                '<path d="M2.5 11L8 14l5.5-3"/>',
+    "settings": '<path d="M2.5 5.5h11M2.5 10.5h11"/><circle cx="6" cy="5.5" r="1.7"/>'
+                '<circle cx="10.5" cy="10.5" r="1.7"/>',
 }
 
 
@@ -939,12 +951,17 @@ class MainWindow(QMainWindow):
         self._generations = {}
         self._prepared = {}      # (block id, side by side, flatten) -> BlockView.prepare's result
         self._store_waiters = []
+        self.setting_buttons = []
         self._background_done.connect(self._apply_background, Qt.ConnectionType.QueuedConnection)
         _load_fonts()
         app = QApplication.instance()
         app.setStyleSheet(stylesheet())
         self.mod_root = Path(mod_root)
-        self.vanilla_repo = str(vanilla_repo)
+        # The tracker can be absent: the app opens on its Settings page to be pointed at
+        # one, or the Tracker page takes the first snapshot, which creates it.
+        self.vanilla_repo = str(vanilla_repo) if vanilla_repo else ""
+        self.tracker_override = (options or {}).get("tracker_override") or None
+        self.missing_tracker = (options or {}).get("missing_tracker") or None
         self.store, _err = open_store(self.mod_root)
         self.payload = None
         self.records = []
@@ -952,6 +969,7 @@ class MainWindow(QMainWindow):
         self.list_mode = "folders"
         self.process = None
         self.last_line = ""
+        self.log_fresh = False
         self.run_banners = []
         self.orphans = []
         self.sources_view = None
@@ -983,17 +1001,25 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self._build_tracker_page())
         self.pages.addWidget(self._build_output_page())
         self.pages.addWidget(self._build_sources_page())
+        self.pages.addWidget(self._build_settings_page())
         column.addWidget(self.pages, 1)
         column.addWidget(self._build_statusbar())
         outer.addLayout(column, 1)
         self.setCentralWidget(root)
 
         self.load_commits()
+        self.refresh_settings()
         self.refresh_store_views()
         options = options or {}
         self.apply_options(options)
         self._set_busy(False)
         self._show_record(None)
+        if not self.vanilla_repo:
+            # Nothing to compare against yet, so the window opens where that is fixed.
+            self._go_to_page(5)
+            if self.missing_tracker:
+                self.log.appendPlainText(self.missing_tracker)
+            autorun = False
         # The Run menu's categories and blocks come from reading every mod script,
         # so they load off the UI thread. A category or block asked for at launch
         # can only be chosen once they exist, so that choice and its run wait.
@@ -1038,9 +1064,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(8, 12, 8, 12)
         lay.setSpacing(6)
         self.rail_group = QButtonGroup(self)
-        for i, (icon, tip) in enumerate((("findings", "Findings"), ("dismissed", "Dismissed"),
-                                         ("snapshots", "Tracker"), ("output", "Output"),
-                                         ("sources", "Sources"))):
+        for i, (icon, tip) in enumerate(RAIL_PAGES):
             b = QToolButton()
             b.setCheckable(True)
             b.setFixedSize(36, 36)
@@ -1161,6 +1185,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.base_row)
         self.base_row.hide()
         self.full_box = QCheckBox("Compare from the oldest snapshot")
+        self.full_box.setToolTip("Every audit over the whole history, not just the last patch: "
+                                 "the thorough, slow run")
         self.full_box.toggled.connect(lambda _on: self._update_window_label())
         lay.addWidget(self.full_box)
         line = QFrame()
@@ -1367,6 +1393,8 @@ class MainWindow(QMainWindow):
         sh = QHBoxLayout(self.source_bar)
         sh.setContentsMargins(22, 8, 22, 8)
         self.expand_sources = QCheckBox("Expand source code")
+        self.expand_sources.setToolTip("Show the script of each definition of this name, "
+                                       "instead of collapsing them")
         self.expand_sources.setChecked(_settings().value("expand_sources", True, type=bool))
         self.expand_sources.toggled.connect(self._expand_sources_toggled)
         sh.addWidget(self.expand_sources)
@@ -1414,10 +1442,12 @@ class MainWindow(QMainWindow):
         v.setSpacing(10)
         head = QLabel(title, objectName="cardTitle")
         v.addWidget(head)
+        card.hint = None
         if hint:
             h = QLabel(hint, objectName="hint")
             h.setWordWrap(True)
             v.addWidget(h)
+            card.hint = h
         return card, v
 
     def _page(self):
@@ -1429,8 +1459,9 @@ class MainWindow(QMainWindow):
 
     def _build_dismissed_page(self):
         page, lay = self._page()
-        card, v = self._card("Dismissed findings", "A dismissed finding stays hidden in later runs "
-                                                   "until vanilla's value or yours changes.")
+        card, v = self._card("Dismissed findings", "Select rows and Restore to report them again. A "
+                                                   "dismissal also lapses on its own once either "
+                                                   "side's text changes.")
         self.dismissed_tree = QTreeWidget(objectName="dataTree")
         self.dismissed_tree.setHeaderLabels(["Id", "Name", "Finding", "Detail", "Dismissed", "Reason"])
         self.dismissed_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -1450,7 +1481,8 @@ class MainWindow(QMainWindow):
         page, lay = self._page()
         row = QHBoxLayout()
         row.setSpacing(14)
-        snaps, sv = self._card("Snapshots", f"Tracker: {self.vanilla_repo}")
+        snaps, sv = self._card("Snapshots", self._tracker_line())
+        self.snapshot_card = snaps
         self.snapshot_tree = QTreeWidget(objectName="dataTree")
         self.snapshot_tree.setHeaderLabels(["Version", "Commit"])
         self.snapshot_tree.setRootIsDecorated(False)
@@ -1460,16 +1492,16 @@ class MainWindow(QMainWindow):
 
         side = QVBoxLayout()
         side.setSpacing(14)
-        take, tv = self._card("Take a snapshot", "After a game patch, record the installed game's files "
-                                                  "as a new version, then run the audits. Versions must "
-                                                  "be recorded oldest first.")
+        take, tv = self._card("Take a snapshot", "Record the installed game as a new version after each "
+                                                 "patch, then run the audits. Add versions oldest first.")
         form = QFormLayout()
         form.setSpacing(8)
         self.snap_version = QLineEdit()
         self.snap_version.setPlaceholderText("for example 1.3.12")
-        self.snap_patch = QLineEdit("Pavia")
+        self.snap_patch = QLineEdit()
+        self.snap_patch.setPlaceholderText(tracker_patch_name())
         self.snap_game = QLineEdit()
-        self.snap_game.setPlaceholderText("$PDX_GAME_ROOT, the config file, or the Steam install")
+        self.snap_game.setPlaceholderText("the game_root setting, $PDX_GAME_ROOT, or the Steam install")
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._browse_game_root)
         game_row = QHBoxLayout()
@@ -1485,9 +1517,9 @@ class MainWindow(QMainWindow):
         tv.addWidget(self.snapshot_button, 0, Qt.AlignmentFlag.AlignRight)
         side.addWidget(take)
 
-        orphans, ov = self._card("Orphaned records", "Findings records whose commit is on no branch of "
-                                                    "this repository, for example after a rebase or a "
-                                                    "deleted branch.")
+        orphans, ov = self._card("Orphaned records", "Remove the records left behind by rebased or "
+                                                     "deleted branches. Your dismissals on live "
+                                                     "branches are untouched.")
         self.orphan_list = QListWidget()
         OverlayScrollBar(self.orphan_list)
         ov.addWidget(self.orphan_list, 1)
@@ -1498,6 +1530,168 @@ class MainWindow(QMainWindow):
         row.addLayout(side, 1)
         lay.addLayout(row, 1)
         return page
+
+    # --- settings ------------------------------------------------------------------
+
+    def _build_settings_page(self):
+        """The config file's settings, edited here and by `pdx-audit --set`. Both call
+        config.set_value, so a change made in either shows in the other."""
+        page, lay = self._page()
+        self.setting_edits, self.setting_notes = {}, {}
+        card, v = self._card("Settings", "Set the tracker and the game folder once; both apply to "
+                                         "every mod. pdx-audit --set writes the same file.")
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        for key in config.SETTABLE:
+            spec = config.SETTINGS[key]
+            edit = QLineEdit()
+            edit.setPlaceholderText(spec["help"])
+            edit.returnPressed.connect(lambda k=key: self.save_setting(k))
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            row.addWidget(edit, 1)
+            if spec["kind"] == "path":
+                browse = QPushButton("Browse…")
+                browse.clicked.connect(lambda _c=False, k=key: self._browse_setting(k))
+                row.addWidget(browse)
+                self.setting_buttons.append(browse)
+            save = QPushButton("Save")
+            save.setProperty("kind", "primary")
+            save.clicked.connect(lambda _c=False, k=key: self.save_setting(k))
+            row.addWidget(save)
+            clear = QPushButton("Clear")
+            clear.setToolTip("Remove this setting")
+            clear.clicked.connect(lambda _c=False, k=key: self.clear_setting(k))
+            row.addWidget(clear)
+            self.setting_buttons += [save, clear]
+            note = QLabel(objectName="hint")
+            note.setWordWrap(True)
+            block = QVBoxLayout()
+            block.setSpacing(3)
+            block.addLayout(row)
+            block.addWidget(note)
+            form.addRow(spec["label"], block)
+            self.setting_edits[key] = edit
+            self.setting_notes[key] = note
+        v.addLayout(form)
+        self.settings_message = QLabel(objectName="hint")
+        self.settings_message.setWordWrap(True)
+        self.settings_message.setVisible(False)
+        v.addWidget(self.settings_message)
+        lay.addWidget(card)
+
+        files, fv = self._card("Config files", "Save writes the file marked \"written here\". A file "
+                                               "above it in this list is read instead.")
+        self.config_files = QListWidget()
+        self.config_files.setMaximumHeight(112)
+        OverlayScrollBar(self.config_files)
+        fv.addWidget(self.config_files, 1)
+        lay.addWidget(files)
+        lay.addStretch(1)
+        return page
+
+    def _tracker_line(self):
+        return f"Tracker: {self.vanilla_repo or 'none yet'}"
+
+    def _tracker_name(self):
+        """The tracker's own name for the status bar: its folder, or the folder holding
+        it when that folder is just `repo.git`."""
+        if not self.vanilla_repo:
+            return "no tracker"
+        p = Path(self.vanilla_repo)
+        return p.parent.name if p.stem == "repo" else p.name
+
+    def _settings_note(self, text, error=False):
+        self.settings_message.setText(text)
+        self.settings_message.setStyleSheet(
+            f"color: {C['broken'] if error else C['muted']}; font-size: 12px;")
+        self.settings_message.setVisible(bool(text))
+        if text:
+            self._status(text)
+
+    def refresh_settings(self):
+        """Redraw the Settings page from the config files on disk."""
+        view = config.config_view()
+        for s in view["settings"]:
+            edit = self.setting_edits.get(s["key"])
+            if edit is None:
+                continue
+            shown = s["stored"] if s["stored"] not in (None, "") else s["value"]
+            if not edit.hasFocus():
+                edit.setText("" if shown in (None, "") else str(shown))
+            stored_here = s["stored"] not in (None, "")
+            shadowed = stored_here and view["file"] != view["writable"]
+            if shadowed:
+                note = f"stored here, but {view['file']} is read instead"
+            else:
+                note = "" if stored_here else f"from {s['origin']}"
+            self.setting_notes[s["key"]].setText(note)
+        # An empty box means "use the setting", which is what the CLI resolves anyway.
+        self.snap_patch.setPlaceholderText(tracker_patch_name())
+        self.config_files.clear()
+        for c in view["candidates"]:
+            marks = [m for m in ("in effect" if c["in_effect"] else "",
+                                 "written here" if c["writable"] else "",
+                                 "" if c["exists"] else "not present") if m]
+            item = QListWidgetItem(c["path"] + (f"   ({', '.join(marks)})" if marks else ""))
+            if c["in_effect"]:
+                item.setForeground(QColor(C["accent_text"]))
+            elif not c["exists"]:
+                item.setForeground(QColor(C["faint"]))
+            self.config_files.addItem(item)
+
+    def _browse_setting(self, key):
+        edit = self.setting_edits[key]
+        title = ("The vanilla tracker repository" if key == "vanilla_repo"
+                 else "The game's 'game' folder")
+        path = QFileDialog.getExistingDirectory(self, title, edit.text() or str(Path.home()))
+        if path:
+            edit.setText(path)
+            self.save_setting(key)
+
+    def save_setting(self, key):
+        """Store one setting, as `pdx-audit --set` does, and apply it to this window."""
+        value = self.setting_edits[key].text().strip()
+        if not value:
+            return self.clear_setting(key)
+        return self._setting_action(key, lambda: config.set_value(key, value))
+
+    def clear_setting(self, key):
+        return self._setting_action(key, lambda: config.unset_value(key))
+
+    def _setting_action(self, key, fn):
+        try:
+            messages = fn()
+        except config.ConfigError as e:
+            self._settings_note(str(e), error=True)
+            return False
+        for m in messages:
+            self.log.appendPlainText(m)
+        self._settings_note(" ".join(messages),
+                            error=any(m.startswith("Note:") for m in messages))
+        self.refresh_settings()
+        if key == "vanilla_repo":
+            self.reload_tracker()
+        return True
+
+    def reload_tracker(self, quiet=False):
+        """Re-resolve the tracker after its setting changed, and redraw what reads it.
+        `quiet` returns without touching the window when the tracker is unchanged."""
+        from .tracker import locate_vanilla_repo
+        repo, missing = locate_vanilla_repo(self.mod_root, self.tracker_override)
+        if quiet and str(repo or "") == self.vanilla_repo:
+            return
+        self.vanilla_repo = str(repo) if repo else ""
+        self.missing_tracker = missing
+        if self.snapshot_card.hint is not None:
+            self.snapshot_card.hint.setText(self._tracker_line())
+        if self.tracker_override:
+            self._settings_note(f"Saved. This window keeps the tracker it was opened with, "
+                                f"--vanilla-repo {self.tracker_override}.")
+        self.load_commits()
+        self._set_busy(self.process is not None)
+        self.refresh_store_views()
 
     def _build_output_page(self):
         page, lay = self._page()
@@ -1540,9 +1734,8 @@ class MainWindow(QMainWindow):
         left = QVBoxLayout()
         left.setSpacing(14)
 
-        card, v = self._card("Foundations", "Dependencies that load before the mod, in this order; drag a row "
-                                            "to reorder. A run compares the mod against vanilla and these "
-                                            "together. You set the order; players need the same order.")
+        card, v = self._card("Foundations", "Add the mods yours loads after, then drag them into the load "
+                                            "order you want players to use.")
         self.foundation_tree = SourceTree()
         self.foundation_tree.setHeaderLabels(["Id", "Kind", "Folder", "Status"])
         self.foundation_tree.reordered.connect(self._foundations_reordered)
@@ -1553,8 +1746,9 @@ class MainWindow(QMainWindow):
         v.addWidget(self.foundation_tree, 1)
         left.addWidget(card, 1)
 
-        card, v = self._card("Adopted sources", "Mods whose code this mod absorbed. A rename rule reads a name "
-                                                "or file name starting with one prefix as starting with another.")
+        card, v = self._card("Adopted sources", "Add a mod yours took code from to follow its updates. Add a "
+                                                "rule when you renamed what you took, from its prefix to "
+                                                "yours.")
         self.adopted_tree = QTreeWidget(objectName="dataTree")
         self.adopted_tree.setRootIsDecorated(False)
         self.adopted_tree.setHeaderLabels(["Id", "Kind", "Folder", "Renames", "Status"])
@@ -1586,7 +1780,10 @@ class MainWindow(QMainWindow):
         actions.addWidget(add_f)
         actions.addWidget(add_a)
         actions.addStretch(1)
-        actions.addWidget(QLabel("Read as"))
+        read_as = QLabel("Read as")
+        read_as.setToolTip("Read this source's folder as a git repository, so its own history is "
+                           "used, or as plain files snapshotted here")
+        actions.addWidget(read_as)
         self.kind_combo = QComboBox()
         for label, kind in (("detected", "auto"), ("git", "git"), ("folder", "folder")):
             self.kind_combo.addItem(label, kind)
@@ -1606,8 +1803,8 @@ class MainWindow(QMainWindow):
 
         right = QVBoxLayout()
         right.setSpacing(14)
-        card, v = self._card("Versions", "The vanilla patch each version belongs to; a version without one is "
-                                         "left out of runs. Select a run of versions to give them one patch.")
+        card, v = self._card("Versions", "Select the versions that shipped for one vanilla patch, then "
+                                         "Assign patch. Versions without one sit out of runs.")
         self.version_tree = QTreeWidget(objectName="dataTree")
         self.version_tree.setRootIsDecorated(False)
         self.version_tree.setHeaderLabels(["Version", "Patch", "How"])
@@ -1624,9 +1821,8 @@ class MainWindow(QMainWindow):
         v.addLayout(assign)
         right.addWidget(card, 1)
 
-        card, v = self._card("Suggestions", "Installed folders whose id matches a dependency the mod declares, "
-                                            "and local git repositories that can stand in for one. Nothing is "
-                                            "added until you choose it.")
+        card, v = self._card("Suggestions", "Installed folders matching a dependency this mod declares. Add "
+                                            "one, or stop it being suggested.")
         self.suggestion_list = QListWidget()
         OverlayScrollBar(self.suggestion_list)
         v.addWidget(self.suggestion_list, 1)
@@ -1640,8 +1836,8 @@ class MainWindow(QMainWindow):
         v.addLayout(buttons)
         right.addWidget(card, 1)
 
-        card, v = self._card("Orphaned sources", "Stored sources no mod chooses any more; removing one deletes "
-                                                 "its snapshots' references, patches and caches.")
+        card, v = self._card("Orphaned sources", "Remove stored sources no mod uses any more. Their "
+                                                 "snapshots and patch assignments go with them.")
         self.orphan_source_list = QListWidget()
         v.addWidget(self.orphan_source_list, 1)
         self.orphan_sources_button = QPushButton("Remove orphaned sources")
@@ -1688,7 +1884,7 @@ class MainWindow(QMainWindow):
 
     def load_commits(self):
         try:
-            self.commits = get_commits(self.vanilla_repo)
+            self.commits = get_commits(self.vanilla_repo) if self.vanilla_repo else []
         except Exception:
             self.commits = []
         self.snapshot_tree.clear()
@@ -1705,7 +1901,8 @@ class MainWindow(QMainWindow):
             i = combo.findData(keep)
             combo.setCurrentIndex(i if i >= 0 else 0)
             combo.blockSignals(False)
-        self.status_right.setText(f"vanilla-tracker · {len(self.commits)} snapshots")
+        n = len(self.commits)
+        self.status_right.setText(f"{self._tracker_name()} · {n} snapshot{'' if n == 1 else 's'}")
         self._update_window_label()
 
     def _update_window_label(self):
@@ -1748,7 +1945,7 @@ class MainWindow(QMainWindow):
             item = QTreeWidgetItem([e["id"], e["name"], e["label"], detail, e["on"], e["reason"]])
             item.setData(0, ROLE, e["fid"])
             self.dismissed_tree.addTopLevelItem(item)
-        self.rail_group.button(1).setToolTip(f"Dismissed ({len(entries)})")
+        self.rail_group.button(1).setToolTip(f"{RAIL_PAGES[1][1]} ({len(entries)})")
         self.orphan_list.clear()
         self.orphan_list.addItems([str(p) for p in self.orphans])
         self._render_banners()
@@ -1760,6 +1957,11 @@ class MainWindow(QMainWindow):
 
     def _open_page(self, index):
         self.pages.setCurrentIndex(index)
+        if index == 5:
+            config.invalidate()      # a --set from a terminal since the window opened
+            self.refresh_settings()
+            if self.process is None:
+                self.reload_tracker(quiet=True)
         if index == 4:
             from . import sources
             self._in_background("source suggestions", lambda: sources.refresh_scan(self.mod_root),
@@ -1822,7 +2024,7 @@ class MainWindow(QMainWindow):
             self.pending_base = None
         has_source = bool(chosen)
         self.base_row.setVisible(has_source)
-        self.rail_group.button(4).setToolTip(f"Sources ({len(chosen)})")
+        self.rail_group.button(4).setToolTip(f"{RAIL_PAGES[4][1]} ({len(chosen)})")
 
     def _fill_versions(self):
         self.version_tree.clear()
@@ -1882,6 +2084,8 @@ class MainWindow(QMainWindow):
         """Run one sources.py action, as its command-line option does, then re-read the
         stored choices. Returns True when it was done."""
         from .sources import SourceError
+        if not self._has_tracker():
+            return False
         if not args or args[0] is None:
             self._sources_note("Select a source first.", error=True)
             return False
@@ -1896,10 +2100,19 @@ class MainWindow(QMainWindow):
         self.refresh_store_views()
         return True
 
+    def _has_tracker(self):
+        """True when a tracker is in use; otherwise it says where to choose one."""
+        if self.vanilla_repo:
+            return True
+        self._sources_note("Choose a tracker in Settings first.", error=True)
+        return False
+
     def add_source_folder(self, path, role, kind=None, replace=None):
         """Add a folder as a source. `replace` None asks before replacing a chosen source
         with the same id, or before relocating one whose folder is gone."""
         from . import sources
+        if not self._has_tracker():
+            return False
         try:
             messages = sources.add_source(self.mod_root, path, role, kind, bool(replace), self.vanilla_repo)
         except sources.SourceError as e:
@@ -2132,6 +2345,15 @@ class MainWindow(QMainWindow):
         for w in (self.run_button, self.run_arrow, self.restore_button, self.snapshot_button,
                   self.orphan_button, self.source_snapshot_button, self.orphan_sources_button):
             w.setEnabled(not busy)
+        for w in (self.run_button, self.run_arrow):
+            if not self.vanilla_repo:
+                w.setEnabled(False)
+                w.setToolTip("Choose a tracker in Settings, or take the first snapshot")
+            else:
+                w.setToolTip("")
+        # Settings are not edited while a run is reading the tracker they name.
+        for w in self.setting_buttons:
+            w.setEnabled(not busy)
         self.stop_button.setVisible(busy)
         self.busy_bar.setVisible(busy)
         if text:
@@ -2154,13 +2376,20 @@ class MainWindow(QMainWindow):
         self.process = proc
         self.last_line = ""
         self.log.appendPlainText(f"\n$ pdx-audit {' '.join(argv)}")
+        self.log_fresh = True       # the first output of this run starts its own line
         self._set_busy(True, text)
+        # With no tracker, --snapshot is the one command that runs: it creates the repo
+        # where the settings say, so the flag is left off for it to resolve that itself.
+        tracker = ["--vanilla-repo", self.vanilla_repo] if self.vanilla_repo else []
         proc.start(sys.executable, ["-m", "pdxaudit.cli", "--mod-root", str(self.mod_root),
-                                    "--vanilla-repo", self.vanilla_repo, "--color", "never", *argv])
+                                    *tracker, "--color", "never", *argv])
 
     def _read(self, data):
         text = bytes(data).decode("utf-8", "replace").replace("\r", "\n")
         self.log.moveCursor(self.log.textCursor().MoveOperation.End)
+        if self.log_fresh:
+            self.log.insertPlainText("\n")
+            self.log_fresh = False
         self.log.insertPlainText(text)
         lines = [line.strip() for line in text.split("\n") if line.strip()]
         if lines:
@@ -2200,6 +2429,11 @@ class MainWindow(QMainWindow):
     # --- runs -----------------------------------------------------------------
 
     def start_run(self):
+        if not self.vanilla_repo:
+            self._go_to_page(5)
+            self._settings_note("Choose a tracker, or take the first snapshot on the Tracker page.",
+                                error=True)
+            return
         path = self.store.results_path
         path.parent.mkdir(parents=True, exist_ok=True)
         self.run_banners = []
@@ -2306,6 +2540,10 @@ class MainWindow(QMainWindow):
                 w.hide()
                 w.deleteLater()
         banners = list(self.run_banners)
+        if not self.vanilla_repo:
+            banners.append(("error", "No vanilla tracker yet. Choose one in Settings, or take the "
+                            "first snapshot on the Tracker page.", "Settings",
+                            lambda: self._go_to_page(5)))
         if self.orphans:
             banners.append(("warn", f"{len(self.orphans)} findings record(s) for this mod point at "
                             f"commits on no branch of this repository.", "Review and remove",
@@ -2766,7 +3004,10 @@ class MainWindow(QMainWindow):
         self._start(argv, self._snapshot_done, f"Taking snapshot {tag}…")
 
     def _snapshot_done(self, code):
-        self.load_commits()
+        if not self.vanilla_repo:
+            self.reload_tracker()    # the first snapshot creates the tracker, which reloads them
+        else:
+            self.load_commits()
         if code != 0:
             self._job_failed(f"The snapshot was not taken: {self.last_line}")
             return
