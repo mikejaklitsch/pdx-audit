@@ -18,8 +18,7 @@ from . import session
 from .config import cfg, config_file, setting, SETTINGS
 from .safety import remove_file, RefusedRemoval
 
-# Every cache file name pdx-audit writes under a source's cache folder. A source
-# other than vanilla prefixes its storage key.
+# pdx-audit writes cache files with these names in the cache folder of the tracker.
 CACHE_FILE_RE = r"(?:blocks|gui|vocab|dupes)-v\d+-[0-9a-f]{40}(?:-[0-9a-f]{12})?\.json"
 
 # The one temporary file --snapshot creates, inside the tracker repo itself.
@@ -70,20 +69,8 @@ def find_vanilla_repo(mod_root: Path, override: str | None = None) -> Path:
         sys.exit(1)
     return repo
 
-class Message(str):
-    """A version's message carrying its tag, for a tag that is not the message's
-    first word (a foundation point's `<source id> <version>`)."""
-
-    def __new__(cls, text, tag=None):
-        obj = super().__new__(cls, text)
-        obj.tag = tag
-        return obj
-
 def tag_of(msg):
-    """A version's tag: the one its Message carries, or its message's first word."""
-    tag = getattr(msg, "tag", None)
-    if tag:
-        return tag
+    """Returns the tag of a version. The tag is the first word of its message."""
     parts = (msg or "").split()
     return parts[0] if parts else ""
 
@@ -153,34 +140,29 @@ def _cat_file(vanilla_repo, ids, timeout):
 
 _CACHE_HASH_RE = re.compile(r"-([0-9a-f]{40})[-.]")
 
-def cache_location(source):
-    """(git directory, cache folder, file name prefix) for a source's parsed-index
-    cache. A path is the vanilla tracker, whose cache sits beside it."""
-    if hasattr(source, "cache_dir"):
-        return source.git_dir, Path(source.cache_dir), source.cache_prefix
-    return source, Path(source).parent / "cache", ""
+def cache_dir_of(vanilla_repo):
+    """Returns the cache folder of the tracker. This folder is next to the tracker."""
+    return Path(vanilla_repo).parent / "cache"
 
-def cache_path(source, name):
-    """The cache file `name` (a CACHE_FILE_RE name) of a source."""
-    _git_dir, folder, prefix = cache_location(source)
-    return folder / f"{prefix}{name}"
+def cache_path(vanilla_repo, name):
+    """Returns the path of the cache file `name` in the cache folder of the tracker."""
+    return cache_dir_of(vanilla_repo) / name
 
-def prune_cache(source):
-    """Delete a source's cache files for commits no longer in its repository."""
-    git_dir, cache_dir, prefix = cache_location(source)
-    if not cache_dir.is_dir() or not git_dir:
+def prune_cache(vanilla_repo):
+    """Deletes each cache file of a commit that is no longer in the tracker."""
+    cache_dir = cache_dir_of(vanilla_repo)
+    if not cache_dir.is_dir() or not vanilla_repo:
         return
-    live = set(git(git_dir, "rev-list", "--all").split())
+    live = set(git(vanilla_repo, "rev-list", "--all").split())
     if not live:
         return
-    pattern = re.escape(prefix) + CACHE_FILE_RE
-    for fp in cache_dir.glob(f"{prefix}*.json"):
-        if not re.fullmatch(pattern, fp.name):
+    for fp in cache_dir.glob("*.json"):
+        if not re.fullmatch(CACHE_FILE_RE, fp.name):
             continue
-        m = _CACHE_HASH_RE.search(fp.name[len(prefix):])
+        m = _CACHE_HASH_RE.search(fp.name)
         if m and m.group(1) not in live:
             try:
-                remove_file(fp, cache_dir, pattern)
+                remove_file(fp, cache_dir, CACHE_FILE_RE)
             except (RefusedRemoval, OSError):
                 pass
 

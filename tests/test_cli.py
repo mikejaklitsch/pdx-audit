@@ -283,23 +283,21 @@ def test_show_dismissed_when_empty(cli):
 
 @pytest.fixture
 def cfg_cli(cli, tmp_path, monkeypatch):
-    """`cli` with the config files under tmp_path, so --set writes nothing real."""
-    monkeypatch.delenv("PDX_AUDIT_CONFIG", raising=False)
+    """`cli` with the config file under tmp_path, so --set writes nothing real."""
     monkeypatch.delenv("PDX_GAME_ROOT", raising=False)
-    home, data, repo = (tmp_path / n for n in ("home.json", "data.json", "repo.json"))
-    monkeypatch.setattr(config, "_home_config", lambda: home)
+    data = tmp_path / "data.json"
     monkeypatch.setattr(config, "writable_path", lambda: data)
-    monkeypatch.setattr(config, "_repo_config", lambda: repo)
+    monkeypatch.setattr(config, "_former_paths", lambda: [])
     monkeypatch.setattr(config, "_CACHE", None)
-    cli.config = types.SimpleNamespace(home=home, data=data, repo=repo)
+    cli.config = types.SimpleNamespace(data=data)
     return cli
 
 
-def test_config_lists_settings_and_files(cfg_cli):
+def test_config_lists_every_setting_and_the_one_file(cfg_cli):
     code, out, _ = cfg_cli("--config")
     assert code == 0
     assert "`vanilla_repo`" in out and "`patch_name`" in out
-    assert str(cfg_cli.config.data) in out and "written by --set and the app" in out
+    assert f"Config file: {cfg_cli.config.data}" in out and "(not present)" in out
 
 
 def test_set_and_unset_a_tracker_under_any_name(cfg_cli, tmp_path):

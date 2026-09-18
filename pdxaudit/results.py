@@ -19,8 +19,8 @@ from . import ledger
 from .config import should_skip
 from .diff3 import CONFLICT_KINDS, norm_value
 from .overrides import _brace_extract, find_overrides
-from .report import (KIND, SEV_INFO, Finding, _is_value_finding, adopted_base, change_kind, line_label,
-                     upstream_text, value_pair)
+from .report import (KIND, SEV_INFO, Finding, _is_value_finding, change_kind, line_label,
+                     value_pair)
 from .store import open_store
 from .worddiff import word_spans
 
@@ -34,8 +34,7 @@ def _split_location(loc):
 
 
 def build_payload(findings, *, mod_name="", old_msg="", new_msg="", new_tag="",
-                  selected=(), dismissed=0, triage="", details=(), warnings=(), patch_tags=None, adopted=(),
-                  window=""):
+                  selected=(), dismissed=0, triage="", details=(), warnings=(), window=""):
     """The app's view of one run. `findings` are the visible (not dismissed)
     findings; informational ones are counted, not listed. A target's block view (a
     GUI definition, GUI file, REPLACE or INJECT block) is stored once under
@@ -58,15 +57,11 @@ def build_payload(findings, *, mod_name="", old_msg="", new_msg="", new_tag="",
             block_of[id(f)] = bid
 
     records, info = [], 0
-    patch_tags = set(patch_tags) if patch_tags else ({new_tag} if new_tag else set())
     for f in findings:
         sev, audit, label, fix = KIND[f.kind]
         if sev == SEV_INFO:
             info += 1
             continue
-        who = adopted_base(f, adopted)
-        if who:
-            audit, label, fix = "adopted", upstream_text(label, who), upstream_text(fix, who)
         fid = ledger.finding_id(f)
         file, line = _split_location(f.location)
         rec = {"fid": fid, "id": ledger.short_id(fid), "kind": f.kind, "name": f.name,
@@ -74,13 +69,7 @@ def build_payload(findings, *, mod_name="", old_msg="", new_msg="", new_tag="",
                "location": f.location or "", "file": file, "line": line,
                "detail": f.detail or "", "key": f.key, "since": f.since or "",
                "base": f.base or "", "dismissible": ledger.is_dismissible(f),
-               "earlier": bool(patch_tags and f.since and f.since not in patch_tags and not who)}
-        if (f.key or {}).get("base"):
-            rec["source"] = f.key["base"]
-        layers = sorted({c["layer"] for c in (f.data or {}).get("changes") or []
-                         if c.get("layer") and c.get("fid") == fid})
-        if layers:
-            rec["layer"] = ", ".join(layers)
+               "earlier": bool(new_tag and f.since and f.since != new_tag)}
         if id(f) in block_of:
             rec["block"] = block_of[id(f)]
         elif f.data:
@@ -166,23 +155,14 @@ def dismissed_entries(mod_root):
 
 
 def store_views(mod_root):
-    """(dismissals, orphaned record files, sources view) for the app's Dismissed,
-    Tracker and Sources pages, read fresh from the findings record and the stored
-    source choices. The sources view is sources.sources_view without a new scan,
-    or None when the mod has no usable id."""
-    from . import sources
-    try:
-        view = sources.sources_view(mod_root, refresh=False)
-    except sources.SourceError:
-        view = None
-    if view is not None:
-        # Suggestions out of date: the note a run prints, which the app shows as a notice.
-        view["stale_suggestions"] = not view["scan_current"] and bool(sources.suggestion_note(mod_root))
+    """Returns (dismissals, orphaned record files) for the app.
+
+    The Dismissed page and the Tracker page of the app show this data. The function
+    reads the findings record again at each call."""
     store, _err = open_store(mod_root)
     if store is None:
-        return [], [], view
-    return (_dismissed_entries(store),
-            [store.commits_dir / f"{h}.json" for h in store.orphans()], view)
+        return [], []
+    return _dismissed_entries(store), [store.commits_dir / f"{h}.json" for h in store.orphans()]
 
 
 def _dismissed_entries(store):
@@ -206,11 +186,6 @@ def run_argv(options):
     for flag in ("old", "new", "block", "category"):
         if options.get(flag):
             argv += [f"--{flag}", options[flag]]
-    base = options.get("base") or ""
-    if base == "vanilla":
-        argv.append("--vanilla-only")
-    elif base.startswith("adopted:"):
-        argv += ["--adopted", base.split(":", 1)[1]]
     return argv
 
 
@@ -308,8 +283,6 @@ def block_rows(block):
             row = _row(None, base + unit * depths[k] + text.lstrip(), True)
             row.update(mark=change["mark"], sign="+", fid=change["fid"], id=ledger.short_id(change["fid"] or ""),
                        cause=_cause(change.get("kind")))
-            if change.get("layer"):
-                row["layer"] = change["layer"]
             out.append(row)
         under.setdefault(anchor, []).extend(out)
         return out
@@ -329,8 +302,6 @@ def block_rows(block):
                 row["sign"] = "-"
                 row["fid"] = row["fid"] or c["fid"]
                 row["id"] = ledger.short_id(row["fid"] or "")
-                if c.get("layer"):
-                    row["layer"] = row.get("layer") or c["layer"]
             if c["vanilla"] is None or inside:
                 continue
             shown.append((c["first"], c["last"]))
@@ -339,8 +310,6 @@ def block_rows(block):
                 ghost = _row(None, text[:start] + c["vanilla"] + text[end:], True)
                 ghost.update(mark=c["mark"], sign="+", fid=c["fid"], id=ledger.short_id(c["fid"] or ""),
                              cause=_cause(c.get("kind")))
-                if c.get("layer"):
-                    ghost["layer"] = c["layer"]
                 under.setdefault(c["last"], []).append(ghost)
                 mine, theirs = word_spans(text[start:end], c["vanilla"])
                 rows[c["first"] - first]["emph"] = [(a + start, b + start) for a, b in mine]
@@ -407,6 +376,28 @@ def _slide(ops, base, side):
         k = max(end, k + 1)
 
 
+def _partners(pending, dels, base, side):
+    """Which base line each added line replaces, for one run of deletions and additions.
+
+    Blank and comment-only lines are left out, because two copies of one block lay it
+    out differently, and a blank line replaces nothing. What is left pairs in order when
+    the two counts agree. Otherwise each added line pairs with a deleted line that sets
+    the same key, so a run that adds one line and changes another still pairs the one it
+    changed."""
+    adds = [j for j in pending if side[j]]
+    drops = [i for i in dels if base[i]]
+    if len(adds) == len(drops):
+        return dict(zip(adds, drops))
+    out, taken = {}, set()
+    for j in adds:
+        key = side[j].split(" ", 1)[0]
+        hit = next((i for i in drops if i not in taken and base[i].split(" ", 1)[0] == key), None)
+        if hit is not None:
+            out[j] = hit
+            taken.add(hit)
+    return out
+
+
 def _diff(base, side):
     """(same, deleted, inserted, partner) from compared lines `base` to `side`: same maps
     a base index to the side index that keeps it; deleted holds base indexes the side
@@ -427,8 +418,7 @@ def _diff(base, side):
             pending.append(j)
             continue
         if pending:
-            if len(dels) == len(pending):
-                partner.update(zip(pending, dels))
+            partner.update(_partners(pending, dels, base, side))
             inserted.setdefault(i, []).extend(pending)
             pending, dels = [], []
         if kind == "same":
@@ -438,8 +428,7 @@ def _diff(base, side):
             deleted.add(i)
             dels.append(i)
     if pending:
-        if len(dels) == len(pending):
-            partner.update(zip(pending, dels))
+        partner.update(_partners(pending, dels, base, side))
         inserted.setdefault(len(base), []).extend(pending)
     return same, deleted, inserted, partner
 
@@ -527,11 +516,44 @@ def side_rows(block):
                      "fid": hit["fid"] if hit else None, "id": ledger.short_id(hit["fid"] or "") if hit else None,
                      "cause": _cause(hit["kind"]) if hit else None})
 
-    for i in range(len(base) + 1):
-        added = {side: diffs[side][2].get(i, []) for side in texts}
-        for k in range(max(len(added["left"]), len(added["right"]))):
-            row(*(kept_or_added(side, added[side][k], "add") if k < len(added[side]) else None
+    # An added line belongs beside the base line it replaces, so the two sides put their
+    # replacements of one base line on one row. Each side is compared with the base on
+    # its own, and one side can keep a blank line the other drops, which puts the same
+    # replacement at a different place in the base. Its partner is the same on both
+    # sides, so the partner and not that place decides where the line goes.
+    anchored = {}
+    for side in texts:
+        at = {}
+        for i, js in sorted(diffs[side][2].items()):
+            for j in js:
+                p = diffs[side][3].get(j)
+                at.setdefault(i if p is None else p + 1, []).append(j)
+        anchored[side] = at
+
+    def added_rows(i):
+        """The rows for the lines the sides add at base line `i`, each side in the order
+        of its own file. Two lines that replace the same base line share a row. A line
+        that replaces nothing, which is blank or comment only, waits for no other line."""
+        here = {side: anchored[side].get(i, []) for side in texts}
+        at = dict.fromkeys(texts, 0)
+        while any(at[side] < len(here[side]) for side in texts):
+            head = {s: here[s][at[s]] if at[s] < len(here[s]) else None for s in texts}
+            p = {s: diffs[s][3].get(head[s]) if head[s] is not None else None for s in texts}
+            take = {s: head[s] is not None for s in texts}
+            for side, other in (("left", "right"), ("right", "left")):
+                if head[side] is None or p[side] is None or head[other] is None:
+                    continue
+                if p[other] is None:
+                    take[side] = False                      # the other line replaces nothing
+                elif p[side] != p[other]:
+                    take[side] = p[side] < p[other]         # the earlier base line first
+            row(*(kept_or_added(side, head[side], "add") if take[side] else None
                   for side in ("left", "right")))
+            for side in texts:
+                at[side] += take[side]
+
+    for i in range(len(base) + 1):
+        added_rows(i)
         if i < len(base):
             row(*(kept_or_added(side, diffs[side][0][i], "same") if i in diffs[side][0] else deleted(side, i)
                   for side in ("left", "right")))
@@ -539,13 +561,22 @@ def side_rows(block):
     for c in block["changes"]:
         if c["fid"] and c["mark"]:
             strongest[c["fid"]] = "stale" if "stale" in (c["mark"], strongest.get(c["fid"])) else c["mark"]
+    # A run of rows that no finding claims, between two rows of one finding, belongs to
+    # it: a blank line, or a line only your copy changed, inside the block the finding
+    # covers. The view draws one outline around each run of a finding's rows, so leaving
+    # these out breaks one block into several boxes. It joins them when the view shows
+    # all of them anyway (hidden_span), so the outline costs no lines and follows what
+    # you can see. A run the view folds still divides the finding, and so does a run of
+    # blank lines, which needs no outline of its own.
     quiet = lambda r: all(c is None or c["quiet"] for c in (r["left"], r["right"]))
     k = 0
     while k < len(rows):
         end = k
-        while end < len(rows) and rows[end]["fid"] is None and quiet(rows[end]):
+        while end < len(rows) and rows[end]["fid"] is None:
             end += 1
-        if end > k and k > 0 and end < len(rows) and rows[k - 1]["fid"] and rows[k - 1]["fid"] == rows[end]["fid"]:
+        joins = hidden_span(end - k, True, True) is None or all(quiet(r) for r in rows[k:end])
+        if (end > k and k > 0 and end < len(rows) and joins
+                and rows[k - 1]["fid"] and rows[k - 1]["fid"] == rows[end]["fid"]):
             for r in rows[k:end]:
                 r.update(fid=rows[end]["fid"], id=rows[end]["id"], cause=rows[end]["cause"])
         k = max(end, k + 1)
@@ -604,6 +635,21 @@ def flatten_rows(rows):
     return out
 
 
+# A stretch of unmarked rows shows `FOLD_KEEP` of them beside a marked row, and folds
+# only when `FOLD_MIN_HIDDEN` of them are left over. `hidden_span` is the one place that
+# applies this, so what the view shows and what a finding covers cannot disagree.
+FOLD_KEEP, FOLD_MIN_HIDDEN = 3, 6
+
+
+def hidden_span(length, after_mark, before_mark, keep=FOLD_KEEP, min_hidden=FOLD_MIN_HIDDEN):
+    """(first, last) of the rows a stretch of `length` unmarked rows folds away, or None
+    when the whole stretch stays on screen. `after_mark` and `before_mark` say whether a
+    marked row sits on that side of it, which is where the context lines are kept."""
+    first = keep if after_mark else 0
+    last = length - (keep if before_mark else 0)
+    return (first, last) if last - first >= min_hidden else None
+
+
 def _fold_label(rows):
     """What a fold hides: its lines, and how many side-by-side rows among them add or
     delete something."""
@@ -613,7 +659,7 @@ def _fold_label(rows):
             else f"{len(rows)} unchanged lines")
 
 
-def fold_rows(rows, keep=3, min_hidden=6):
+def fold_rows(rows, keep=FOLD_KEEP, min_hidden=FOLD_MIN_HIDDEN):
     """rows with each long stretch of unmarked lines folded into one
     {"fold": [hidden rows], "label": what it hides} row. The `keep` lines next to a
     marked line stay visible as context; a stretch that reaches the start or end of
@@ -621,15 +667,14 @@ def fold_rows(rows, keep=3, min_hidden=6):
     out, run = [], []
 
     def flush(after_mark, before_mark):
-        lead = keep if after_mark else 0
-        tail = keep if before_mark else 0
-        hidden = run[lead:len(run) - tail]
-        if len(hidden) >= min_hidden:
-            out.extend(run[:lead])
-            out.append({"fold": hidden, "label": _fold_label(hidden)})
-            out.extend(run[len(run) - tail:])
-        else:
+        span = hidden_span(len(run), after_mark, before_mark, keep, min_hidden)
+        if span is None:
             out.extend(run)
+        else:
+            first, last = span
+            out.extend(run[:first])
+            out.append({"fold": run[first:last], "label": _fold_label(run[first:last])})
+            out.extend(run[last:])
         run.clear()
 
     seen_mark = False

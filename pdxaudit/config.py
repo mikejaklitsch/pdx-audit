@@ -1,12 +1,11 @@
 """Optional JSON config for stable per-machine settings.
 
-Precedence for any setting: CLI flag > environment variable > config file >
-built-in default. The config file is the first of these that exists:
+There is one config file, `<data folder>/config.json`. It sits beside the findings
+records, so it outlives a reinstall of the tool. `--set`, `--unset` and the Settings
+page of the app all write that one file.
 
-    $PDX_AUDIT_CONFIG            (explicit path, if set)
-    $XDG_CONFIG_HOME/pdx-audit.json, or ~/.config/pdx-audit.json
-    <data folder>/config.json    (written by --set and by the app)
-    <repo>/config.json           (next to the tool)
+Precedence for any setting: CLI flag > environment variable > config file >
+built-in default.
 
 Recognized keys:
     vanilla_repo   path to the vanilla-tracker bare git repo, under any name
@@ -18,10 +17,6 @@ Recognized keys:
                    ones worked out from vanilla
 
 Unknown keys are ignored. See config.sample.json for an example.
-
-`--set`, `--unset` and the app's Settings page write the data folder's file
-through set_value and unset_value; the files above it are only ever read, so a
-setting one of them pins keeps winning and set_value says so.
 """
 import json
 import os
@@ -62,56 +57,52 @@ class ConfigError(Exception):
     """A key or value --set cannot store."""
 
 
-def _home_config():
-    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(base) / "pdx-audit.json"
-
-
-def _repo_config():
-    return Path(__file__).resolve().parent.parent / "config.json"
-
-
-def _candidate_paths():
-    """Every config file, in the order they are read. The first that exists provides
-    every setting."""
-    paths = []
-    env = os.environ.get("PDX_AUDIT_CONFIG")
-    if env:
-        paths.append(Path(env))
-    paths.append(_home_config())
-    paths.append(writable_path())
-    paths.append(_repo_config())
-    return paths
+# Where earlier versions also read a config file. Nothing reads these now; they are
+# named so that a run says where a file has been left behind, and can be dropped once
+# no one has one.
+def _former_paths():
+    home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return [Path(home) / "pdx-audit.json", Path(__file__).resolve().parent.parent / "config.json"]
 
 
 def writable_path():
-    """The config file --set and the app write: one per user, beside the findings
-    records, so it outlives reinstalling the tool."""
+    """The one config file. It sits beside the findings records, so it outlives
+    reinstalling the tool, and `--set` and the app write it."""
     from .store import data_root
     return data_root() / "config.json"
 
 
+def stale_config_note():
+    """A note naming a config file from an earlier version that nothing reads now, or
+    None. The settings in it do not apply, and saying so beats losing them quietly."""
+    left = [p for p in _former_paths() if p.is_file()]
+    if not left or writable_path().is_file():
+        return None
+    return (f"Note: pdx-audit reads one config file, {writable_path()}, which does not exist yet. "
+            f"{left[0]} is left over from an earlier version and no longer applies. Move its "
+            f"settings with `pdx-audit --set <key> <value>`.")
+
+
 def load_config():
-    """The parsed config dict of the first file found, or {} if there is none. A file
-    that cannot be read as a JSON object is reported on stderr and its settings are
-    ignored; later candidates are not read. Cached for the process."""
+    """The settings in the config file, or {} when it does not exist. A file that does
+    not read as a JSON object is reported on stderr and its settings are ignored.
+    Cached for the process."""
     global _CACHE, _FILE
     if _CACHE is not None:
         return _CACHE
     _CACHE, _FILE = {}, None
-    for p in _candidate_paths():
-        if not p.is_file():
-            continue
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
-            print(f"Warning: could not read the config file {p}: {e}. Its settings are ignored.", file=sys.stderr)
-            break
-        if isinstance(data, dict):
-            _CACHE, _FILE = data, p
-        else:
-            print(f"Warning: the config file {p} is not a JSON object. Its settings are ignored.", file=sys.stderr)
-        break
+    p = writable_path()
+    if not p.is_file():
+        return _CACHE
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"Warning: could not read the config file {p}: {e}. Its settings are ignored.", file=sys.stderr)
+        return _CACHE
+    if isinstance(data, dict):
+        _CACHE, _FILE = data, p
+    else:
+        print(f"Warning: the config file {p} is not a JSON object. Its settings are ignored.", file=sys.stderr)
     return _CACHE
 
 
@@ -122,7 +113,7 @@ def invalidate():
 
 
 def config_file():
-    """The config file in effect, or None when no candidate exists."""
+    """The config file, or None when it does not exist."""
     load_config()
     return _FILE
 
@@ -178,19 +169,11 @@ def _write_writable(data):
 
 
 def _outranking(key):
-    """A message naming what still wins over the file just written, or None. One
-    config file provides every setting, so an earlier file that exists shadows this
-    one whether or not it names the key."""
+    """A message naming what still wins over the setting just written, or None."""
     env_name = SETTINGS[key].get("env")
     if env_name and os.environ.get(env_name):
-        return (f"Note: ${env_name} is set to {os.environ[env_name]} and outranks every config file, "
+        return (f"Note: ${env_name} is set to {os.environ[env_name]} and outranks the config file, "
                 f"so runs keep using it until it is unset.")
-    for p in _candidate_paths():
-        if p == writable_path():
-            return None
-        if p.is_file():
-            return (f"Note: {p} is read instead of this file, so this setting does not apply to "
-                    f"runs yet. Move that file's settings into this one, or remove it.")
     return None
 
 
@@ -236,34 +219,6 @@ _CHECKS = {"vanilla_repo": _check_tracker, "game_root": _check_game_root,
            "patch_name": _check_patch_name}
 
 
-def _seed():
-    """The settings a new data-folder file starts from, and a note about them. One
-    config file provides every setting, so creating this file shadows any file read
-    after it; its settings are copied in rather than lost."""
-    if writable_path().is_file():
-        return None, None
-    shadowed = False
-    for p in _candidate_paths():
-        if p == writable_path():
-            shadowed = True          # every later candidate is shadowed by this file
-            continue
-        if not p.is_file() or not shadowed:
-            continue
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None, None
-        if not isinstance(data, dict):
-            return None, None
-        keys = [k for k in data if k != "_note"]
-        if not keys:
-            return None, None
-        return {k: data[k] for k in keys}, (
-            f"Note: {p} is read after this file, so its settings ({', '.join(keys)}) were copied "
-            f"into it and keep applying. Edit them here from now on.")
-    return None, None
-
-
 def set_value(key, value):
     """Store one setting in the data folder's config file. Returns the messages to
     show: what was stored, and anything that still outranks it. Raises ConfigError
@@ -275,15 +230,14 @@ def set_value(key, value):
         raise ConfigError(f"{key} needs a value. `pdx-audit --unset {key}` removes the setting "
                           f"instead.")
     stored, note = _CHECKS[key](value)
-    seed, seed_note = _seed()
-    data = seed if seed else _read_writable()
-    if seed is None and data.get(key) == stored:
+    data = _read_writable()
+    if data.get(key) == stored:
         messages = [f"{key} is already {stored} in {writable_path()}."]
     else:
         data[key] = stored
         _write_writable(data)
         messages = [f"Set {key} to {stored} in {writable_path()}."]
-    for m in (seed_note, note, _outranking(key)):
+    for m in (note, _outranking(key)):
         if m:
             messages.append(m)
     return messages
@@ -310,11 +264,9 @@ def unset_value(key):
 
 
 def config_view():
-    """What --config prints and the app's Settings page shows: the files searched, and
-    each setting's value with where it comes from."""
+    """What --config prints and the Settings page of the app shows: the config file,
+    and each setting's value with where it comes from."""
     in_effect = config_file()
-    candidates = [{"path": str(p), "exists": p.is_file(), "in_effect": p == in_effect,
-                   "writable": p == writable_path()} for p in _candidate_paths()]
     try:
         stored, unreadable = _read_writable(), None
     except ConfigError as e:
@@ -332,7 +284,7 @@ def config_view():
                          "settable": key in SETTABLE, "value": value, "shown": shown,
                          "origin": origin, "stored": stored.get(key)})
     return {"file": str(in_effect) if in_effect else None, "writable": str(writable_path()),
-            "candidates": candidates, "settings": settings, "unreadable": unreadable}
+            "settings": settings, "unreadable": unreadable, "stale": stale_config_note()}
 
 
 def render_config(view):
@@ -346,13 +298,11 @@ def render_config(view):
             value = ", ".join(str(v) for v in value) if value else "(none)"
         out.append(f"- `{s['key']}`: {value if value not in (None, '') else '(unset)'}")
         out.append(f"    from {s['origin']} · {s['help']}")
-    out += ["", "Files read, in order. The first that exists provides every setting:", ""]
-    for c in view["candidates"]:
-        marks = [m for m in ("in effect" if c["in_effect"] else "",
-                             "written by --set and the app" if c["writable"] else "",
-                             "" if c["exists"] else "not present") if m]
-        out.append(f"- {c['path']}" + (f"  ({', '.join(marks)})" if marks else ""))
-    out += ["", f"To change one: `pdx-audit --set vanilla_repo /path/to/my-tracker.git`, "
+    out += ["", f"Config file: {view['writable']}"
+                + ("" if view["file"] else "  (not present)"), ""]
+    if view["stale"]:
+        out += [view["stale"], ""]
+    out += [f"To change one: `pdx-audit --set vanilla_repo /path/to/my-tracker.git`, "
                 f"or `--unset <key>`. Settable: {', '.join(SETTABLE)}.", ""]
     return "\n".join(out)
 

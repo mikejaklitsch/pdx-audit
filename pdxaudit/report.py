@@ -119,6 +119,9 @@ _CHECK = "your statement still applies as it did; dismiss the finding once you h
 _RESTORE = ("your deletion still applies as it did; dismiss the finding once you have seen vanilla's change, "
             "or copy its new version in")
 _BLOCK = "take vanilla's changes to the block, or dismiss the finding if keeping yours is deliberate"
+_RENAME = "set the new key in your copy and delete the old one, or dismiss the finding if the old key still works"
+_MOVE = ("put your statement where vanilla keeps it now, or dismiss the finding if the old place still "
+         "does what you need")
 KIND.update({
     "gui_block_changed_high": (
         SEV_STALE, "gui", "GUI blocks vanilla changed in several places, beside or over an edit of yours", _BLOCK),
@@ -148,6 +151,30 @@ KIND.update({
         _CHECK),
     "override_removed_changed_mid": (
         SEV_REVIEW, "override", "statements you deleted from your REPLACE that vanilla has since changed", _RESTORE),
+    "gui_vanilla_renamed_high": (
+        SEV_STALE, "gui", "statements vanilla moved to another key that your GUI copy still sets under the old one, "
+        "beside an edit of yours", _RENAME),
+    "override_vanilla_renamed_high": (
+        SEV_STALE, "override", "statements vanilla moved to another key that your REPLACE still sets under the old "
+        "one, beside an edit of yours", _RENAME),
+    "gui_vanilla_moved_high": (
+        SEV_STALE, "gui", "statements vanilla moved into another block that your GUI copy still sets in the "
+        "old place, beside an edit of yours", _MOVE),
+    "override_vanilla_moved_high": (
+        SEV_STALE, "override", "statements vanilla moved into another block that your REPLACE still sets in "
+        "the old place, beside an edit of yours", _MOVE),
+    "gui_vanilla_moved_mid": (
+        SEV_REVIEW, "gui", "statements vanilla moved into another block that your GUI copy still sets in the "
+        "old place", _MOVE),
+    "override_vanilla_moved_mid": (
+        SEV_REVIEW, "override", "statements vanilla moved into another block that your REPLACE still sets in "
+        "the old place", _MOVE),
+    "gui_vanilla_renamed_mid": (
+        SEV_REVIEW, "gui", "statements vanilla moved to another key that your GUI copy still sets under the old one",
+        _RENAME),
+    "override_vanilla_renamed_mid": (
+        SEV_REVIEW, "override", "statements vanilla moved to another key that your REPLACE still sets under the old "
+        "one", _RENAME),
     "gui_vanilla_changed_mid": (
         SEV_REVIEW, "gui", "statements your GUI copy keeps at an old vanilla value", _TAKE),
     "gui_vanilla_added_mid": (
@@ -199,15 +226,6 @@ KIND.update({
     "dupes_loc_key_same": (
         SEV_REVIEW, "dupes", "localization keys the mod defines more than once with the same text",
         "delete the extra copies"),
-    "adopted_unit_removed": (
-        SEV_STALE, "adopted", "units the adopted source deleted that the mod still carries",
-        "remove the unit, or keep it as your own and dismiss"),
-    "adopted_unit_added": (
-        SEV_REVIEW, "adopted", "units the adopted source added to files the mod carries",
-        "adopt the unit, or dismiss"),
-    "foundation_duplicate": (
-        SEV_REVIEW, "layer", "mod units identical to a foundation's",
-        "delete them; the foundation provides them"),
     # informational: counted, never listed
     "override_inject_context": (SEV_INFO, "override", "", ""),
     "override_nonblock": (SEV_INFO, "override", "", ""),
@@ -217,11 +235,10 @@ _KIND_ORDER = sorted(KIND, key=lambda k: _SEV_ORDER.index(KIND[k][0]))
 
 # Classes fixed file by file: the triage lists one line per mod file, naming each item in it.
 BY_FILE = frozenset({"dupes_loc_key", "dupes_loc_key_same", "dupes_on_action_syntax",
-                     "dupes_on_action_key", "adopted_unit_removed", "adopted_unit_added",
-                     "foundation_duplicate"})
+                     "dupes_on_action_key"})
 
 _AUDIT_NAME = {"overrides": "override", "deps": "dependency",
-               "gui": "GUI", "loc": "localization", "dupes": "duplicate", "adopted": "adopted source"}
+               "gui": "GUI", "loc": "localization", "dupes": "duplicate"}
 
 
 def finding_severity(f):
@@ -277,6 +294,10 @@ def value_pair(change, yours, vanilla, since, was=None):
         return "(missing)", f"added {vanilla}{tag}"
     if change == "vanilla_removed":
         return yours, f"deleted{tag}"
+    if change == "vanilla_renamed":
+        return f"**{yours}**", f"renamed to {vanilla}{tag}"
+    if change == "vanilla_moved":
+        return f"**{yours}**", f"moved into {vanilla}{tag}"
     if change == "both_changed":
         if vanilla is None:
             return f"**{yours}**", f"deleted {was}{tag}" if was is not None else f"deleted{tag}"
@@ -293,16 +314,16 @@ def _is_value_finding(f):
     return change_kind(f.kind) is not None and "yours" in (f.key or {})
 
 
-def window_heading(old_msg, new_msg, selected, history_old=None, title=None):
-    """(window, note) naming what a run compared. `history_old` is the oldest version
-    REPLACE blocks and GUI copies were compared with. When it is older than `old_msg`
-    and other audits ran too, the window is the new version alone and the note names
-    both windows; otherwise the note is None. `title` replaces the window."""
+def window_heading(old_msg, new_msg, selected, history_old=None):
+    """Returns (window, note), which give the name of what a run compared.
+
+    `history_old` is the oldest version that the run compared REPLACE blocks and GUI
+    copies with. If `history_old` is older than `old_msg`, and other audits also ran,
+    the window is the new version only. The note then gives the name of both windows.
+    In all other conditions, the note is None."""
     history = [n for s, n in (("overrides", "REPLACE blocks"), ("gui", "GUI copies")) if s in selected]
     others = [n for s, n in (("overrides", "INJECT targets"), ("deps", "dependencies"), ("loc", "localization"))
               if s in selected]
-    if title:
-        return title, None
     if history_old and history_old != old_msg and history:
         if others:
             return new_msg, (f"{' and '.join(history)} compared with every snapshot from {history_old}; "
@@ -311,64 +332,42 @@ def window_heading(old_msg, new_msg, selected, history_old=None, title=None):
     return (f"{old_msg} → {new_msg}" if old_msg or new_msg else ""), None
 
 
-def upstream_text(text, source):
-    """A class's label or remedy worded for a finding measured against an adopted
-    source rather than vanilla."""
-    return (text.replace("your GUI copy", "your copy").replace("your REPLACE", "your copy")
-            .replace("vanilla's", f"{source}'s").replace("vanilla", source))
-
-
-def adopted_base(f, adopted):
-    """The adopted source a finding is measured against, or None."""
-    base = (f.key or {}).get("base")
-    return base if base in adopted else None
-
-
 def render_triage(findings, old_msg, new_msg, selected, detail_shown=True,
-                  new_tag=None, dismissed=0, remedies=None, patch_tags=None, adopted=(), title=None,
-                  history_old=None):
-    """The cross-audit summary printed above the per-audit detail. `findings` is
-    every audit's visible (not dismissed) Finding list. Returns Markdown (one
-    string); the ColorWriter tints it when stdout is a terminal.
+                  new_tag=None, dismissed=0, history_old=None):
+    """Returns the summary of all the audits, as one Markdown string.
 
-    Findings are grouped by CLASS (severity + kind), most urgent first. Each
-    class states its description and its one shared remedy once, then lists its
-    affected items one compact line each, prefixed with the id `--dismiss`
-    takes (duplicates, which cannot be dismissed, carry none). When `new_tag`
-    is given, findings from an earlier patch than `new_tag` are listed in a
-    separate "still open" section. Informational findings are counted but not
-    detailed; `dismissed` findings are only counted.
+    The output goes above the detail of each audit. `findings` is the list of the
+    visible findings of each audit. It does not contain the dismissed findings. The
+    ColorWriter adds colour to the output if stdout is a terminal.
 
-    A target compared against more than one base (vanilla or a foundation, and an
-    adopted source) is listed once, in its own group, with each base's findings under
-    it; `remedies` maps a target to the one remedy its group shows instead.
+    The summary puts the findings in groups by CLASS (severity and kind). The most
+    urgent group is first. Each class gives its description and its one remedy one
+    time. Then the class shows each of its items on one line. Each line starts with
+    the id that `--dismiss` accepts. A duplicate has no id, because you cannot
+    dismiss it.
 
-    `patch_tags` holds every version tag that counts as this patch (in a stack, the
-    points placed on the newest vanilla version); by default it is `new_tag` alone.
-    Findings measured against a source in `adopted` get their own classes, worded
-    with that source's name, and are never split out as earlier patches, since their
-    tags belong to the source. `title` replaces the heading's version window.
+    If you give `new_tag`, the summary puts each finding from an earlier patch in a
+    different "still open" section. The summary counts the informational findings,
+    but does not show their detail. The summary only counts the `dismissed`
+    findings.
 
-    `history_old` is the oldest version REPLACE blocks and GUI copies were compared
-    with, when that is older than `old_msg`; the heading then names both windows."""
+    `history_old` is the oldest version that the run compared REPLACE blocks and GUI
+    copies with. If `history_old` is older than `old_msg`, the heading gives the name
+    of both windows."""
     from .ledger import finding_id, is_dismissible, short_id
 
     ran = ", ".join(_AUDIT_NAME.get(s, s) for s in selected)
-    window, window_line = window_heading(old_msg, new_msg, selected, history_old, title)
+    window, window_line = window_heading(old_msg, new_msg, selected, history_old)
     heading = f"# Audit summary: {window}" if window else "# Audit summary"
     lines = [heading, ""] + ([f"*{window_line}*", ""] if window_line else [])
-    adopted = set(adopted or ())
-    patch_tags = set(patch_tags) if patch_tags else ({new_tag} if new_tag else set())
 
     def label_of(f):
         _s, _a, label, fix = KIND[f.kind]
-        who = adopted_base(f, adopted)
-        return (upstream_text(label, who), upstream_text(fix, who)) if who else (label, fix)
+        return label, fix
 
     def value_lines(f):
-        who = adopted_base(f, adopted)
         yours, theirs = value_pair(change_kind(f.kind), f.key["yours"], f.key["vanilla"], f.since, f.key.get("was"))
-        return [f"      yours:    {yours}", f"      {'upstream:' if who else 'vanilla: '} {theirs}"]
+        return [f"      yours:    {yours}", f"      vanilla:  {theirs}"]
     dismissed_line = (f"{dismissed} dismissed findings hidden; list them with "
                       f"`pdx-audit --show-dismissed`." if dismissed else None)
 
@@ -390,38 +389,9 @@ def render_triage(findings, old_msg, new_msg, selected, detail_shown=True,
                  f"{counts}.{info_note}")
     lines.append("")
 
-    remedies = remedies or {}
-    target = lambda f: (f.key or {}).get("target") or f"{f.kind}:{f.name}"
-    bases_of = {}
-    for f in actionable:
-        bases_of.setdefault(target(f), set()).add((f.key or {}).get("base"))
-    multi = {t for t, bases in bases_of.items() if len(bases) > 1 or t in remedies}
-    grouped = [f for f in actionable if target(f) in multi]
-    rest = [f for f in actionable if target(f) not in multi]
-
-    earlier = [f for f in rest if patch_tags and f.since and f.since not in patch_tags
-               and not adopted_base(f, adopted)]
+    earlier = [f for f in actionable if new_tag and f.since and f.since != new_tag]
     earlier_ids = {id(f) for f in earlier}
-    current = [f for f in rest if id(f) not in earlier_ids]
-
-    if grouped:
-        lines.append("## Compared with more than one base")
-        lines.append("")
-        by_target = {}
-        for f in sorted(grouped, key=lambda x: (target(x), (x.key or {}).get("base") or "", x.kind)):
-            by_target.setdefault(target(f), []).append(f)
-        for t, items in by_target.items():
-            sym = _SEV_SYMBOL.get(min((finding_severity(f) for f in items), key=_SEV_ORDER.index), "")
-            fix = remedies.get(t)
-            lines.append(f"{sym} **`{items[0].name}`** `{items[0].location}`" + (f" Fix: {fix}." if fix else ""))
-            for f in items:
-                sid = short_id(finding_id(f)) if is_dismissible(f) else None
-                fid = f"[{sid}] " if sid else ""
-                base = (f.key or {}).get("base") or "vanilla"
-                lines.append(f"  - {fid}{base}: {label_of(f)[0]}" + (f" ({f.detail})" if f.detail else ""))
-                if _is_value_finding(f):
-                    lines.extend(value_lines(f))
-            lines.append("")
+    current = [f for f in actionable if id(f) not in earlier_ids]
 
     def section(findings_here, show_since):
         for sev in _SEV_ORDER:
@@ -429,11 +399,8 @@ def render_triage(findings, old_msg, new_msg, selected, detail_shown=True,
             for kind in _KIND_ORDER:
                 if KIND[kind][0] != sev:
                     continue
-                of_kind = [f for f in findings_here if f.kind == kind]
-                classes = {}
-                for f in of_kind:
-                    classes.setdefault(adopted_base(f, adopted), []).append(f)
-                for _who, group in sorted(classes.items(), key=lambda kv: kv[0] or ""):
+                group = [f for f in findings_here if f.kind == kind]
+                if group:
                     render_class(kind, group, sym, show_since)
 
     def render_class(kind, group, sym, show_since):
@@ -479,10 +446,9 @@ def render_triage(findings, old_msg, new_msg, selected, detail_shown=True,
                     lines.append(f'    To keep one as it is: `pdx-audit --dismiss {first_id} --reason "why"`')
                 lines.append("")
 
-    patch_title = min(patch_tags, key=len) if patch_tags else None
     if earlier:
         if current:
-            lines.append(f"## This patch{f' ({patch_title or new_tag})' if new_tag else ''} and current state")
+            lines.append(f"## This patch{f' ({new_tag})' if new_tag else ''} and current state")
             lines.append("")
             section(current, False)
         lines.append("## Still open from earlier patches")
@@ -564,7 +530,7 @@ def _inline(s):
 
 _SYMBOLS = (("✗", "red"), ("⚠", "yellow"), ("✓", "green"), ("≈", "yellow"))
 
-_VALUE_LINE = re.compile(r"^(\s+)(yours:|vanilla:|upstream:)(\s+)(.*)$")
+_VALUE_LINE = re.compile(r"^(\s+)(yours:|vanilla:)(\s+)(.*)$")
 _PATCH_TAG = re.compile(r"^(.*?)(\s+)(\([^()]*\))$")
 
 
@@ -573,7 +539,7 @@ def _render_value_line(m):
     new or added value green, the patch tag dim, your value as written."""
     indent, label, gap, rest = m.groups()
     tag = ""
-    if label in ("vanilla:", "upstream:"):
+    if label == "vanilla:":
         t = _PATCH_TAG.match(rest)
         if t:
             rest, tag = t.group(1), t.group(2) + _wrap(("dim",), t.group(3))

@@ -224,66 +224,6 @@ def test_an_empty_list_says_when_chips_hide_every_finding(window):
     assert window.empty.text() == "Select a finding to see it here."
 
 
-def test_each_sources_action_writes_what_its_command_line_option_writes(window, world, tmp_path, monkeypatch):
-    import io, sys
-    from contextlib import redirect_stderr, redirect_stdout
-    from pdxaudit.cli import main
-    from test_cli_sources import _stored
-    from test_sources import folder_source, git_source
-
-    found = git_source(tmp_path / "found", [("1.0", {}), ("1.1", {})])
-    other = git_source(tmp_path / "other", [("3.0", {})], mod_id="other")
-    fold = folder_source(tmp_path / "fold")
-
-    def cli(*argv):
-        monkeypatch.setattr(sys, "argv", ["pdx-audit", "--mod-root", str(world.mod), "--vanilla-repo", world.repo,
-                                          "--color", "never", *argv])
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            try:
-                main()
-            except SystemExit as e:
-                assert not e.code, argv
-
-    steps = [
-        (["--add-source", str(found), "--as", "foundation"], lambda: window.add_source_folder(found, "foundation")),
-        (["--add-source", str(fold), "--as", "foundation"], lambda: window.add_source_folder(fold, "foundation")),
-        (["--add-source", str(other), "--as", "adopted"], lambda: window.add_source_folder(other, "adopted")),
-        (["--move-source", "fold", "1"], lambda: window.move_foundations(["fold", "found"])),
-        (["--set-kind", "found", "folder"], lambda: window.set_source_kind("found", "folder")),
-        (["--set-kind", "found", "auto"], lambda: window.set_source_kind("found", "auto")),
-        (["--rename", "other", "old_", "new_"], lambda: window.add_rename("other", "old_", "new_")),
-        (["--unrename", "other", "old_"], lambda: window.remove_rename("other", "old_")),
-        (["--patch", "found", "1.0..1.1", "1.0.0"], lambda: window.assign_patch("found", "1.0..1.1", "1.0.0")),
-        (["--ignore-suggestion", "dep"], lambda: window.ignore_suggestion("dep")),
-        (["--remove-source", "other"], lambda: window.remove_source("other")),
-    ]
-    by_cli, by_app = tmp_path / "by-cli", tmp_path / "by-app"
-    for argv, action in steps:
-        monkeypatch.setenv("XDG_DATA_HOME", str(by_cli))
-        cli(*argv)
-        monkeypatch.setenv("XDG_DATA_HOME", str(by_app))
-        assert action() is not False, argv
-        _settle(window)
-        assert _stored(by_cli / "pdx-audit") == _stored(by_app / "pdx-audit"), argv
-
-
-def test_a_change_made_on_the_command_line_shows_in_the_open_window(window, world, tmp_path):
-    from pdxaudit import sources
-    from test_sources import git_source
-    assert window.foundation_tree.topLevelItemCount() == 0 and not window.base_combo.isVisibleTo(window.run_popup)
-    sources.add_source(world.mod, git_source(tmp_path / "found", [("1.0", {})]), "foundation",
-                       vanilla_repo=world.repo)
-    window.refresh_store_views()                 # what activating the window does
-    _settle(window)
-    assert window.foundation_tree.ids() == ["found"]
-    assert window.base_combo.isVisibleTo(window.run_popup)
-    window.set_run_choice(base="vanilla")
-    assert "--vanilla-only" in results.run_argv(window.run_options())
-    window.select_source("found")
-    assert [window.version_tree.topLevelItem(i).text(1) for i in range(window.version_tree.topLevelItemCount())] \
-        == ["1.1.0"]
-
-
 def test_a_block_with_vanillas_text_shows_side_by_side_until_switched_off(window):
     finding, = [f for f in _findings() if f.name == "some_building"]
     block = dict(finding.data, vanilla_lines=["some_building = {", "\tcost = 100", "\tupkeep = 5", "}"],
@@ -326,16 +266,6 @@ def test_a_block_is_built_off_the_ui_thread_once_and_wraps_to_the_view(window):
     assert tallest() > window.block_view.LINE
 
 
-def test_a_foundations_change_carries_a_layer_mark(window):
-    finding, = [f for f in _findings() if f.name == "some_building"]
-    block = dict(finding.data, changes=[dict(finding.data["changes"][0], layer="found")])
-    window.show_results(_payload([finding._replace(data=block)]))
-    window.select_record(window.listed_records()[0])
-    _settle(window)
-    assert any(r.get("layer") == "found" for r in window.block_view.rows)
-    assert window.layer_legend.isVisibleTo(window)
-
-
 def test_the_window_opens_before_the_mods_overrides_are_read(world, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     from pdxaudit import app as appmod
@@ -363,17 +293,15 @@ def test_the_window_opens_before_the_mods_overrides_are_read(world, tmp_path, mo
 
 @pytest.fixture
 def cfg_files(tmp_path, monkeypatch):
-    """The config files under tmp_path, so the app writes nothing real."""
+    """The config file under tmp_path, so the app writes nothing real."""
     from pdxaudit import config
-    monkeypatch.delenv("PDX_AUDIT_CONFIG", raising=False)
     for key in ("PDX_VANILLA_REPO", "PDX_GAME_ROOT", "PDX_PATCH_NAME"):
         monkeypatch.delenv(key, raising=False)
-    home, data, repo = (tmp_path / n for n in ("home.json", "data.json", "repo.json"))
-    monkeypatch.setattr(config, "_home_config", lambda: home)
+    data = tmp_path / "data.json"
     monkeypatch.setattr(config, "writable_path", lambda: data)
-    monkeypatch.setattr(config, "_repo_config", lambda: repo)
+    monkeypatch.setattr(config, "_former_paths", lambda: [])
     config.invalidate()
-    yield types.SimpleNamespace(home=home, data=data, repo=repo)
+    yield types.SimpleNamespace(data=data)
     config.invalidate()
 
 
@@ -394,9 +322,6 @@ def test_the_settings_page_shows_each_value_and_where_it_comes_from(window, cfg_
     assert set(window.setting_edits) == {"vanilla_repo", "game_root", "patch_name"}
     assert window.setting_notes["patch_name"].text() == "from the built-in default"
     assert window.setting_edits["patch_name"].text() == "Pavia"    # the value in use
-    listed = [window.config_files.item(i).text() for i in range(window.config_files.count())]
-    assert any(str(cfg_files.data) in line and "written here" in line for line in listed)
-    assert all("not present" in line for line in listed)
 
 
 def test_saving_a_tracker_writes_the_config_and_the_window_uses_it(window, cfg_files, world):
@@ -429,7 +354,7 @@ def test_clearing_a_setting_removes_it(window, cfg_files):
 
 def test_a_terminal_set_shows_on_the_page(window, cfg_files):
     cfg_files.data.write_text('{"patch_name": "Cortes"}')
-    window._open_page(5)                        # opening the page re-reads the files
+    window._open_page(4)                        # opening the page re-reads the files
     assert window.setting_edits["patch_name"].text() == "Cortes"
 
 
@@ -444,7 +369,7 @@ def test_without_a_tracker_the_window_opens_on_settings_and_cannot_run(world, tm
 
     monkeypatch.setattr("pdxaudit.tracker.locate_vanilla_repo", only_from_the_setting)
     win = _open_window(world, tmp_path, monkeypatch, repo=None)
-    assert win.pages.currentIndex() == 5
+    assert win.pages.currentIndex() == 4
     assert not win.run_button.isEnabled() and not win.commits
     texts = [win.banner_box.itemAt(i).widget().findChild(QtWidgets.QLabel).text()
              for i in range(win.banner_box.count())]
@@ -482,7 +407,7 @@ def test_a_terminal_set_of_the_tracker_is_applied_to_the_open_window(window, cfg
 
     monkeypatch.setattr("pdxaudit.tracker.locate_vanilla_repo", only_from_the_setting)
     cfg_files.data.write_text(json.dumps({"vanilla_repo": str(other)}))
-    window._open_page(5)
+    window._open_page(4)
     _settle(window)
     assert window.setting_edits["vanilla_repo"].text() == str(other)
     assert window.vanilla_repo == str(other)     # applied, not only displayed
@@ -505,9 +430,24 @@ def test_settings_cannot_be_edited_while_a_run_is_reading_the_tracker(window):
     assert all(b.isEnabled() for b in window.setting_buttons)
 
 
-def test_a_value_another_file_shadows_is_marked_on_the_page(window, cfg_files):
-    cfg_files.data.write_text(json.dumps({"patch_name": "FromData"}))
-    cfg_files.home.write_text(json.dumps({"patch_name": "FromHome"}))
-    window._open_page(5)
-    assert "is read instead" in window.setting_notes["patch_name"].text()
-    assert str(cfg_files.home) in window.setting_notes["patch_name"].text()
+def test_a_config_file_left_by_an_earlier_version_is_named_on_the_page(window, cfg_files, tmp_path, monkeypatch):
+    from pdxaudit import config
+    former = tmp_path / "former.json"
+    former.write_text(json.dumps({"patch_name": "Older"}))
+    monkeypatch.setattr(config, "_former_paths", lambda: [former])
+    window._open_page(4)
+    assert str(former) in window.settings_message.text()
+    assert window.setting_edits["patch_name"].text() == "Pavia"      # and it is not used
+
+
+def test_code_is_drawn_on_the_grid_the_change_boxes_use():
+    # The block view draws code one character per cell, and puts the box that marks a
+    # changed word on the same cells. Measuring that cell with the integer QFontMetrics
+    # rounds 7.8 up to 8, which walks the box a whole character to the right by the end
+    # of a long line. Both must use code_width().
+    from PySide6.QtGui import QFontMetricsF
+    from pdxaudit.app import code_width, font
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    text = "x" * 60
+    drawn = QFontMetricsF(font(12.5, mono=True)).horizontalAdvance(text)
+    assert abs(drawn - len(text) * code_width()) < 1.0, (drawn, len(text) * code_width())

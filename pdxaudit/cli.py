@@ -42,6 +42,7 @@ from .dupes import run_dupes_audit
 from .gui import run_gui_audit
 from .loc import run_loc_audit
 from .overrides import run_deps_audit, run_override_audit
+from .base import VanillaBase
 from .report import ColorWriter, color_enabled, render_triage, window_heading
 from .results import build_payload, mod_fingerprint
 from .store import open_store, orphan_note, remove_orphaned_records
@@ -49,13 +50,9 @@ from .tracker import (do_snapshot, find_mod_root, find_vanilla_repo, get_commits
                       patch_name, prune_cache, resolve_ref, resolve_tracker_path, warn_if_tracker_stale)
 
 ALL_AUDITS = ["overrides", "deps", "gui", "loc", "dupes"]
-# Commands on a mod's sources; each matches one action in the app's sources panel.
-SOURCE_COMMANDS = ("sources", "add_source", "remove_source", "relocate_source", "move_source",
-                   "set_kind", "rename", "unrename", "ignore_suggestion", "remove_orphaned_sources",
-                   "snapshot_source", "patch")
 # Commands that do their own thing and exit; the --display app has a button for each.
 APP_COMMANDS = ("dismiss", "undismiss", "show_dismissed", "remove_orphaned_records",
-                "snapshot", "list_commits", "results_file") + SOURCE_COMMANDS
+                "snapshot", "list_commits", "results_file")
 
 # Config commands, which need no mod and no tracker, so they run before either is found.
 CONFIG_COMMANDS = ("config", "set_value", "unset_value")
@@ -142,7 +139,7 @@ def build_parser():
                          "$PDX_GAME_ROOT, the config file's game_root, or the Steam "
                          "install). Point at an extracted old-version copy to "
                          "back-populate history")
-    # The source options sit in their own group, below the main options, which stay as they were.
+    # The settings options are in their own group, below the main options.
     ap.usage = ap.format_usage()[len("usage: "):].strip().replace(ap.prog, "%(prog)s", 1)
     setgrp = ap.add_argument_group(
         "settings",
@@ -160,159 +157,12 @@ def build_parser():
     setgrp.add_argument("--unset", metavar="KEY", dest="unset_value",
                         help="Remove a setting from the per-user config file, so the setting "
                              "below it applies again")
-    src = ap.add_argument_group(
-        "sources",
-        "Foundations are dependencies that load before the mod, in the order you store; a run "
-        "compares the mod against vanilla and its foundations together. Adopted sources are mods "
-        "whose code the mod absorbed. Choices are stored per mod in the per-user data folder. "
-        "--force also skips the confirmation of --remove-orphaned-sources.")
-    src.add_argument("--sources", action="store_true",
-                     help="List the mod's sources with their versions, patches and freshness, then "
-                          "suggested sources and orphaned sources")
-    src.add_argument("--add-source", metavar="FOLDER",
-                     help="Choose a folder as a source of the mod (with --as)")
-    src.add_argument("--as", dest="as_role", choices=("foundation", "adopted"),
-                     help="With --add-source, what the folder is to the mod")
-    src.add_argument("--kind", choices=("git", "folder"),
-                     help="With --add-source, read the folder as a git repository or as a folder "
-                          "(default: detected)")
-    src.add_argument("--replace", action="store_true",
-                     help="With --add-source, replace a chosen source with the same id")
-    src.add_argument("--remove-source", metavar="ID", help="Stop using a source for the mod")
-    src.add_argument("--relocate-source", nargs=2, metavar=("ID", "FOLDER"),
-                     help="Point a source at the folder it moved to, keeping its snapshots and patches")
-    src.add_argument("--move-source", nargs=2, metavar=("ID", "POSITION"),
-                     help="Move a foundation to a position in the load order (1 loads first)")
-    src.add_argument("--set-kind", nargs=2, metavar=("ID", "KIND"),
-                     help="Read a source as git, folder, or auto (detected)")
-    src.add_argument("--rename", nargs=3, metavar=("ID", "FROM", "TO"),
-                     help="For an adopted source, read a name or file name part FROM on its side as TO")
-    src.add_argument("--unrename", nargs=2, metavar=("ID", "FROM"),
-                     help="Remove an adopted source's rename rule")
-    src.add_argument("--ignore-suggestion", metavar="ID",
-                     help="Stop suggesting sources with this id until the mod's declared "
-                          "dependencies change")
-    src.add_argument("--remove-orphaned-sources", action="store_true",
-                     help="Remove stored sources no mod chooses (asks for confirmation)")
-    src.add_argument("--snapshot-source", metavar="ID",
-                     help="Record a folder source's current files as a new version")
-    src.add_argument("--patch", nargs=3, metavar=("ID", "VERSIONS", "PATCH"),
-                     help="Assign the vanilla patch a source version, or a run of versions "
-                          "(a..b), belongs to")
-    src.add_argument("--vanilla-only", action="store_true",
-                     help="Compare the mod against vanilla alone, leaving its foundations out")
-    src.add_argument("--adopted", metavar="ID",
-                     help="Compare the mod against an adopted source instead of vanilla")
-    src.add_argument("--source-version", nargs=2, action="append", metavar=("ID", "VERSION"),
-                     help="Compare against this version of a source (default: its newest)")
     return ap
-
-
-def _prepare_sources(mod_root, vanilla_repo, stale):
-    """Before a run: warn about chosen sources whose folder is gone or that changed
-    after their newest recorded version, record new git versions, and prune each
-    source's cache. Returns (warnings, the mod's ModSources or None); the warnings
-    are also printed to stderr."""
-    from . import sources
-    try:
-        chosen = sources.load_sources(mod_root)
-    except sources.SourceError:
-        return [], None
-    warnings = chosen.warnings()
-    for s in chosen.foundations + chosen.adopted:
-        warnings += [f"Warning: {m}" for m in sources.freshness(s)]
-        if s.kind == sources.GIT:
-            warnings += sources.record_versions(s, vanilla_repo, stale)
-        prune_cache(s)
-    for w in warnings:
-        print(w, file=sys.stderr)
-    return warnings, chosen
-
-
-def _choose_base(args, vanilla_repo, chosen):
-    """(base, warnings) for a run: the stack of the mod's foundations, or vanilla alone
-    with --vanilla-only or when the mod has no foundation."""
-    from .base import StackBase, VanillaBase
-    from .sources import SourceError
-    limits = dict(args.source_version or [])
-    for sid in limits:
-        if chosen is None or chosen.by_id(sid) is None:
-            print(f"Error: --source-version {sid}: {sid} is not a chosen source of this mod.", file=sys.stderr)
-            sys.exit(1)
-        if args.vanilla_only and chosen.by_id(sid) in chosen.foundations:
-            _usage_error(f"--source-version {sid} names a foundation, which --vanilla-only leaves out")
-    if chosen is None or args.vanilla_only or not chosen.foundations:
-        return VanillaBase(vanilla_repo), []
-    warnings = [f"Warning: foundation {s.id} has no version with a patch, so no point of the stack includes "
-                f"it. Assign patches with `pdx-audit --patch {s.id} <version>[..<version>] <patch>`."
-                for s in chosen.foundations if not any(p for _c, _t, p in s.versions())]
-    try:
-        base = StackBase(vanilla_repo, chosen.foundations,
-                         {k: v for k, v in limits.items() if chosen.by_id(k) in chosen.foundations})
-    except SourceError as e:
-        _usage_error(str(e))
-    base.prune()
-    for w in warnings:
-        print(w, file=sys.stderr)
-    return base, warnings
 
 
 def _print_messages(messages):
     for m in messages:
         print(m, file=sys.stderr if m.startswith(("Warning:", "Note:")) else sys.stdout)
-
-
-def _source_command(args, mod_root):
-    """Run one --sources option. Returns the exit code."""
-    from . import sources
-    vanilla_repo = find_vanilla_repo(mod_root, args.vanilla_repo)
-    stale = None
-
-    def lagging():
-        nonlocal stale
-        if stale is None:
-            commits = get_commits(vanilla_repo)
-            stale = bool(commits and warn_if_tracker_stale(vanilla_repo, commits[0][0]))
-        return stale
-
-    try:
-        if args.remove_orphaned_sources:
-            return sources.remove_orphaned_sources(force=args.force)
-        if args.sources:
-            chosen = sources.load_sources(mod_root)
-            messages = chosen.warnings()
-            for s in chosen.foundations + chosen.adopted:
-                if s.kind == sources.GIT:
-                    messages += sources.record_versions(s, vanilla_repo, lagging())
-            _print_messages(messages)
-            print(sources.render_sources(sources.sources_view(mod_root, vanilla_repo, full=True)), end="")
-            return 0
-        if args.add_source:
-            messages = sources.add_source(mod_root, args.add_source, args.as_role, args.kind, args.replace,
-                                          vanilla_repo, lagging())
-        elif args.remove_source:
-            messages = sources.remove_source(mod_root, args.remove_source)
-        elif args.relocate_source:
-            messages = sources.relocate_source(mod_root, *args.relocate_source)
-        elif args.move_source:
-            messages = sources.move_source(mod_root, *args.move_source)
-        elif args.set_kind:
-            messages = sources.set_kind(mod_root, *args.set_kind)
-        elif args.rename:
-            messages = sources.add_rename(mod_root, *args.rename)
-        elif args.unrename:
-            messages = sources.remove_rename(mod_root, *args.unrename)
-        elif args.ignore_suggestion:
-            messages = sources.ignore_suggestion(mod_root, args.ignore_suggestion)
-        elif args.snapshot_source:
-            messages = sources.snapshot_source(mod_root, args.snapshot_source, vanilla_repo, lagging())
-        else:
-            messages = sources.assign_patch(mod_root, args.patch[0], args.patch[1], args.patch[2], vanilla_repo)
-    except sources.SourceError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
-    _print_messages(messages)
-    return 0
 
 
 def _config_command(args):
@@ -360,8 +210,7 @@ def _open_app(mod_root, vanilla_repo, args, missing=None):
     return launch(mod_root, vanilla_repo, {
         "missing_tracker": missing, "tracker_override": args.vanilla_repo,
         "audits": [a for a in ALL_AUDITS if getattr(args, a)], "full": args.full,
-        "old": args.old, "new": args.new, "block": args.block, "category": args.category,
-        "base": "vanilla" if args.vanilla_only else (f"adopted:{args.adopted}" if args.adopted else "")})
+        "old": args.old, "new": args.new, "block": args.block, "category": args.category})
 
 
 def main():
@@ -372,19 +221,10 @@ def main():
 def _main():
     args = build_parser().parse_args()
 
-    if args.force and not (args.remove_orphaned_records or args.remove_orphaned_sources):
-        _usage_error("--force only works together with --remove-orphaned-records or "
-                     "--remove-orphaned-sources")
+    if args.force and not args.remove_orphaned_records:
+        _usage_error("--force only works together with --remove-orphaned-records")
     if args.reason and not args.dismiss:
         _usage_error("--reason only works together with --dismiss")
-    if bool(args.add_source) != bool(args.as_role):
-        _usage_error("--add-source and --as go together")
-    for flag in ("kind", "replace"):
-        if getattr(args, flag) and not args.add_source:
-            _usage_error(f"--{flag} only works together with --add-source")
-    commands = [c for c in SOURCE_COMMANDS if getattr(args, c)]
-    if len(commands) > 1:
-        _usage_error(f"{' and '.join('--' + c.replace('_', '-') for c in commands)} cannot be combined")
     config_commands = [c for c in CONFIG_COMMANDS if getattr(args, c)]
     if len(config_commands) > 1:
         _usage_error(f"{' and '.join('--' + c.split('_')[0] for c in config_commands)} cannot be "
@@ -399,8 +239,6 @@ def _main():
         if others:
             _usage_error(f"--{config_commands[0].split('_')[0]} cannot be combined with "
                          f"{', '.join(others)}; it does its own thing and exits")
-    if args.vanilla_only and args.adopted:
-        _usage_error("--vanilla-only and --adopted cannot be combined")
     if args.full and args.old:
         _usage_error("--full and --old cannot be combined; --full starts from the oldest snapshot")
     if args.diff and args.summary:
@@ -423,8 +261,6 @@ def _main():
         sys.exit(0)
 
     mod_root = find_mod_root(args.mod_root)
-    if commands:
-        sys.exit(_source_command(args, mod_root))
     store, store_err = open_store(mod_root)
     needs_store = (args.dismiss or args.undismiss or args.show_dismissed
                    or args.remove_orphaned_records or args.display)
@@ -438,11 +274,6 @@ def _main():
         note = orphan_note(store)
         if note:
             print(note, file=sys.stderr)
-    if not args.display:
-        from .sources import orphan_sources_note, suggestion_note
-        for note in (orphan_sources_note(), suggestion_note(mod_root)):
-            if note:
-                print(note, file=sys.stderr)
 
     if args.show_dismissed:
         _show_dismissed(store)
@@ -471,7 +302,6 @@ def _main():
 
     stale_warning = warn_if_tracker_stale(vanilla_repo, commits[0][0])
     prune_cache(vanilla_repo)
-    source_warnings, chosen = _prepare_sources(mod_root, vanilla_repo, bool(stale_warning))
 
     if args.list_commits:
         print("Available vanilla-tracker commits:")
@@ -483,27 +313,16 @@ def _main():
         print("Need at least 2 commits in vanilla-tracker.", file=sys.stderr)
         sys.exit(1)
 
-    base, base_warnings = _choose_base(args, vanilla_repo, chosen)
-    source_warnings += base_warnings
-    vanilla_commits, commits = commits, base.commits()
-    tag_of_vanilla = lambda point: base.by_id[point].vanilla_tag if base.stacked else None
+    base = VanillaBase(vanilla_repo)
 
     def position(ref, side):
-        """Index in `commits` (newest first) of a --old/--new version or commit. In a
-        stack, --new reaches the newest point of that vanilla version."""
+        """Returns the index in `commits` of a --old or --new version or commit.
+        The newest commit is first."""
         from .tracker import git
-        if base.stacked:
-            hit = next((i for i, (_h, m) in enumerate(commits) if m.tag == ref), None)
-            if hit is not None and commits[hit][1].tag != tag_of_vanilla(commits[hit][0]):
-                return hit                                            # a foundation point's tag
-        msg = resolve_ref(vanilla_repo, ref, vanilla_commits, side)   # exits on no match
+        msg = resolve_ref(vanilla_repo, ref, commits, side)            # exits on no match
         full = git(vanilla_repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").strip()
         for i, (h, m) in enumerate(commits):
             if (full and full.startswith(h)) or (msg and m == msg):
-                if base.stacked and side == "new":
-                    vanilla = base.vanilla_commit(h)
-                    while i > 0 and base.vanilla_commit(commits[i - 1][0]) == vanilla:
-                        i -= 1
                 return i
         print(f"Error: --{side} '{ref}' is not a tracked snapshot.", file=sys.stderr)
         sys.exit(1)
@@ -534,16 +353,6 @@ def _main():
         selected.remove("deps")   # dependency names are not blocks
         if not selected:
             _usage_error("--block does not apply to the dependency audit; name another audit or leave --block out")
-    adopted = []
-    if args.adopted:
-        src = chosen.by_id(args.adopted) if chosen else None
-        if src is None or src not in chosen.adopted:
-            print(f"Error: --adopted {args.adopted}: not an adopted source of this mod with its folder in place.",
-                  file=sys.stderr)
-            sys.exit(1)
-        adopted, selected = [src], []
-    elif chosen and chosen.adopted and not (args.vanilla_only or args.block or args.category or picked):
-        adopted = list(chosen.adopted)
 
     order = [_tag(m) for _h, m in reversed(commits)]
     ctx = types.SimpleNamespace(
@@ -578,16 +387,6 @@ def _main():
         with redirect_stdout(buf):
             findings = runners[name]() or []
         results.append((name, buf.getvalue(), findings))
-    remedies = {}
-    if adopted:
-        from .adopt import run_adopted_audit
-        prior = [f for _, _, fs in results for f in fs]
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            findings, remedies = run_adopted_audit(mod_root, vanilla_repo, adopted, chosen.foundations,
-                                                   args, ctx, prior)
-        results.append(("adopted", buf.getvalue(), findings))
-        selected = selected + ["adopted"]
 
     if (args.block or args.category) and not any(ctx.scanned.get(s) for s in selected):
         what = " and ".join(f"--{flag} {getattr(args, flag)}"
@@ -613,42 +412,30 @@ def _main():
 
     visible, hidden = (ledger.split_dismissed(all_findings, store.state)
                        if store else (all_findings, 0))
-    default_window = not (ctx.fixed_window or args.block or args.category or args.vanilla_only or args.adopted)
+    default_window = not (ctx.fixed_window or args.block or args.category)
     if store and default_window:
         # A run of some audits updates only those audits' open findings.
-        ran, adopted_here = set(selected), {s.id for s in chosen.adopted} if chosen else set()
+        ran = set(selected)
 
         def covers(entry):
-            audit = ledger.audit_of(entry, adopted_here)
-            return audit in ran or (audit not in ALL_AUDITS + ["adopted"] and set(ALL_AUDITS) <= ran)
+            audit = ledger.audit_of(entry)
+            return audit in ran or (audit not in ALL_AUDITS and set(ALL_AUDITS) <= ran)
         ledger.update_open(store.state, visible, ctx.new_tag, covers,
                            produced={ledger.finding_id(f) for f in all_findings})
         store.save()
 
-    # Every point placed on the newest vanilla version is this patch; findings measured
-    # against an adopted source are worded and grouped as that source's.
-    newest_vanilla = base.vanilla_commit(new_hash)
-    patch_tags = {_tag(m) for h, m in commits if base.vanilla_commit(h) == newest_vanilla}
-    adopted_ids = {s.id for s in chosen.adopted} if chosen else set()
-    title = None
-    if args.adopted:
-        versions = adopted[0].versions()
-        title = f"compared with {adopted[0].id}" + (f" {versions[-1][1]}" if versions else "")
     history_old = None if args.old else commits[-1][1]
     triage = render_triage(visible, old_msg, new_msg, selected,
                            detail_shown=not args.summary, new_tag=ctx.new_tag,
-                           dismissed=hidden, remedies=remedies, patch_tags=patch_tags,
-                           adopted=adopted_ids, title=title,
-                           history_old=history_old)
+                           dismissed=hidden, history_old=history_old)
     print(triage)
     if args.results_file:
         payload = build_payload(
             visible, mod_name=mod_root.name, old_msg=old_msg, new_msg=new_msg,
             new_tag=ctx.new_tag, selected=selected, dismissed=hidden, triage=triage,
             details=[(name, detail) for name, detail, _ in results],
-            warnings=([stale_warning] if stale_warning else []) + source_warnings,
-            patch_tags=patch_tags, adopted=adopted_ids,
-            window=window_heading(old_msg, new_msg, selected, history_old, title)[0])
+            warnings=[stale_warning] if stale_warning else [],
+            window=window_heading(old_msg, new_msg, selected, history_old)[0])
         payload["files"] = files_at_start
         with open(args.results_file, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False)

@@ -214,24 +214,6 @@ def test_classes_after_a_per_file_class_are_all_listed():
         assert f"`{name}`" in out, name
 
 
-def test_findings_against_an_adopted_source_are_worded_as_its_own():
-    theirs = _change("w", "gui_vanilla_changed_mid", since="1.1", yours="size = 1", vanilla="size = 2")
-    theirs = theirs._replace(key=dict(theirs.key, target="gui:in_game/template/w", base="up"))
-    mine = _change("x", "gui_vanilla_changed_mid", since="1.3.11")
-    out = render_triage([theirs, mine], "", "1.3.11 Test", ["gui", "adopted"], new_tag="1.3.11", adopted={"up"})
-    assert "1 statement your copy keeps at an old up value" in out
-    assert "1 statement your GUI copy keeps at an old vanilla value" in out
-    assert "upstream: size = 1  →  size = 2  (1.1)" in out
-    assert "Still open from earlier patches" not in out
-
-
-def test_points_placed_on_the_newest_patch_count_as_this_patch():
-    out = render_triage([_change("a", since="found 2.1"), _change("b", since="1.3.10")], "", "", ["overrides"],
-                        new_tag="found 2.1", patch_tags={"1.3.11", "found 2.1"})
-    assert "## This patch (1.3.11)" in out
-    assert out.index("`a`") < out.index("Still open from earlier patches") < out.index("`b`")
-
-
 def test_no_kind_suggests_renames():
     for _sev, _audit, label, fix in KIND.values():
         assert "rename" not in f"{label} {fix}".lower() or "rename yours" in fix

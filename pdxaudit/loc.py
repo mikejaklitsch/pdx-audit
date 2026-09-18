@@ -4,7 +4,7 @@ import re
 import sys
 
 from . import session
-from .gui import commits_up_to, foundation_duplicate, owner_layer, print_duplicates
+from .gui import commits_up_to
 from .report import Finding
 from .tracker import MODULE_ROOTS, read_blobs, tag_of, tree_files
 from .config import should_skip
@@ -128,7 +128,6 @@ def run_loc_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
           file=sys.stderr)
     old_v = base.loc(old_hash, wanted, f"old ({old_hash[:7]})")
     new_v = base.loc(new_hash, wanted, f"new ({new_hash[:7]})")
-    owners = base.loc_owners(new_hash, wanted)
     new_tag = ctx.new_tag if ctx is not None else _tag(new_msg)
     old_tag = _tag(old_msg)
 
@@ -156,7 +155,7 @@ def run_loc_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
             memo[i] = base.loc(old_first[i][0], searched)
         return memo[i]
 
-    changed, removed, new_coll, unchanged, mod_only, duplicates = [], [], [], [], 0, []
+    changed, removed, new_coll, unchanged, mod_only = [], [], [], [], 0
     for k in sorted(wanted):
         start = carried.get(k, old_pos if k in spanned else None)
         if k in carried:
@@ -179,13 +178,10 @@ def run_loc_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
             new_coll.append((k, nv, modfile, since, base_tag))
         elif ov != nv:
             changed.append((k, ov, nv, modval, modfile, since, base_tag))
-        elif owner_layer(owners.get(k)) and modval == nv:
-            duplicates.append(foundation_duplicate(k[1], modfile, owners[k], loc_target(k)))
         else:
             unchanged.append(k)
 
-    summary = [f"# Localization Audit: {_tag(old_msg)} → {_tag(new_msg)}" if base.stacked
-               else f"# Localization Audit: {old_hash[:7]} → {new_hash[:7]}"]
+    summary = [f"# Localization Audit: {old_hash[:7]} → {new_hash[:7]}"]
     if old_msg or new_msg:
         summary.append(f"*{old_msg} → {new_msg}*")
     summary += [
@@ -195,12 +191,10 @@ def run_loc_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
         f"masking a reworded value",
         f"- **{len(removed)}** vanilla removed the key: override orphaned",
         f"- **{len(new_coll)}** vanilla newly added a key the mod also defines",
-        *([f"- **{len(duplicates)}** identical to a foundation's"] if base.stacked else []),
         f"- **{len(unchanged)}** unchanged, **{mod_only}** mod-only (not overrides)",
         "",
     ]
     print("\n".join(summary))
-    print_duplicates(duplicates)
 
     if changed:
         print(f"## Changed Vanilla Strings ({len(changed)})")
@@ -241,10 +235,7 @@ def run_loc_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
               f"{len(removed)} orphaned keys, {len(new_coll)} new collisions.")
 
     def key(k, **fields):
-        out = {"target": loc_target(k), **fields}
-        if owner_layer(owners.get(k)):
-            out["base"] = owners[k]["layer"]
-        return out
+        return {"target": loc_target(k), **fields}
 
     findings = []
     for k, ov, nv, modval, modfile, since, base_tag in changed:
@@ -256,4 +247,4 @@ def run_loc_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
     for k, nv, modfile, since, base_tag in new_coll:
         findings.append(Finding("loc_collision", k[1], modfile, k[0], None,
                                 key(k, change="added", new=nv), since, base_tag))
-    return findings + duplicates
+    return findings

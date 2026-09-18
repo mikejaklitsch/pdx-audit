@@ -16,13 +16,13 @@ from pathlib import Path
 
 from PySide6.QtCore import (QEvent, QPoint, QPointF, QProcess, QProcessEnvironment,
                             QPropertyAnimation, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal)
-from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics, QIcon, QPainter,
+from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics, QFontMetricsF, QIcon, QPainter,
                            QPainterPath, QPalette, QPen, QPixmap)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView, QAbstractScrollArea, QApplication, QButtonGroup, QCheckBox, QComboBox,
     QFileDialog, QFormLayout, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+    QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QSplitter, QStackedWidget, QStyle, QStyledItemDelegate, QTextBrowser, QToolButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -35,12 +35,8 @@ HERE = Path(__file__).parent
 ROLE = Qt.ItemDataRole.UserRole
 SEV_ORDER = ("broken", "stale", "review")
 AUDIT_CHIPS = (("override", "Override"), ("deps", "Dependency"), ("gui", "GUI"),
-               ("loc", "Localization"), ("dupes", "Duplicate"), ("adopted", "Adopted"),
-               ("layer", "Foundation"))
-# Chips shown only when a run has findings for them: the passes chosen sources add.
-SOURCE_CHIPS = ("adopted", "layer")
+               ("loc", "Localization"), ("dupes", "Duplicate"))
 CLI_TO_AUDIT = {"overrides": "override", "deps": "deps", "gui": "gui", "loc": "loc", "dupes": "dupes"}
-ROLE_FIELDS = {"foundation": "foundations", "adopted": "adopted"}
 AUDIT_LABEL = dict(AUDIT_CHIPS)
 
 C = {"bg": "#14161a", "rail": "#101215", "bar": "#171a1f", "list": "#16191d", "code": "#111317",
@@ -84,7 +80,6 @@ RAIL_PAGES = (
     ("dismissed", "Dismissed: findings you hid, and how to bring them back"),
     ("snapshots", "Tracker: the vanilla versions to compare with, and taking a new one"),
     ("output", "Output: the run's report and its log"),
-    ("sources", "Sources: mods yours loads after, or took code from"),
     ("settings", "Settings: where the tracker and the game are"),
 )
 
@@ -98,8 +93,6 @@ ICONS = {
     "search": '<circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2l3 3"/>',
     "play": '<path d="M5 3.5l7 4.5-7 4.5z" fill="currentColor"/>',
     "chevron": '<path d="M4.5 6.5L8 10l3.5-3.5"/>',
-    "sources": '<path d="M8 2.5l5.5 3L8 8.5 2.5 5.5z"/><path d="M2.5 8.5L8 11.5l5.5-3"/>'
-               '<path d="M2.5 11L8 14l5.5-3"/>',
     "settings": '<path d="M2.5 5.5h11M2.5 10.5h11"/><circle cx="6" cy="5.5" r="1.7"/>'
                 '<circle cx="10.5" cy="10.5" r="1.7"/>',
 }
@@ -169,6 +162,21 @@ def _worst(recs):
 
 def _expand(text):
     return text.replace("\t", "    ")
+
+
+_code_width = None
+
+
+def code_width():
+    """The width of one character of the code font. The block view draws code on a grid
+    of these, and puts the boxes that mark changed words on the same grid, so the two
+    must measure it the same way. It is a fraction of a pixel, which the integer
+    QFontMetrics rounds away: rounding 7.8 up to 8 moves a box a whole character to the
+    right by the end of a long line."""
+    global _code_width
+    if _code_width is None:
+        _code_width = QFontMetricsF(font(12.5, mono=True)).horizontalAdvance("M")
+    return _code_width
 
 
 def _chevron(p, x, cy, down, color):
@@ -578,25 +586,6 @@ class TreeDelegate(QStyledItemDelegate):
         p.restore()
 
 
-class SourceTree(QTreeWidget):
-    """The foundations list, reordered by dragging rows; `reordered` fires after a drop."""
-    reordered = Signal()
-
-    def __init__(self):
-        super().__init__(objectName="dataTree")
-        self.setRootIsDecorated(False)
-        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-
-    def dropEvent(self, event):
-        super().dropEvent(event)
-        self.reordered.emit()
-
-    def ids(self):
-        return [self.topLevelItem(i).data(0, ROLE) for i in range(self.topLevelItemCount())]
-
-
 class BlockView(QAbstractScrollArea):
     """The mod's block, one line per row, with vanilla's changes marked on the
     lines they affect: an orange (stale) or yellow (review) gutter bar and tint,
@@ -679,7 +668,10 @@ class BlockView(QAbstractScrollArea):
                     x, col, top = start, 0, top + self.LINE
                 piece = text if cols is None else text[:cols - col]
                 p.drawText(QRect(int(x), int(top), 4000, self.LINE), Qt.AlignmentFlag.AlignVCenter, piece)
-                x += QFontMetrics(f).horizontalAdvance(piece)
+                # One character is one cell of `code_width()`, which is where _emph puts
+                # its boxes. Adding each span's own advance instead drifts away from that
+                # grid, by a whole character over a long line.
+                x += len(piece) * code_width()
                 col += len(piece)
                 text = text[len(piece):]
         if ghost:
@@ -687,12 +679,12 @@ class BlockView(QAbstractScrollArea):
 
     def _cols(self, pane, code_x):
         """How many characters fit on one line of a pane `pane` wide whose code starts at code_x."""
-        return max(20, int((pane - code_x - 12) // QFontMetrics(font(12.5, mono=True)).horizontalAdvance("M")))
+        return max(20, int((pane - code_x - 12) // code_width()))
 
     def _emph(self, p, text, spans, x, top, cols, colour):
         """Paint `spans`, character ranges of `text`, behind code drawn at x, following the
         text onto its wrapped lines when `cols` is set."""
-        width = QFontMetrics(font(12.5, mono=True)).horizontalAdvance("M")
+        width = code_width()
         for s, e in spans:
             a, b = len(_expand(text[:s])), len(_expand(text[:e]))
             while a < b:
@@ -850,10 +842,6 @@ class BlockView(QAbstractScrollArea):
                 p.setFont(font(12.5, mono=True, weight=QFont.Weight.Bold))
                 p.setPen(QColor(C[mark]))
                 p.drawText(line_rect(ox + 46, 14), Qt.AlignmentFlag.AlignVCenter, SIGN[row["sign"]])
-            if mark and row.get("layer"):
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor(C["accent"]))
-                p.drawEllipse(QPointF(ox + 41, top + self.LINE / 2), 2.5, 2.5)
             cols = self._cols(w, 62) if self.wrap else None
             if mark and row.get("emph"):
                 self._emph(p, row["text"], row["emph"], ox + 62, top, cols, EMPH[mark])
@@ -972,11 +960,6 @@ class MainWindow(QMainWindow):
         self.log_fresh = False
         self.run_banners = []
         self.orphans = []
-        self.sources_view = None
-        self.full_freshness = {}
-        self.selected_source = None
-        self.source_banners = []
-        self.pending_base = options.get("base") if options else None
         self.commits = []
         self._items, self._sections, self._titles = [], [], []
         self.targets = {}
@@ -1000,7 +983,6 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self._build_dismissed_page())
         self.pages.addWidget(self._build_tracker_page())
         self.pages.addWidget(self._build_output_page())
-        self.pages.addWidget(self._build_sources_page())
         self.pages.addWidget(self._build_settings_page())
         column.addWidget(self.pages, 1)
         column.addWidget(self._build_statusbar())
@@ -1016,7 +998,7 @@ class MainWindow(QMainWindow):
         self._show_record(None)
         if not self.vanilla_repo:
             # Nothing to compare against yet, so the window opens where that is fixed.
-            self._go_to_page(5)
+            self._go_to_page(4)
             if self.missing_tracker:
                 self.log.appendPlainText(self.missing_tracker)
             autorun = False
@@ -1093,7 +1075,6 @@ class MainWindow(QMainWindow):
             chip = Chip(label)
             chip.setToolTip(f"Show or hide {label.lower()} findings")
             chip.toggled.connect(lambda _on: self._rebuild_tree())
-            chip.setVisible(tag not in SOURCE_CHIPS)
             self.chips[tag] = chip
             h.addWidget(chip)
         sep = QFrame()
@@ -1171,19 +1152,6 @@ class MainWindow(QMainWindow):
         self.block_combo.setMaxVisibleItems(18)
         lay.addWidget(self.block_combo)
         lay.addSpacing(6)
-        # Shown once the mod has a source; hidden, it adds no space.
-        self.base_row = QWidget()
-        base_lay = QVBoxLayout(self.base_row)
-        base_lay.setContentsMargins(0, 0, 0, 0)
-        base_lay.setSpacing(6)
-        self.base_label = QLabel("Compare with")
-        base_lay.addWidget(self.base_label)
-        self.base_combo = QComboBox()
-        self.base_combo.addItem("Vanilla and foundations", "")
-        base_lay.addWidget(self.base_combo)
-        base_lay.addSpacing(6)
-        lay.addWidget(self.base_row)
-        self.base_row.hide()
         self.full_box = QCheckBox("Compare from the oldest snapshot")
         self.full_box.setToolTip("Every audit over the whole history, not just the last patch: "
                                  "the thorough, slow run")
@@ -1198,7 +1166,7 @@ class MainWindow(QMainWindow):
         buttons.addStretch(1)
         reset = QPushButton("Reset")
         reset.setProperty("kind", "ghost")
-        reset.clicked.connect(lambda: self.set_run_choice(category="", block="", full=False, base=""))
+        reset.clicked.connect(lambda: self.set_run_choice(category="", block="", full=False))
         go = QPushButton("Run with these")
         go.setProperty("kind", "primary")
         go.clicked.connect(lambda: (self.run_popup.hide(), self.start_run()))
@@ -1363,10 +1331,6 @@ class MainWindow(QMainWindow):
             lab.setStyleSheet(f"color: {C['muted']}; font-size: 11.5px;")
             self.sign_labels[sign] = lab
             lh.addWidget(lab)
-        self.layer_legend = QLabel(f'<span style="color:{C["accent"]}; font-weight:700;">●</span>'
-                                   f'&nbsp;&nbsp;a foundation made this change')
-        self.layer_legend.setStyleSheet(f"color: {C['muted']}; font-size: 11.5px;")
-        lh.addWidget(self.layer_legend)
         self.diff_labels = {}
         for state in DIFF:
             lab = QLabel()
@@ -1581,13 +1545,6 @@ class MainWindow(QMainWindow):
         v.addWidget(self.settings_message)
         lay.addWidget(card)
 
-        files, fv = self._card("Config files", "Save writes the file marked \"written here\". A file "
-                                               "above it in this list is read instead.")
-        self.config_files = QListWidget()
-        self.config_files.setMaximumHeight(112)
-        OverlayScrollBar(self.config_files)
-        fv.addWidget(self.config_files, 1)
-        lay.addWidget(files)
         lay.addStretch(1)
         return page
 
@@ -1611,8 +1568,10 @@ class MainWindow(QMainWindow):
             self._status(text)
 
     def refresh_settings(self):
-        """Redraw the Settings page from the config files on disk."""
+        """Redraw the Settings page from the config file on disk."""
         view = config.config_view()
+        if view["stale"]:
+            self._settings_note(view["stale"].removeprefix("Note: "))
         for s in view["settings"]:
             edit = self.setting_edits.get(s["key"])
             if edit is None:
@@ -1621,25 +1580,9 @@ class MainWindow(QMainWindow):
             if not edit.hasFocus():
                 edit.setText("" if shown in (None, "") else str(shown))
             stored_here = s["stored"] not in (None, "")
-            shadowed = stored_here and view["file"] != view["writable"]
-            if shadowed:
-                note = f"stored here, but {view['file']} is read instead"
-            else:
-                note = "" if stored_here else f"from {s['origin']}"
-            self.setting_notes[s["key"]].setText(note)
+            self.setting_notes[s["key"]].setText("" if stored_here else f"from {s['origin']}")
         # An empty box means "use the setting", which is what the CLI resolves anyway.
         self.snap_patch.setPlaceholderText(tracker_patch_name())
-        self.config_files.clear()
-        for c in view["candidates"]:
-            marks = [m for m in ("in effect" if c["in_effect"] else "",
-                                 "written here" if c["writable"] else "",
-                                 "" if c["exists"] else "not present") if m]
-            item = QListWidgetItem(c["path"] + (f"   ({', '.join(marks)})" if marks else ""))
-            if c["in_effect"]:
-                item.setForeground(QColor(C["accent_text"]))
-            elif not c["exists"]:
-                item.setForeground(QColor(C["faint"]))
-            self.config_files.addItem(item)
 
     def _browse_setting(self, key):
         edit = self.setting_edits[key]
@@ -1721,131 +1664,6 @@ class MainWindow(QMainWindow):
         fl.setContentsMargins(1, 1, 1, 1)
         fl.addWidget(self.output_stack)
         lay.addWidget(frame, 1)
-        return page
-
-    def _build_sources_page(self):
-        page, lay = self._page()
-        self.sources_message = QLabel(objectName="hint")
-        self.sources_message.setWordWrap(True)
-        self.sources_message.hide()
-        lay.addWidget(self.sources_message)
-        row = QHBoxLayout()
-        row.setSpacing(14)
-        left = QVBoxLayout()
-        left.setSpacing(14)
-
-        card, v = self._card("Foundations", "Add the mods yours loads after, then drag them into the load "
-                                            "order you want players to use.")
-        self.foundation_tree = SourceTree()
-        self.foundation_tree.setHeaderLabels(["Id", "Kind", "Folder", "Status"])
-        self.foundation_tree.reordered.connect(self._foundations_reordered)
-        self.foundation_tree.currentItemChanged.connect(lambda item, _p: self._select_source(item))
-        OverlayScrollBar(self.foundation_tree)
-        OverlayScrollBar(self.foundation_tree, Qt.Orientation.Horizontal)
-        self.foundation_tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
-        v.addWidget(self.foundation_tree, 1)
-        left.addWidget(card, 1)
-
-        card, v = self._card("Adopted sources", "Add a mod yours took code from to follow its updates. Add a "
-                                                "rule when you renamed what you took, from its prefix to "
-                                                "yours.")
-        self.adopted_tree = QTreeWidget(objectName="dataTree")
-        self.adopted_tree.setRootIsDecorated(False)
-        self.adopted_tree.setHeaderLabels(["Id", "Kind", "Folder", "Renames", "Status"])
-        self.adopted_tree.currentItemChanged.connect(lambda item, _p: self._select_source(item))
-        OverlayScrollBar(self.adopted_tree)
-        OverlayScrollBar(self.adopted_tree, Qt.Orientation.Horizontal)
-        self.adopted_tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
-        v.addWidget(self.adopted_tree, 1)
-        rules = QHBoxLayout()
-        self.rename_from, self.rename_to = QLineEdit(), QLineEdit()
-        self.rename_from.setPlaceholderText("from, for example old_")
-        self.rename_to.setPlaceholderText("to, for example new_")
-        add_rule, remove_rule = QPushButton("Add rule"), QPushButton("Remove rule")
-        add_rule.clicked.connect(lambda: self.add_rename(self.selected_source, self.rename_from.text().strip(),
-                                                         self.rename_to.text().strip()))
-        remove_rule.clicked.connect(lambda: self.remove_rename(self.selected_source,
-                                                               self.rename_from.text().strip()))
-        for w in (self.rename_from, self.rename_to):
-            rules.addWidget(w, 1)
-        rules.addWidget(add_rule)
-        rules.addWidget(remove_rule)
-        v.addLayout(rules)
-        left.addWidget(card, 1)
-
-        actions = QHBoxLayout()
-        add_f, add_a = QPushButton("Add foundation…"), QPushButton("Add adopted source…")
-        add_f.clicked.connect(lambda: self._browse_add("foundation"))
-        add_a.clicked.connect(lambda: self._browse_add("adopted"))
-        actions.addWidget(add_f)
-        actions.addWidget(add_a)
-        actions.addStretch(1)
-        read_as = QLabel("Read as")
-        read_as.setToolTip("Read this source's folder as a git repository, so its own history is "
-                           "used, or as plain files snapshotted here")
-        actions.addWidget(read_as)
-        self.kind_combo = QComboBox()
-        for label, kind in (("detected", "auto"), ("git", "git"), ("folder", "folder")):
-            self.kind_combo.addItem(label, kind)
-        self.kind_combo.activated.connect(lambda _i: self.set_source_kind(self.selected_source,
-                                                                          self.kind_combo.currentData()))
-        actions.addWidget(self.kind_combo)
-        self.locate_button = QPushButton("Locate…")
-        self.locate_button.clicked.connect(self._browse_locate)
-        self.source_snapshot_button = QPushButton("Take snapshot")
-        self.source_snapshot_button.clicked.connect(lambda: self.snapshot_source(self.selected_source))
-        self.remove_source_button = QPushButton("Remove")
-        self.remove_source_button.clicked.connect(lambda: self.remove_source(self.selected_source))
-        for w in (self.locate_button, self.source_snapshot_button, self.remove_source_button):
-            actions.addWidget(w)
-        left.addLayout(actions)
-        row.addLayout(left, 3)
-
-        right = QVBoxLayout()
-        right.setSpacing(14)
-        card, v = self._card("Versions", "Select the versions that shipped for one vanilla patch, then "
-                                         "Assign patch. Versions without one sit out of runs.")
-        self.version_tree = QTreeWidget(objectName="dataTree")
-        self.version_tree.setRootIsDecorated(False)
-        self.version_tree.setHeaderLabels(["Version", "Patch", "How"])
-        self.version_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        OverlayScrollBar(self.version_tree)
-        OverlayScrollBar(self.version_tree, Qt.Orientation.Horizontal)
-        v.addWidget(self.version_tree, 1)
-        assign = QHBoxLayout()
-        self.patch_combo = QComboBox()
-        self.assign_button = QPushButton("Assign patch")
-        self.assign_button.clicked.connect(self._assign_selected_patch)
-        assign.addWidget(self.patch_combo, 1)
-        assign.addWidget(self.assign_button)
-        v.addLayout(assign)
-        right.addWidget(card, 1)
-
-        card, v = self._card("Suggestions", "Installed folders matching a dependency this mod declares. Add "
-                                            "one, or stop it being suggested.")
-        self.suggestion_list = QListWidget()
-        OverlayScrollBar(self.suggestion_list)
-        v.addWidget(self.suggestion_list, 1)
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        take, skip = QPushButton("Add as foundation"), QPushButton("Don't suggest")
-        take.clicked.connect(self._add_selected_suggestion)
-        skip.clicked.connect(self._ignore_selected_suggestion)
-        buttons.addWidget(take)
-        buttons.addWidget(skip)
-        v.addLayout(buttons)
-        right.addWidget(card, 1)
-
-        card, v = self._card("Orphaned sources", "Remove stored sources no mod uses any more. Their "
-                                                 "snapshots and patch assignments go with them.")
-        self.orphan_source_list = QListWidget()
-        v.addWidget(self.orphan_source_list, 1)
-        self.orphan_sources_button = QPushButton("Remove orphaned sources")
-        self.orphan_sources_button.clicked.connect(self.remove_orphaned_sources)
-        v.addWidget(self.orphan_sources_button, 0, Qt.AlignmentFlag.AlignRight)
-        right.addWidget(card, 1)
-        row.addLayout(right, 2)
-        lay.addLayout(row, 1)
         return page
 
     def _text_pane(self):
@@ -1936,8 +1754,7 @@ class MainWindow(QMainWindow):
                             self._show_store_views, failed=self._store_waiters.clear)
 
     def _show_store_views(self, views):
-        entries, self.orphans, sources_view = views
-        self._show_sources(sources_view)
+        entries, self.orphans = views
         self.dismissed_tree.clear()
         for e in entries:
             detail = " · ".join(t for t in (e["detail"], "no longer found in the last run" if e["gone"] else "") if t)
@@ -1952,304 +1769,13 @@ class MainWindow(QMainWindow):
         for then in waiters:
             then()
 
-    # --- sources -------------------------------------------------------------------
-
     def _open_page(self, index):
         self.pages.setCurrentIndex(index)
-        if index == 5:
+        if index == 4:
             config.invalidate()      # a --set from a terminal since the window opened
             self.refresh_settings()
             if self.process is None:
                 self.reload_tracker(quiet=True)
-        if index == 4:
-            from . import sources
-            self._in_background("source suggestions", lambda: sources.refresh_scan(self.mod_root),
-                                lambda _scan: self.refresh_store_views())
-
-    def _show_sources(self, view):
-        """Redraw the Sources page and the Run popup's base selector from a sources view."""
-        self.sources_view = view
-        view = view or {"foundations": [], "adopted": [], "missing": [], "suggestions": [], "orphans": []}
-        keep = self.selected_source
-
-        def status(s, foundation):
-            parts = [f"{s['unpatched']} without a patch"] if foundation and s["unpatched"] else []
-            return "; ".join(parts + s["freshness"] + self.full_freshness.get(s["id"], []))
-
-        for tree, field in ((self.foundation_tree, "foundations"), (self.adopted_tree, "adopted")):
-            tree.blockSignals(True)
-            tree.clear()
-            for s in view[field]:
-                cells = [s["id"], s["kind"], s["path"]]
-                if field == "adopted":
-                    cells.append(", ".join(f"{r['from']} → {r['to']}" for r in s["rename"]))
-                item = QTreeWidgetItem(cells + [status(s, field == "foundations")])
-                item.setData(0, ROLE, s["id"])
-                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-                              | Qt.ItemFlag.ItemIsDragEnabled)
-                tree.addTopLevelItem(item)
-            for s in view["missing"]:
-                if ROLE_FIELDS.get(s["role"]) == field:
-                    item = QTreeWidgetItem([s["id"], "", s["path"]] + ([""] if field == "adopted" else [])
-                                           + ["folder is gone; Locate or Remove it"])
-                    item.setData(0, ROLE, s["id"])
-                    item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-                    tree.addTopLevelItem(item)
-            for column in range(tree.columnCount() - 1):
-                tree.resizeColumnToContents(column)
-            tree.setColumnWidth(2, min(tree.columnWidth(2), 320))      # the folder elides in the middle
-            tree.blockSignals(False)
-        self.suggestion_list.clear()
-        for s in view["suggestions"]:
-            why = "declared dependency" if s["reason"] == "dependency" else "local git repository"
-            item = QListWidgetItem(f"{s['id']}  ·  {why}  ·  {s['path']}")
-            item.setData(ROLE, s)
-            self.suggestion_list.addItem(item)
-        self.orphan_source_list.clear()
-        self.orphan_source_list.addItems([f"{o['id']} ({o['key']}): {o['path']}" for o in view["orphans"]])
-
-        chosen = view["foundations"] + view["adopted"] + view["missing"]
-        self.selected_source = keep if any(s["id"] == keep for s in chosen) else None
-        self._fill_versions()
-        base = self.pending_base if self.pending_base is not None else self.base_combo.currentData()
-        self.base_combo.clear()
-        self.base_combo.addItem("Vanilla and foundations", "")
-        self.base_combo.addItem("Vanilla only", "vanilla")
-        for s in view["adopted"]:
-            self.base_combo.addItem(f"Adopted source {s['id']}", f"adopted:{s['id']}")
-        i = self.base_combo.findData(base or "")
-        self.base_combo.setCurrentIndex(i if i >= 0 else 0)
-        if self.sources_view is not None:
-            self.pending_base = None
-        has_source = bool(chosen)
-        self.base_row.setVisible(has_source)
-        self.rail_group.button(4).setToolTip(f"{RAIL_PAGES[4][1]} ({len(chosen)})")
-
-    def _fill_versions(self):
-        self.version_tree.clear()
-        s = self._source_by_id(self.selected_source)
-        for v in (s or {}).get("versions", []):
-            how = {"default": "defaulted" + (" while the tracker lagged" if v["lagged"] else ""),
-                   "chosen": "chosen", "history": "history before it was added"}.get(v["how"], v["how"] or "")
-            item = QTreeWidgetItem([v["tag"], v["patch"] or "none", how])
-            item.setData(0, ROLE, v["tag"])
-            self.version_tree.addTopLevelItem(item)
-        self.version_tree.resizeColumnToContents(0)
-        # Only foundations take patches; an adopted source lists its versions alone.
-        foundation = any(f["id"] == self.selected_source for f in (self.sources_view or {}).get("foundations", []))
-        for column in (1, 2):
-            self.version_tree.setColumnHidden(column, bool(s) and not foundation)
-        self.patch_combo.setEnabled(bool(s) and foundation)
-        self.assign_button.setEnabled(bool(s) and foundation)
-        keep = self.patch_combo.currentData()
-        self.patch_combo.clear()
-        for _h, msg in reversed(self.commits):
-            tag = msg.split()[0] if msg else ""
-            self.patch_combo.addItem(msg, tag)
-        i = self.patch_combo.findData(keep)
-        self.patch_combo.setCurrentIndex(i if i >= 0 else self.patch_combo.count() - 1)
-        i = self.kind_combo.findData((s or {}).get("stored_kind") or "auto")
-        self.kind_combo.setCurrentIndex(max(i, 0))
-
-    def _source_by_id(self, sid):
-        view = self.sources_view or {}
-        return next((s for s in view.get("foundations", []) + view.get("adopted", []) if s["id"] == sid), None)
-
-    def _select_source(self, item):
-        if item is None:
-            return
-        self.selected_source = item.data(0, ROLE)
-        other = self.adopted_tree if item.treeWidget() is self.foundation_tree else self.foundation_tree
-        other.blockSignals(True)
-        other.setCurrentItem(None)
-        other.clearSelection()
-        other.blockSignals(False)
-        self._fill_versions()
-
-    def select_source(self, sid):
-        for tree in (self.foundation_tree, self.adopted_tree):
-            for i in range(tree.topLevelItemCount()):
-                if tree.topLevelItem(i).data(0, ROLE) == sid:
-                    tree.setCurrentItem(tree.topLevelItem(i))
-                    return
-
-    def _sources_note(self, text, error=False):
-        self.sources_message.setText(text)
-        self.sources_message.setStyleSheet(f"color: {C['broken'] if error else C['muted']}; font-size: 12px;")
-        self.sources_message.setVisible(bool(text))
-        self._status(text)
-
-    def _source_action(self, fn, *args):
-        """Run one sources.py action, as its command-line option does, then re-read the
-        stored choices. Returns True when it was done."""
-        from .sources import SourceError
-        if not self._has_tracker():
-            return False
-        if not args or args[0] is None:
-            self._sources_note("Select a source first.", error=True)
-            return False
-        try:
-            messages = fn(self.mod_root, *args)
-        except SourceError as e:
-            self._sources_note(str(e), error=True)
-            return False
-        for m in messages:
-            self.log.appendPlainText(m)
-        self._sources_note(" ".join(m for m in messages if not m.startswith(("Warning:", "Note:"))))
-        self.refresh_store_views()
-        return True
-
-    def _has_tracker(self):
-        """True when a tracker is in use; otherwise it says where to choose one."""
-        if self.vanilla_repo:
-            return True
-        self._sources_note("Choose a tracker in Settings first.", error=True)
-        return False
-
-    def add_source_folder(self, path, role, kind=None, replace=None):
-        """Add a folder as a source. `replace` None asks before replacing a chosen source
-        with the same id, or before relocating one whose folder is gone."""
-        from . import sources
-        if not self._has_tracker():
-            return False
-        try:
-            messages = sources.add_source(self.mod_root, path, role, kind, bool(replace), self.vanilla_repo)
-        except sources.SourceError as e:
-            text = str(e)
-            if replace is None and "--replace" in text:
-                sid = sources.source_id_of(path)
-                if "--relocate-source" in text:
-                    answer = QMessageBox.question(self, "Relocate the source",
-                                                  f"{text}\n\nPoint {sid} at this folder, keeping its snapshots "
-                                                  f"and patches?")
-                    if answer == QMessageBox.StandardButton.Yes:
-                        return self.relocate_source(sid, path)
-                    return False
-                answer = QMessageBox.question(self, "Replace the source", f"{text}\n\nReplace it with this folder?")
-                if answer == QMessageBox.StandardButton.Yes:
-                    return self.add_source_folder(path, role, kind, True)
-                return False
-            self._sources_note(text, error=True)
-            return False
-        for m in messages:
-            self.log.appendPlainText(m)
-        self._sources_note(" ".join(m for m in messages if not m.startswith(("Warning:", "Note:"))))
-        self.refresh_store_views()
-        return True
-
-    def remove_source(self, sid):
-        from . import sources
-        return self._source_action(sources.remove_source, sid)
-
-    def relocate_source(self, sid, path):
-        from . import sources
-        return self._source_action(sources.relocate_source, sid, path)
-
-    def move_foundations(self, ids):
-        from . import sources
-        return self._source_action(sources.set_foundation_order, ids)
-
-    def set_source_kind(self, sid, kind):
-        from . import sources
-        return self._source_action(sources.set_kind, sid, kind)
-
-    def add_rename(self, sid, frm, to):
-        from . import sources
-        return self._source_action(sources.add_rename, sid, frm, to)
-
-    def remove_rename(self, sid, frm):
-        from . import sources
-        return self._source_action(sources.remove_rename, sid, frm)
-
-    def ignore_suggestion(self, sid):
-        from . import sources
-        return self._source_action(sources.ignore_suggestion, sid)
-
-    def assign_patch(self, sid, versions, patch):
-        from . import sources
-        return self._source_action(lambda root, *a: sources.assign_patch(root, *a, self.vanilla_repo),
-                                   sid, versions, patch)
-
-    def _foundations_reordered(self):
-        self.move_foundations(self.foundation_tree.ids())
-
-    def _browse_add(self, role):
-        path = QFileDialog.getExistingDirectory(self, "The source's folder", str(self.mod_root.parent))
-        if path:
-            self.add_source_folder(path, role)
-
-    def _browse_locate(self):
-        if not self.selected_source:
-            self._sources_note("Select a source first.", error=True)
-            return
-        path = QFileDialog.getExistingDirectory(self, f"Where {self.selected_source} is now",
-                                                str(self.mod_root.parent))
-        if path:
-            self.relocate_source(self.selected_source, path)
-
-    def _assign_selected_patch(self):
-        rows = sorted(self.version_tree.indexOfTopLevelItem(i) for i in self.version_tree.selectedItems())
-        if not rows:
-            self._sources_note("Select the versions to assign a patch to.", error=True)
-            return
-        if rows != list(range(rows[0], rows[-1] + 1)):
-            self._sources_note("Select consecutive versions; patches follow the source's history.", error=True)
-            return
-        tag = lambda n: self.version_tree.topLevelItem(n).data(0, ROLE)
-        versions = tag(rows[0]) if len(rows) == 1 else f"{tag(rows[0])}..{tag(rows[-1])}"
-        self.assign_patch(self.selected_source, versions, self.patch_combo.currentData())
-
-    def _add_selected_suggestion(self):
-        item = self.suggestion_list.currentItem()
-        if item is not None:
-            self.add_source_folder(item.data(ROLE)["path"], "foundation")
-
-    def _ignore_selected_suggestion(self):
-        item = self.suggestion_list.currentItem()
-        if item is not None:
-            self.ignore_suggestion(item.data(ROLE)["id"])
-
-    def snapshot_source(self, sid):
-        if not sid:
-            self._sources_note("Select a source first.", error=True)
-            return
-        self._start(["--snapshot-source", sid], self._source_job_done, f"Snapshotting {sid}…")
-
-    def remove_orphaned_sources(self):
-        view = self.sources_view or {}
-        if not view.get("orphans"):
-            self._status("No orphaned sources.")
-            return
-        listing = "\n".join(f"{o['id']} ({o['key']}): {o['path']}" for o in view["orphans"])
-        answer = QMessageBox.question(self, "Remove orphaned sources",
-                                      f"Remove these {len(view['orphans'])} stored source(s)? No mod chooses "
-                                      f"them.\n\n{listing}")
-        if answer == QMessageBox.StandardButton.Yes:
-            self._start(["--remove-orphaned-sources", "--force"], self._source_job_done,
-                        "Removing orphaned sources…")
-
-    def _source_job_done(self, code):
-        self.refresh_store_views()
-        if code != 0:
-            self._job_failed(f"The source action stopped: {self.last_line}")
-            return
-        self.source_banners = []
-        self._render_banners()
-        self._status(self.last_line or "Done.")
-
-    def _show_freshness(self, found):
-        """Show the full freshness check's (source id, message) pairs as banners and in
-        the Sources page's status column."""
-        self.full_freshness = {}
-        for sid, m in found:
-            self.full_freshness.setdefault(sid, []).append(m)
-        self.source_banners = [(m, self._snapshot_named(m)) for _sid, m in found]
-        self._render_banners()
-        self._show_sources(self.sources_view)
-
-    def _snapshot_named(self, message):
-        m = re.search(r"--snapshot-source (\S+?)`", message)
-        return (lambda: self.snapshot_source(m.group(1))) if m else None
 
     def _in_background(self, name, work, apply, failed=None):
         """Run work() on a worker thread, then apply(result) on the UI thread. A
@@ -2293,7 +1819,7 @@ class MainWindow(QMainWindow):
             i = combo.findData(options.get(flag) or "")
             combo.setCurrentIndex(i if i >= 0 else 0)
         self.set_run_choice(category=options.get("category") or "", block=options.get("block") or "",
-                            full=bool(options.get("full")), base=options.get("base") or "")
+                            full=bool(options.get("full")))
 
     def _fill_blocks(self):
         category = self.category_combo.currentData()
@@ -2315,11 +1841,7 @@ class MainWindow(QMainWindow):
     def block_choices(self):
         return [self.block_combo.itemData(i) for i in range(1, self.block_combo.count())]
 
-    def set_run_choice(self, category=None, block=None, full=None, base=None):
-        if base is not None:
-            i = self.base_combo.findData(base)
-            self.base_combo.setCurrentIndex(i if i >= 0 else 0)
-            self.pending_base = None if i >= 0 or not base else base
+    def set_run_choice(self, category=None, block=None, full=None):
         if category is not None:
             i = self.category_combo.findData(category)
             self.category_combo.setCurrentIndex(i if i >= 0 else 0)
@@ -2335,14 +1857,13 @@ class MainWindow(QMainWindow):
         return {"old": "" if full else (self.old_combo.currentData() or ""),
                 "new": self.new_combo.currentData() or "", "full": full,
                 "block": self.block_combo.currentData() or "",
-                "category": self.category_combo.currentData() or "",
-                "base": (self.base_combo.currentData() or "") if self.base_combo.isVisibleTo(self.run_popup) else ""}
+                "category": self.category_combo.currentData() or ""}
 
     # --- background jobs --------------------------------------------------------
 
     def _set_busy(self, busy, text=None):
         for w in (self.run_button, self.run_arrow, self.restore_button, self.snapshot_button,
-                  self.orphan_button, self.source_snapshot_button, self.orphan_sources_button):
+                  self.orphan_button):
             w.setEnabled(not busy)
         for w in (self.run_button, self.run_arrow):
             if not self.vanilla_repo:
@@ -2429,7 +1950,7 @@ class MainWindow(QMainWindow):
 
     def start_run(self):
         if not self.vanilla_repo:
-            self._go_to_page(5)
+            self._go_to_page(4)
             self._settings_note("Choose a tracker, or take the first snapshot on the Tracker page.",
                                 error=True)
             return
@@ -2449,14 +1970,6 @@ class MainWindow(QMainWindow):
             return
         self.show_results(json.loads(self.store.results_path.read_text(encoding="utf-8")))
         self._status("Audits finished.")
-        from . import sources
-        view = self.sources_view or {}
-        if view.get("foundations") or view.get("adopted"):
-            # Folder sources are hashed after the run, off the UI thread, for changes Steam's manifest misses.
-            def check():
-                chosen = sources.load_sources(self.mod_root)
-                return [(s.id, m) for s in chosen.foundations + chosen.adopted for m in sources.freshness(s, full=True)]
-            self._in_background("sources' files", check, self._show_freshness)
 
     def show_results(self, payload):
         self.payload = payload
@@ -2468,9 +1981,6 @@ class MainWindow(QMainWindow):
                 self.run_banners.append(("warn", "The game has changed since the newest snapshot. Take a "
                                          "snapshot of the new version, then run the audits again.",
                                          "Take snapshot", self._go_to_snapshot))
-            elif "--snapshot-source" in w:
-                self.run_banners.append(("warn", w.removeprefix("Warning: "), "Take snapshot",
-                                         self._snapshot_named(w)))
             else:
                 self.run_banners.append(("warn", w, None, None))
         self._render_banners()
@@ -2478,8 +1988,6 @@ class MainWindow(QMainWindow):
             [payload.get("triage") or ""] + [t for _a, t in payload.get("details") or [] if t.strip()]))
         for tag, chip in self.chips.items():
             chip.set_count(sum(1 for r in self.records if r["audit"] == tag))
-            if tag in SOURCE_CHIPS:
-                chip.setVisible(chip.count > 0)
         self._update_summary()
         self._rebuild_tree()
         self.check_for_changes()
@@ -2542,25 +2050,11 @@ class MainWindow(QMainWindow):
         if not self.vanilla_repo:
             banners.append(("error", "No vanilla tracker yet. Choose one in Settings, or take the "
                             "first snapshot on the Tracker page.", "Settings",
-                            lambda: self._go_to_page(5)))
+                            lambda: self._go_to_page(4)))
         if self.orphans:
             banners.append(("warn", f"{len(self.orphans)} findings record(s) for this mod point at "
                             f"commits on no branch of this repository.", "Review and remove",
                             self._go_to_tracker))
-        for text, action in self.source_banners:
-            banners.append(("warn", text, "Take snapshot" if action else None, action))
-        view = self.sources_view or {}
-        wanted = [s for s in view.get("suggestions", []) if s["reason"] == "dependency"]
-        if wanted:
-            names = ", ".join(sorted({s["id"] for s in wanted}))
-            banners.append(("warn", f"The mod declares dependencies installed on this machine that are not chosen "
-                            f"as foundations: {names}.", "Review", lambda: self._go_to_page(4)))
-        elif view.get("stale_suggestions"):
-            banners.append(("warn", "Source suggestions are out of date. Open the Sources page to see which declared "
-                            "dependencies are installed.", "Review", lambda: self._go_to_page(4)))
-        if view.get("orphans"):
-            banners.append(("warn", f"{len(view['orphans'])} stored source(s) are chosen by no mod.",
-                            "Review and remove", lambda: self._go_to_page(4)))
         for tone, text, button, action in banners:
             frame = QFrame()
             fg = C["broken"] if tone == "error" else C["stale"]
@@ -2768,14 +2262,11 @@ class MainWindow(QMainWindow):
         block = self.payload["blocks"].get(rec["block"]) if rec.get("block") else None
         kind = (block or {}).get("type") or AUDIT_LABEL.get(rec["audit"], rec["audit"])
         meta = [f'<span style="color:{C[rec["sev"]]}; font-weight:600;">●&nbsp;{_cap(rec["sev"])}</span>', _esc(kind)]
-        since, source = rec.get("since") or "", rec.get("source") or ""
+        since = rec.get("since") or ""
         if since:
-            who, _sp, version = since.partition(" ") if " " in since else (source or "vanilla", "", since)
-            meta.append(f"{_esc(who)} changed it in {_esc(version)}")
+            meta.append(f"vanilla changed it in {_esc(since)}")
         if rec.get("base"):
             meta.append(f"your copy matches {_esc(rec['base'])}")
-        if source:
-            meta.append(f"measured against {_esc(source)}")
         self.meta_label.setText("&nbsp;&nbsp;&nbsp;".join(meta))
         self.meta_id.setText(rec["id"] if rec["dismissible"] else "")
         path = f' <span style="color:{C["dim"]};">›</span> ' + _esc(rec["path"]).replace(" &gt; ", f' <span style="color:{C["dim"]};">›</span> ') if rec.get("path") else ""
@@ -2784,7 +2275,7 @@ class MainWindow(QMainWindow):
         self.sentence_label.setText(f"{_esc(_cap(rec['label']))}. Fix: {_esc(rec['fix'])}.")
 
         yours, vanilla = self._value_pair(rec)
-        self.value_keys["vanilla"].setText(rec.get("source") if rec["audit"] == "adopted" else "vanilla")
+        self.value_keys["vanilla"].setText("vanilla")
         self.values.setVisible(yours is not None)
         if yours is not None:
             self.yours_label.setText(yours)
@@ -2793,14 +2284,13 @@ class MainWindow(QMainWindow):
         pairs = bool(block) and bool(block.get("pairs"))
         self.side_by_side.setVisible(bool(block) and (block.get("vanilla_lines") is not None or pairs))
         if block is not None:
-            who = rec.get("source") if rec["audit"] == "adopted" else None
             side = self.side_by_side.isChecked() and (block.get("vanilla_lines") is not None or pairs)
             flatten = self.flatten.isChecked()
             key = (rec["block"], side, flatten)
-            columns = ((f"{who or 'vanilla'} {block.get('vanilla_tag') or ''} · {block.get('vanilla_file') or ''}",
+            columns = ((f"vanilla {block.get('vanilla_tag') or ''} · {block.get('vanilla_file') or ''}",
                         f"yours · {block['file']}") if side else None)
             if side and pairs:
-                columns = (f"{who or 'vanilla'}, the keys you inject · {block.get('vanilla_file') or ''}",
+                columns = (f"vanilla, the keys you inject · {block.get('vanilla_file') or ''}",
                            f"yours · {block['file']}")
 
             def build():
@@ -2817,7 +2307,7 @@ class MainWindow(QMainWindow):
                 if self.current is not rec:
                     return
                 self.block_view.set_rows(prepared[0], [], rec["fid"], columns, prepared)
-                self._show_legend(prepared[0], who, block.get("base_tag"), side=side)
+                self._show_legend(prepared[0], block.get("base_tag"), side=side)
 
             if key in self._prepared:
                 show(self._prepared[key])
@@ -2866,24 +2356,24 @@ class MainWindow(QMainWindow):
         if self.current is not None:
             self._show_record(self.current)
 
-    def _show_legend(self, rows, who=None, base=None, side=False):
-        """The legend lists only the marks, signs and colours the block shows, worded for
-        an adopted source (`who`) when the block is compared with one; `base` names the
-        version side-by-side colours compare with, and a `side` view shows a finding's
-        severity as its icon."""
+    def _show_legend(self, rows, base=None, side=False):
+        """Shows the legend for a block.
+
+        The legend lists only the marks, the signs and the colours that the block
+        shows. `base` gives the name of the version that the side-by-side colours
+        compare with. A `side` view shows the severity of a finding as its icon."""
         present = {(r["mark"], r.get("cause")) for r in rows if r.get("mark")}
         signs = {r["sign"] for r in rows if r.get("mark") and r.get("sign")}
         states = {cell["state"] for r in rows if "left" in r for cell in (r["left"], r["right"])
                   if cell and not cell["quiet"] and cell["state"] != "same"}
-        name = who or "vanilla"
         for (sev, cause), lab in self.legend_labels.items():
-            text = LEGEND[(sev, cause)].replace("vanilla", name)
+            text = LEGEND[(sev, cause)]
             glyph = (f'<span style="color:{C["text2"]}; font-weight:700;">{ICON[sev]}</span>' if side
                      else f'<span style="color:{C[sev]}; font-weight:700;">▍</span>')
             lab.setText(f'{glyph}&nbsp;{_esc(text)}')
             lab.setVisible((sev, cause) in present)
         for sign, lab in self.sign_labels.items():
-            text = SIGN_MEANING[sign].replace("vanilla", name)
+            text = SIGN_MEANING[sign]
             lab.setText(f'<span style="font-family:\'{MONO}\'; font-weight:700; color:{C["text2"]};">'
                         f'{SIGN[sign]}</span>&nbsp;&nbsp;{_esc(text)}')
             lab.setVisible(sign in signs)
@@ -2892,7 +2382,6 @@ class MainWindow(QMainWindow):
             lab.setText(f'<span style="font-family:\'{MONO}\'; font-weight:700; color:{colour};">'
                         f'{DIFF_SIGN[state]}</span>&nbsp;&nbsp;{_esc(DIFF[state].format(base=base or "your copy’s version"))}')
             lab.setVisible(state in states)
-        self.layer_legend.setVisible(any(r.get("mark") and r.get("layer") for r in rows))
         self.legend.setVisible(bool(present) or bool(states))
 
     def legend_marks(self):

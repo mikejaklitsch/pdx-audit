@@ -380,3 +380,46 @@ def test_an_inject_pair_of_one_line_each_marks_the_words_that_differ():
                         "vanilla": [(9, "\tmax_levels = 4")]}]}
     [row] = results.inject_side_rows(block)
     assert row["left"]["emph"] and row["right"]["emph"]
+
+
+def test_a_finding_keeps_one_run_across_a_line_only_you_changed():
+    # Your own deletion inside the block the finding covers must not break the finding
+    # into two runs, since the view draws one outline around each run.
+    base = ["x = {", "\ta = 1", "\tdrop = 1", "\tb = 1", "}"]
+    block = {"line": 1, "lines": ["x = {", "\ta = 2", "\tb = 2", "}"],
+             "vanilla_lines": ["x = {", "\ta = 9", "\tdrop = 1", "\tb = 9", "}"], "base_lines": base,
+             "changes": [_change(kind="both_changed", mark="review", vfirst=2, vlast=2, first=2, last=2),
+                         _change(kind="both_changed", mark="review", vfirst=4, vlast=4, first=3, last=3)]}
+    rows = results.side_rows(block)
+    assert sum(1 for r in rows if r["lead"]) == 1        # one outline, not two
+    # `drop = 1`, which only your copy deleted, sits inside the run and not between two.
+    assert [r["fid"] is not None for r in rows] == [False, False, True, True, True, True, False]
+    assert rows[3]["left"]["text"].strip() == "drop = 1" and rows[3]["right"]["state"] == "del"
+
+
+def _gapped_block(gap):
+    """A block with two changes of one finding, `gap` unchanged lines apart."""
+    filler = [f"\tk{i} = 1" for i in range(gap)]
+    base = ["x = {", "\ta = 1", *filler, "\tb = 1", "}"]
+    vanilla = ["x = {", "\ta = 9", *filler, "\tb = 9", "}"]
+    mine = ["x = {", "\ta = 2", *filler, "\tb = 2", "}"]
+    last = 3 + gap
+    return {"line": 1, "lines": mine, "vanilla_lines": vanilla, "base_lines": base,
+            "changes": [_change(kind="both_changed", mark="review", vfirst=2, vlast=2, first=2, last=2),
+                        _change(kind="both_changed", mark="review", vfirst=last, vlast=last,
+                                first=last, last=last)]}
+
+
+def test_a_finding_splits_exactly_where_the_view_folds():
+    # One function, results.hidden_span, decides both whether the view folds a stretch of
+    # unmarked rows and whether the finding around it stays in one run. This checks that
+    # the two never disagree: a finding breaks only where the view hides something.
+    seen = set()
+    for gap in range(1, 20):
+        rows = results.side_rows(_gapped_block(gap))
+        marked = [n for n, r in enumerate(rows) if r["fid"]]
+        one_run = all(rows[n]["fid"] for n in range(marked[0], marked[-1] + 1))
+        shows_all = not any("fold" in r for r in results.fold_rows(rows))
+        assert one_run == shows_all, f"gap of {gap}: one_run={one_run} shows_all={shows_all}"
+        seen.add(one_run)
+    assert seen == {True, False}, "the gaps tried must cover both a joined and a folded one"

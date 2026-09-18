@@ -10,9 +10,9 @@ from pathlib import Path
 from collections import defaultdict
 
 from . import changes, diff3, ledger, session
-from .gui import audit_window, commits_up_to, foundation_duplicate, owner_layer, print_duplicates
+from .gui import audit_window, commits_up_to
 from .report import diff_lines, diff_summary, Finding
-from .tracker import MODULE_ROOTS, _git_archive, cache_location, cache_path, full_hash, tag_of
+from .tracker import MODULE_ROOTS, _git_archive, cache_path, full_hash, tag_of
 from .config import should_skip
 
 REPLACE_TYPES = ("REPLACE", "TRY_REPLACE", "REPLACE_OR_CREATE")
@@ -117,25 +117,25 @@ def build_index(vanilla_repo, commit, categories, progress_label=""):
 
 BLOCK_CACHE_VERSION = 1
 
-def _block_cache_path(source, commit, categories):
+def _block_cache_path(vanilla_repo, commit, categories):
     """Cache file for a commit's block index, keyed by the full commit hash and
     the set of categories indexed. Commit content is immutable, so entries never
     go stale; the version bumps when the parser or index shape changes."""
-    full = full_hash(cache_location(source)[0], commit)
+    full = full_hash(vanilla_repo, commit)
     if not full:
         return None
     cat_key = hashlib.sha1(",".join(sorted(set(categories))).encode()).hexdigest()[:12]
-    return cache_path(source, f"blocks-v{BLOCK_CACHE_VERSION}-{full}-{cat_key}.json")
+    return cache_path(vanilla_repo, f"blocks-v{BLOCK_CACHE_VERSION}-{full}-{cat_key}.json")
 
-def build_index_cached(source, commit, categories, progress_label=""):
-    """build_index with a per-commit disk cache. A plain override run and a
-    later --diff run over the same overrides extract the same blocks; the parsed
-    index is memoized in the source's cache folder keyed by the immutable commit
-    hash so the second run reuses the first's work. Old entries are pruned by
-    prune_cache once their commit leaves the source. `source` is a Source or the
-    vanilla tracker's path."""
-    vanilla_repo = cache_location(source)[0]
-    cache = _block_cache_path(source, commit, categories)
+def build_index_cached(vanilla_repo, commit, categories, progress_label=""):
+    """Does the same as build_index, and also keeps the result on disk.
+
+    An override run and a later --diff run read the same blocks. This function
+    writes the parsed index into the cache folder of the tracker. The name of the
+    cache file contains the full hash of the commit. The second run then uses the
+    result of the first run. prune_cache deletes an entry when its commit is no
+    longer in the tracker."""
+    cache = _block_cache_path(vanilla_repo, commit, categories)
     if cache and cache.is_file():
         try:
             data = json.loads(cache.read_text())
@@ -316,21 +316,20 @@ def mod_referenced_values(mod_root):
 
 VOCAB_CACHE_VERSION = 1
 
-def _vocab_cache_path(source, commit):
+def _vocab_cache_path(vanilla_repo, commit):
     """Cache file for a commit's vocabulary, keyed by the full commit hash;
     commit content is immutable, so entries never go stale. The version bumps
     when the tokenizer changes."""
-    full = full_hash(cache_location(source)[0], commit)
+    full = full_hash(vanilla_repo, commit)
     if not full:
         return None
-    return cache_path(source, f"vocab-v{VOCAB_CACHE_VERSION}-{full}.json")
+    return cache_path(vanilla_repo, f"vocab-v{VOCAB_CACHE_VERSION}-{full}.json")
 
-def build_vocab(source, commit, label=""):
-    """token -> total `token =` occurrences across a source's .txt at `commit`.
-    Cached in the source's cache folder per commit hash. `source` is a Source or
-    the vanilla tracker's path."""
-    vanilla_repo = cache_location(source)[0]
-    cache = _vocab_cache_path(source, commit)
+def build_vocab(vanilla_repo, commit, label=""):
+    """Returns the number of `token =` occurrences for each token, in the .txt files
+    of vanilla at `commit`. The result goes into the cache folder of the tracker,
+    with one entry for each commit."""
+    cache = _vocab_cache_path(vanilla_repo, commit)
     if cache and cache.is_file():
         try:
             vocab = json.loads(cache.read_text())
@@ -719,13 +718,11 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
 
     window = audit_window(base, old_hash, new_hash, args, ctx)
     tags = [_tag(m) for _h, m in window]
-    layers = [base.layer_of(h) for h, _m in window] if base.stacked else None
     new_idx = base.block_index(new_hash, categories, f"new ({new_hash[:7]})")
-    owners = base.block_owners(new_hash, categories)
     history = block_history(base, window, categories,
                             {(o["category"], o["block"]) for o in replaces}) if replaces else {}
 
-    removed, changed_replace, unchanged, not_found, unreadable, duplicates = [], [], [], [], [], []
+    removed, changed_replace, unchanged, not_found, unreadable = [], [], [], [], []
     for ov in replaces:
         key = (ov["category"], ov["block"])
         texts = history[key]
@@ -742,16 +739,11 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
             unreadable.append(ov)
             continue
         vfile = (new_idx.get(key) or ("?",))[0]
-        owner = owners.get(key)
         result = changes.audit("override", ov["block"], override_target(ov), mod_block, texts, tags,
                                ov["file"], ov["line"], unwrap=True, want=want, block_type="REPLACE",
-                               vanilla_file=vfile, layers=layers, owner=owner_layer(owner))
+                               vanilla_file=vfile)
         if result.flagged:
             changed_replace.append((ov, vfile, texts, result))
-        elif owner_layer(owner) and not diff3.distance(diff3.body(diff3.nodes(mod_block)),
-                                                       diff3.body(diff3.nodes(texts[-1]))):
-            duplicates.append(foundation_duplicate(ov["block"], f"{ov['file']}:{ov['line']}", owner,
-                                                   override_target(ov)))
         else:
             unchanged.append(ov)
 
@@ -825,7 +817,7 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
             texts = [e[1] if e else None for e in entries]
             result = changes.audit("override", ov["block"], override_target(ov), text, texts, tags,
                                    ov["file"], ov["line"], want=want, block_type="REPLACE",
-                                   vanilla_file=entries[-1][0], layers=layers)
+                                   vanilla_file=entries[-1][0])
             if result.block is not None:
                 result.block["lines"] = [_mod_lines(mod_root, ov["file"])[ov["line"] - 1]]
             if result.flagged:
@@ -855,8 +847,7 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
     n_changes =sum(len(item[-1].flagged) for item in changed_replace + scalar_results)
     summary = [
         f"# Override Audit: {tags[0]} → {tags[-1]}",
-        (f"*each REPLACE compared with the {len(window)} points of vanilla and its foundations up to {new_msg}*"
-         if base.stacked else f"*each REPLACE compared with vanilla's {len(window)} tracked versions up to {new_msg}*"),
+        f"*each REPLACE compared with vanilla's {len(window)} tracked versions up to {new_msg}*",
         "",
         f"**{len(unique)}** unique overrides scanned ({len(replaces)} REPLACE-type, "
         f"{len(injects)} INJECT-type)",
@@ -867,7 +858,6 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
         f"- **{len(removed)}** vanilla blocks removed: override orphaned",
         f"- **{len(created)}** vanilla blocks removed that an _OR_CREATE override now creates",
         f"- **{len(absent)}** not found in vanilla, **{len(defined_elsewhere)}** defined but not as a block",
-        *([f"- **{len(duplicates)}** REPLACE blocks identical to a foundation's"] if base.stacked else []),
         f"- **{len(unchanged)}** current with vanilla",
         "",
     ]
@@ -906,7 +896,7 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
         for ov, vfile, texts, result in changed_replace:
             changes.print_target(ov["block"], [("Type", ov["type"]), ("Mod", f"`{ov['file']}:{ov['line']}`"),
                                                ("Vanilla", f"`{vfile}`")],
-                                 result, texts, tags, args.diff, dismissed, base.stacked)
+                                 result, texts, tags, args.diff, dismissed)
 
     if scalar_results:
         print(f"## Changed Single-Value REPLACEs ({len(scalar_results)})")
@@ -914,10 +904,9 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
         for ov, vfile, texts, result in scalar_results:
             changes.print_target(ov["block"], [("Type", ov["type"]), ("Mod", f"`{ov['file']}:{ov['line']}`"),
                                                ("Vanilla", f"`{vfile}`")],
-                                 result, texts, tags, args.diff, dismissed, base.stacked)
+                                 result, texts, tags, args.diff, dismissed)
 
     print_inject_section(changed_inject, args.diff, mod_root)
-    print_duplicates(duplicates)
 
     if absent:
         print(f"## Not Found in Vanilla ({len(absent)})")
@@ -991,7 +980,6 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
     for ov in defined_elsewhere:
         findings.append(Finding("override_nonblock", ov["block"], f"{ov['file']}:{ov['line']}",
                                 "", None, {"target": override_target(ov)}))
-    findings += duplicates
 
     if (not n_changes and not overlaps_found and not removed and not created and not absent
             and not unreadable):

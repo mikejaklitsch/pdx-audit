@@ -30,12 +30,12 @@ import tarfile
 from collections import defaultdict
 from pathlib import Path
 
-from . import diff3, session
+from . import session
 from .config import cfg, should_skip
-from .gui import foundation_duplicate, mod_gui_files, owner_layer, parse_gui_defs, print_duplicates
+from .gui import mod_gui_files, parse_gui_defs
 from .loc import is_replace_loc, loc_entries, mod_loc_files
 from .report import Finding
-from .tracker import MODULE_ROOTS, _git_archive, cache_location, cache_path, full_hash
+from .tracker import MODULE_ROOTS, _git_archive, cache_path, full_hash
 
 DUPES_CACHE_VERSION = 1
 _HEAD = re.compile(r"^\s*(?:([A-Z][A-Z_]*):)?([A-Za-z0-9_.\-:]+)\s*\??=")
@@ -81,18 +81,19 @@ def scan_script(text):
     return entries, keys
 
 
-def _cache_path(source, commit):
-    full = full_hash(cache_location(source)[0], commit)
+def _cache_path(vanilla_repo, commit):
+    full = full_hash(vanilla_repo, commit)
     if not full:
         return None
-    return cache_path(source, f"dupes-v{DUPES_CACHE_VERSION}-{full}.json")
+    return cache_path(vanilla_repo, f"dupes-v{DUPES_CACHE_VERSION}-{full}.json")
 
 
-def vanilla_definitions(source, commit):
-    """{"names": {type: {name: [files]}}, "files": {path: [names]}} for a source's
-    top-level script definitions at `commit` (the vanilla tracker when `source` is a
-    path). Cached per commit."""
-    cache = _cache_path(source, commit)
+def vanilla_definitions(vanilla_repo, commit):
+    """Returns the top-level script definitions of vanilla at `commit`.
+
+    The result has the form {"names": {type: {name: [files]}}, "files": {path:
+    [names]}}. The result goes into the cache, with one entry for each commit."""
+    cache = _cache_path(vanilla_repo, commit)
     if cache and cache.is_file():
         try:
             return json.loads(cache.read_text())
@@ -100,7 +101,7 @@ def vanilla_definitions(source, commit):
             pass
     names = defaultdict(lambda: defaultdict(list))
     files = {}
-    raw = _git_archive(cache_location(source)[0], commit, [f"{m}/common" for m in MODULE_ROOTS],
+    raw = _git_archive(vanilla_repo, commit, [f"{m}/common" for m in MODULE_ROOTS],
                        timeout=180)
     try:
         with tarfile.open(fileobj=io.BytesIO(raw or b""), ignore_zeros=True) as tf:
@@ -140,11 +141,6 @@ def merge_types(vanilla):
     return out
 
 
-def top_entries(text):
-    from .flatten import top_entries as entries
-    return entries(text)
-
-
 def _same_text(locs):
     """True when every copy of a localization key reads the same."""
     return len({value for _rel, _line, value in locs}) == 1
@@ -156,15 +152,12 @@ def _where(prefix, rel, line):
 
 
 def run_dupes_audit(mod_root, base, new_hash, new_msg, args, ctx=None):
-    """`base` is a Base or the vanilla tracker's path. In a stack run a plain
-    definition identical to a foundation's is reported as a duplicate of it, and one
-    that differs is the mod's override of it, not a duplicate of vanilla."""
+    """The `base` argument is a Base, or the path to the vanilla tracker."""
     from .base import as_base
     base = as_base(base)
     print(f"Scanning {mod_root.name} for duplicate definitions...", file=sys.stderr)
     vanilla = base.definitions(new_hash)
     merging = base.merge_types(new_hash)
-    def_owners = base.definition_owners(new_hash)
     category = getattr(args, "category", None)
     block = getattr(args, "block", None)
 
@@ -231,7 +224,7 @@ def run_dupes_audit(mod_root, base, new_hash, new_msg, args, ctx=None):
         ctx.scanned["dupes"] = (len(entries) + len(define_keys) + len(gui_defs)
                                 + len(loc_keys))
 
-    multiple, plain_other, define_twice, gui_twice, drops, duplicates = [], [], [], [], [], []
+    multiple, plain_other, define_twice, gui_twice, drops = [], [], [], [], []
     loc_twice = [(replace, lang, key, locs) for (replace, lang, key), locs in sorted(loc_keys.items())
                  if len(locs) >= 2]
     on_action_syntax = [(ns, key, rel, lines) for (ns, key), found in sorted(single_keys.items())
@@ -246,15 +239,7 @@ def run_dupes_audit(mod_root, base, new_hash, new_msg, args, ctx=None):
             continue
         prefix, rel, line = locs[0]
         vfiles = vanilla["names"].get(t, {}).get(name)
-        owner = def_owners.get((t, name))
-        if not prefix and owner_layer(owner):
-            cat = rel.rsplit("/", 1)[0]
-            theirs = base.block_index(new_hash, [cat]).get((cat, name))
-            mine = next((b for p, n, b in top_entries(session.read_text(mod_root / rel))
-                         if not p and n == name), None)
-            if theirs and mine and not diff3.distance(diff3.nodes(mine), diff3.nodes(theirs[1])):
-                duplicates.append(foundation_duplicate(name, f"{rel}:{line}", owner, f"dupes:{t}/{name}"))
-        elif not prefix and vfiles and rel not in vfiles:
+        if not prefix and vfiles and rel not in vfiles:
             plain_other.append((t, name, rel, line, vfiles))
     for (ns, key), locs in sorted(define_keys.items()):
         if len(locs) >= 2:
@@ -326,7 +311,6 @@ def run_dupes_audit(mod_root, base, new_hash, new_msg, args, ctx=None):
         for rel, dropped in drops:
             print(f"- `{rel}`: " + ", ".join(dropped))
         print()
-    print_duplicates(duplicates)
     if not (multiple or define_twice or gui_twice or plain_other or loc_twice
             or on_action_syntax or on_action_twice):
         print("**No duplicate definitions found.**")
@@ -382,4 +366,4 @@ def run_dupes_audit(mod_root, base, new_hash, new_msg, args, ctx=None):
         findings.append(Finding("dupes_file_override_drops", rel, rel,
                                 f"{len(dropped)} vanilla definitions not in the mod copy: {shown}",
                                 None, {"target": f"dupesfile:{rel}", "dropped": dropped}))
-    return findings + duplicates
+    return findings

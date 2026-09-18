@@ -208,11 +208,73 @@ def test_a_block_vanilla_deleted_that_you_had_edited_is_one_finding():
 
 
 def test_block_vanilla_deleted_that_you_changed_is_yours_when_your_copy_came_after():
+    # The copy took every change of version 1, so `u` is its own block and not one that
+    # vanilla removed. `p` arrived in that same version, which the copy matches, so the
+    # copy left it out on purpose (test_a_statement_vanilla_added_at_your_version_is_yours).
     versions = ("w = { a = 1 u = { k = 1 } }", "w = { a = 2 b = 3 c = 4 d = 5 p = { k = 1 } }")
     mod = "w = { a = 2 b = 3 c = 4 d = 5 u = { k = 5 } }"
     assert baseline(mod, list(versions)) == 1
     assert _changes(mod, *versions) == [
-        ("mod_added", "info", "u", None), ("vanilla_added", "high", "p", 1)]
+        ("mod_added", "info", "u", None), ("mod_removed", "info", "p", None)]
+
+
+def test_a_block_vanilla_moved_to_another_key_is_one_change():
+    # Vanilla renamed the key and kept the text, so it is one rename and not an addition
+    # and a removal. Your copy still sets the old key.
+    versions = ("w = { old = { v = 1 t = 2 } }", "w = { new = { v = 1 t = 2 } }")
+    mod = "w = { old = { v = 1 t = 2 } }"
+    # The change keeps your statement, so _changes names it by the key you still set.
+    assert _changes(mod, *versions) == [("vanilla_renamed", "mid", "old", 1)]
+    c, = compare(mod, list(versions))
+    assert (c.mod.label, c.new.label) == ("old", "new")
+
+
+def test_a_statement_vanilla_moved_into_a_new_block_is_one_change():
+    # Vanilla put the statement inside a block it now holds beside it. The statement is
+    # gone from this level, but vanilla still carries it, so it is a move and not a
+    # deletion. The added block is not reported on its own; the move names it.
+    old = 'w = { onclick = "[DoThing]" b = 1 }'
+    new = 'w = { tip = { title = "T" on_action = "[DoThing]" } b = 1 }'
+    assert _changes(old, old, new) == [("vanilla_moved", "mid", "onclick", 1)]
+
+
+def test_a_statement_vanilla_really_deleted_is_still_a_removal():
+    old = 'w = { onclick = "[DoThing]" b = 1 }'
+    new = 'w = { tip = { title = "T" } b = 1 }'
+    assert ("vanilla_removed", "mid", "onclick", 1) in _changes(old, old, new)
+
+
+def test_a_plain_value_inside_a_new_block_is_not_a_move():
+    # `flag = 1` says nothing distinctive, so its turning up in a new block is no reason
+    # to call it the same statement.
+    old, new = "w = { flag = 1 b = 1 }", "w = { tip = { flag = 1 } b = 1 }"
+    kinds = {k for k, _p, _l, _s in _changes(old, old, new)}
+    assert "vanilla_moved" not in kinds and "vanilla_removed" in kinds
+
+
+def test_two_short_statements_that_read_alike_are_not_a_rename():
+    # `old = yes` and `new = yes` read alike too often for one to be the other renamed.
+    versions = ("w = { a = 1 old = yes }", "w = { a = 1 new = yes }")
+    kinds = {k for k, _p, _l, _s in _changes("w = { a = 1 old = yes }", *versions)}
+    assert kinds == {"vanilla_added", "vanilla_removed"}
+
+
+def test_a_statement_vanilla_added_at_your_version_is_yours():
+    # Vanilla restructured the block in version 1 and added `n` in the same version. The
+    # copy has the new structure, so whoever wrote it saw `n` and left it out.
+    versions = ("w = { old = 1 }", "w = { a = 2 b = 3 n = 4 }")
+    mod = "w = { a = 2 b = 3 }"
+    assert baseline(mod, list(versions)) == 1
+    assert _changes(mod, *versions) == [("mod_removed", "info", "n", None)]
+
+
+def test_a_statement_vanilla_added_after_your_version_is_still_reported():
+    # The copy matches version 1 and vanilla added `n` in version 2, so it is a change
+    # to take. A copy that only lacks a new statement matches the version before it.
+    versions = ("w = { a = 2 b = 3 }", "w = { a = 2 b = 3 }", "w = { a = 2 b = 3 n = 4 }")
+    mod = "w = { a = 2 b = 3 }"
+    assert baseline(mod, list(versions)) == 0
+    assert _changes(mod, *versions) == [("vanilla_added", "mid", "n", 2)]
 
 
 def test_block_vanilla_deleted_after_your_copy_that_you_changed_is_both_changed():

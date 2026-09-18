@@ -163,8 +163,6 @@ def dismiss(state, findings, prefixes, reason, today):
                  "detail": f.detail or "", "on": today}
         if reason:
             entry["reason"] = reason
-        if (f.key or {}).get("base"):
-            entry["source"] = f.key["base"]
         state["dismissed"][fid] = entry
         done.append((fid, f))
     return done, errors
@@ -187,36 +185,25 @@ def undismiss(state, prefixes):
     return removed, errors
 
 
-def _plain(tag, source):
-    """A version tag within its source's own order: a stack point's `<source> <version>`
-    tag loses its source when the source is the finding's."""
-    if tag and source and tag.startswith(f"{source} "):
-        return tag[len(source) + 1:]
-    return tag
-
-
-def audit_of(entry, adopted=()):
-    """The audit (a --overrides style name) that produces a record entry: the adopted
-    pass for a finding measured against a source in `adopted`, else its kind's audit.
-    A foundation duplicate belongs to the audit its target names."""
-    if entry.get("source") and entry["source"] in adopted:
-        return "adopted"
+def audit_of(entry):
+    """Returns the name of the audit that makes a record entry. The name has the
+    form of the --overrides option."""
     audit = KIND[entry["finding"]][1] if entry.get("finding") in KIND else None
-    if audit == "layer":
-        audit = (entry.get("target") or "").split(":", 1)[0]
     return _AUDITS.get(audit, audit)
 
 
 def update_open(state, findings, new_tag, covers=None, produced=None):
-    """Replace the open findings this run looked at with its actionable findings.
-    `covers(entry)` says whether the run looked at an entry's audit (every entry by
-    default); entries it did not look at stay as they are. A finding already open
-    keeps the `since` and `base` recorded when it first appeared; findings no longer
-    produced are closed by omission. A finding measured against a source other than
-    vanilla records it as `source`, and its tags within that source's order.
+    """Replaces the open findings that this run examined with its actionable findings.
 
-    `produced` holds the id of every finding the run produced, dismissed ones
-    included; a dismissal the run looked at but did not produce is marked `gone`."""
+    `covers(entry)` tells the function if the run examined the audit of an entry. By
+    default, the run examines each entry. The function does not change an entry that
+    the run did not examine. A finding that is already open keeps the `since` value
+    and the `base` value from its first appearance. The function removes a finding
+    that the run no longer makes.
+
+    `produced` contains the id of each finding that the run made, and includes the
+    dismissed findings. The function marks a dismissal `gone` if the run examined it
+    but did not make it."""
     covers = covers or (lambda _entry: True)
     prev = state.get("open", {})
     fresh = {fid: e for fid, e in prev.items() if not covers(e)}
@@ -231,15 +218,12 @@ def update_open(state, findings, new_tag, covers=None, produced=None):
             continue
         fid = finding_id(f)
         old = prev.get(fid) or {}
-        source = (f.key or {}).get("base")
         entry = {"finding": f.kind, "name": f.name, "target": target_of(f),
                  "detail": f.detail or "",
-                 "since": old.get("since") or _plain(f.since, source) or new_tag}
-        base = old.get("base") or _plain(f.base, source)
+                 "since": old.get("since") or f.since or new_tag}
+        base = old.get("base") or f.base
         if base:
             entry["base"] = base
-        if source:
-            entry["source"] = source
         fresh[fid] = entry
     state["open"] = fresh
 
@@ -249,24 +233,20 @@ def update_open(state, findings, new_tag, covers=None, produced=None):
 CARRIED = frozenset({"override_inject_overlap", "loc_changed"})
 
 
-def bases_from_state(state, orders):
-    """The version tag to measure each target from: the oldest base any open finding of
-    a CARRIED kind on that target was measured from, so a check only ever widens its
-    window from its own earlier findings. `orders` lists vanilla's tracked version tags
-    oldest first, and the result maps target -> tag for findings measured against
-    vanilla; or `orders` maps a source id (None for vanilla) to its tags, and the result
-    maps (source, target) -> tag. Tags a source does not know are ignored."""
-    keyed = isinstance(orders, dict)
-    positions = {s: {t: i for i, t in enumerate(tags)} for s, tags in (orders.items() if keyed else [(None, orders)])}
+def bases_from_state(state, order):
+    """Returns the version tag from which to measure each target.
+
+    For each target, the tag is the oldest base of an open finding of a CARRIED kind.
+    A check only makes its window larger, and only from its own earlier findings. `order` lists the version tags of the tracker, oldest first. The result
+    maps a target to a tag. The function ignores a tag that is not in `order`."""
+    positions = {t: i for i, t in enumerate(order)}
     bases = {}
     for entry in state.get("open", {}).values():
         if entry.get("finding") not in CARRIED:
             continue
-        s, t, b = entry.get("source"), entry.get("target"), entry.get("base")
-        pos = positions.get(s)
-        if not t or pos is None or b not in pos:
+        t, b = entry.get("target"), entry.get("base")
+        if not t or b not in positions:
             continue
-        k = (s, t) if keyed else t
-        if k not in bases or pos[b] < pos[bases[k]]:
-            bases[k] = b
+        if t not in bases or positions[b] < positions[bases[t]]:
+            bases[t] = b
     return bases

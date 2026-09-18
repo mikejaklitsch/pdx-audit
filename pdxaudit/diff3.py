@@ -62,8 +62,8 @@ from pdx_utilities.script_parser import parse, tokenize
 
 from . import session
 
-Change = namedtuple("Change", "kind priority path mod new since parent after layer old")
-Change.__new__.__defaults__ = (None, None)
+Change = namedtuple("Change", "kind priority path mod new since parent after old")
+Change.__new__.__defaults__ = (None,)
 Change.__doc__ = """One difference between a copy and vanilla's current text.
 
 kind, priority: see the module docstring. path: the keys of the blocks holding it.
@@ -71,8 +71,7 @@ mod, new: the Node in the copy and in vanilla's current text (either may be None
 with offsets into its own text. since: index into the history of the version where
 vanilla made the change, or None. parent, after: where a statement only vanilla has
 belongs in the copy: the copy's enclosing block Node (None at the top) and the
-copy's statement it follows (None when it comes first). layer: the layer of the
-version `since` names, when the history is a stack's (see changes.audit). old: for
+copy's statement it follows (None when it comes first). old: for
 both_changed and removed_changed, vanilla's statement at the same place in the
 version before `since` that its current text no longer has, a Node with offsets into
 that version's text, or None."""
@@ -86,7 +85,8 @@ SCRIPT, GUI = "script", "gui"
 SELECTORS = {SCRIPT: ("limit", "trigger", "id"), GUI: ()}
 
 HIGH, MID, INFO = "high", "mid", "info"
-VANILLA_KINDS = ("vanilla_changed", "vanilla_added", "vanilla_removed")
+VANILLA_KINDS = ("vanilla_changed", "vanilla_added", "vanilla_removed", "vanilla_renamed",
+                 "vanilla_moved")
 CONFLICT_KINDS = ("both_changed", "removed_changed")
 MOD_KINDS = ("mod_changed", "mod_added", "mod_removed")
 
@@ -508,7 +508,7 @@ def _walk(mine, theirs, path, level, parent, hist, out, dialect):
             kind, since = ("mod_removed" if m is None else
                            "mod_changed" if v is not None else "mod_added"), None
         old = hist.before(since, level, key) if kind in CONFLICT_KINDS and key else None
-        local.append(Change(kind, None, path, m, v, since, parent, after, None, old))
+        local.append(Change(kind, None, path, m, v, since, parent, after, old))
 
     after = None
     for j, v in enumerate(theirs):
@@ -525,7 +525,9 @@ def _walk(mine, theirs, path, level, parent, hist, out, dialect):
                 continue
             same = lambda n, v=v: n.sig == v.sig                       # noqa: E731
             k = hist.introduced(level, j, same)
-            if k is None or hist.held_at_baseline(level, same, k):
+            # Vanilla put the statement here at or before the version the copy matches,
+            # so whoever wrote the copy saw it and left it out. That is their deletion.
+            if k is None or hist.seen_before_copy(k) or hist.held_at_baseline(level, same, k):
                 add("mod_removed", None, v, None, here)
             elif hist.replaced(k, level, v.key):
                 add("removed_changed", None, v, k, here, v.key)
@@ -556,7 +558,11 @@ def _walk(mine, theirs, path, level, parent, hist, out, dialect):
             if m.children is not None:
                 _stale_inside(m, path + (m.key,), level, hist, out)
 
+    # Whether the block holds an edit of yours is read before the merge, since a rename
+    # can take a conflict of yours with it and the changes beside it still compete.
     yours = any(c.kind in MOD_KINDS + CONFLICT_KINDS for c in local)
+    _merge_renames(local, level, hist)
+    _merge_moves(local)
     for c in local:
         if c.kind in MOD_KINDS or c.kind == "removed_changed":
             priority = INFO
@@ -568,6 +574,72 @@ def _walk(mine, theirs, path, level, parent, hist, out, dialect):
     for m, v, j in inner:
         _walk(m.children, v.children, path + (v.key,), hist.inside(level, j), m, hist, out,
               dialect)
+
+
+def _says(node):
+    """What a statement says, without the key it says it under, so vanilla's text under
+    two names compares equal."""
+    return (node.kind, node.value, None if node.children is None else tuple(c.sig for c in node.children))
+
+
+def _merge_renames(local, level, hist):
+    """Vanilla moving a statement to another key reads as one addition and one removal
+    of the same text, which is two findings for one rename. Vanilla's own history tells
+    them apart: the statement it held under the old key just before the change reads the
+    same as the one it holds under the new key now. Replace the pair with one change.
+
+    Only a block counts. Two bare statements that carry the same short value, such as
+    `old = yes` and `new = yes`, read alike too often for one to be the other under a
+    new name, and a merge that is wrong hides a change."""
+    added = [c for c in local if c.kind == "vanilla_added"]
+    # Vanilla deleting a statement of yours reads as vanilla_removed when your copy of
+    # it is vanilla's, and as both_changed when you had edited it. Either way the key
+    # is gone from vanilla, so either can be the old half of a rename.
+    dropped = [c for c in local if c.new is None and c.mod is not None
+               and c.kind in ("vanilla_removed",) + CONFLICT_KINDS]
+    for gone in dropped:
+        was = gone.old or hist.before(gone.since, level, gone.mod.key)
+        if was is None or was.children is None:
+            continue
+        hit = next((c for c in added if c.since == gone.since and _says(c.new) == _says(was)), None)
+        if hit is None:
+            continue
+        added.remove(hit)
+        local[local.index(gone)] = gone._replace(kind="vanilla_renamed", new=hit.new, old=None)
+        local.remove(hit)
+
+
+def _holds(node, value):
+    """True when a statement at or under `node` carries `value` as its distinctive one."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if _distinctive(n) == value:
+            return True
+        if n.children:
+            stack.extend(n.children)
+    return False
+
+
+def _merge_moves(local):
+    """Vanilla putting a statement inside a block it now holds beside it reads as a
+    deletion, because the statement is gone from this level. Your copy still sets it
+    where it was, which is worth saying, but calling it deleted is wrong: vanilla still
+    carries it. Report the pair as one move, naming the block it went into.
+
+    Only a distinctive quoted value counts (see `_distinctive`), so a plain `a = 1`
+    turning up in an unrelated new block is never read as the same statement."""
+    for gone in [c for c in local if c.kind == "vanilla_removed" and c.mod is not None]:
+        value = _distinctive(gone.mod)
+        if value is None:
+            continue
+        host = next((c for c in local if c.mod is None and c.new is not None
+                     and c.new.children is not None and _holds(c.new, value)), None)
+        if host is None:
+            continue
+        local[local.index(gone)] = gone._replace(kind="vanilla_moved", new=host.new)
+        if host.kind == "vanilla_added":
+            local.remove(host)          # the move already names the block it went into
 
 
 def _stale_inside(block, path, level, hist, out):

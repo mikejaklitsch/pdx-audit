@@ -46,7 +46,7 @@ def test_empty_config_skips_nothing(monkeypatch):
 def test_an_unreadable_config_file_is_reported_and_ignored(monkeypatch, tmp_path, capsys):
     bad = tmp_path / "bad.json"
     bad.write_text("{nope", encoding="utf-8")
-    monkeypatch.setenv("PDX_AUDIT_CONFIG", str(bad))
+    monkeypatch.setattr(config, "writable_path", lambda: bad)
     _set(monkeypatch, None)
     assert config.load_config() == {}
     assert "could not read the config file" in capsys.readouterr().err
@@ -62,17 +62,15 @@ def test_windows_separators_normalized(monkeypatch):
 
 @pytest.fixture
 def cfg_files(tmp_path, monkeypatch):
-    """The four config files, all under tmp_path, so nothing on this machine is read
-    or written. Returns the home file, the per-user data file and the repo file."""
-    monkeypatch.delenv("PDX_AUDIT_CONFIG", raising=False)
+    """The one config file, under tmp_path, so nothing on this machine is read or
+    written. `former` is a path an earlier version would have read."""
     for key in ("PDX_VANILLA_REPO", "PDX_GAME_ROOT", "PDX_PATCH_NAME"):
         monkeypatch.delenv(key, raising=False)
-    home, data, repo = (tmp_path / n for n in ("home.json", "data.json", "repo.json"))
-    monkeypatch.setattr(config, "_home_config", lambda: home)
+    data, former = tmp_path / "data.json", tmp_path / "former.json"
     monkeypatch.setattr(config, "writable_path", lambda: data)
-    monkeypatch.setattr(config, "_repo_config", lambda: repo)
+    monkeypatch.setattr(config, "_former_paths", lambda: [former])
     config.invalidate()
-    yield types.SimpleNamespace(home=home, data=data, repo=repo)
+    yield types.SimpleNamespace(data=data, former=former)
     config.invalidate()
 
 
@@ -132,21 +130,21 @@ def test_an_unsettable_key_is_refused(cfg_files):
         config.set_value("skip_dirs", "backup")
 
 
-def test_creating_the_per_user_file_copies_the_repo_file_it_shadows(cfg_files, tmp_path):
-    cfg_files.repo.write_text('{"game_root": "/g", "skip_dirs": ["backup"]}', encoding="utf-8")
+def test_only_the_one_config_file_is_read(cfg_files):
+    # A file an earlier version would have read is named, and never used.
+    cfg_files.former.write_text('{"patch_name": "Older"}', encoding="utf-8")
     config.invalidate()
-    messages = config.set_value("patch_name", "Cortes")
-    stored = json.loads(cfg_files.data.read_text(encoding="utf-8"))
-    assert stored == {"game_root": "/g", "skip_dirs": ["backup"], "patch_name": "Cortes"}
-    assert any("copied into it" in m for m in messages)
+    assert config.cfg("patch_name") is None
+    assert config.config_file() is None
+    note = config.stale_config_note()
+    assert str(cfg_files.former) in note and str(cfg_files.data) in note
 
 
-def test_a_file_read_earlier_is_reported_as_still_winning(cfg_files, tmp_path):
-    cfg_files.home.write_text('{"patch_name": "Home"}', encoding="utf-8")
-    config.invalidate()
-    messages = config.set_value("patch_name", "Cortes")
-    assert any("is read instead of this file" in m for m in messages)
-    assert config.cfg("patch_name") == "Home"
+def test_a_left_over_file_stops_being_named_once_the_config_exists(cfg_files):
+    cfg_files.former.write_text('{"patch_name": "Older"}', encoding="utf-8")
+    config.set_value("patch_name", "Cortes")
+    assert config.stale_config_note() is None
+    assert config.cfg("patch_name") == "Cortes"
 
 
 def test_an_environment_variable_is_reported_as_still_winning(cfg_files, monkeypatch, tmp_path):
@@ -164,17 +162,13 @@ def test_unset_falls_back_to_the_setting_below(cfg_files):
     assert config.unset_value("patch_name") == [f"patch_name is not set in {cfg_files.data}."]
 
 
-def test_config_view_marks_the_file_in_effect_and_the_one_written(cfg_files, tmp_path):
-    cfg_files.repo.write_text('{"patch_name": "Repo"}', encoding="utf-8")
+def test_config_view_names_the_one_file(cfg_files):
+    cfg_files.data.write_text('{"patch_name": "Stored"}', encoding="utf-8")
     config.invalidate()
     view = config.config_view()
-    assert view["file"] == str(cfg_files.repo)
-    assert view["writable"] == str(cfg_files.data)
-    marks = {c["path"]: (c["exists"], c["in_effect"], c["writable"]) for c in view["candidates"]}
-    assert marks[str(cfg_files.repo)] == (True, True, False)
-    assert marks[str(cfg_files.data)] == (False, False, True)
+    assert view["file"] == str(cfg_files.data) == view["writable"]
     patch = next(s for s in view["settings"] if s["key"] == "patch_name")
-    assert (patch["value"], patch["origin"], patch["settable"]) == ("Repo", str(cfg_files.repo), True)
+    assert (patch["value"], patch["origin"], patch["settable"]) == ("Stored", str(cfg_files.data), True)
     assert next(s for s in view["settings"] if s["key"] == "skip_dirs")["settable"] is False
 
 
@@ -217,17 +211,6 @@ def test_an_empty_value_is_refused_rather_than_stored_as_the_cwd(cfg_files):
     assert not cfg_files.data.exists()
 
 
-def test_the_shadowed_file_is_copied_in_even_when_a_file_above_exists(cfg_files):
-    # Following the advice to remove the file above must not lose the file below.
-    cfg_files.home.write_text('{"patch_name": "Home"}', encoding="utf-8")
-    cfg_files.repo.write_text('{"skip_dirs": ["backup"], "game_root": "/g"}', encoding="utf-8")
-    config.invalidate()
-    messages = config.set_value("patch_name", "Cortes")
-    assert any("is read instead of this file" in m for m in messages)
-    stored = json.loads(cfg_files.data.read_text(encoding="utf-8"))
-    assert stored == {"skip_dirs": ["backup"], "game_root": "/g", "patch_name": "Cortes"}
-
-
 def test_an_unset_setting_reports_the_fallback_runs_use(cfg_files):
     view = config.config_view()
     tracker = next(s for s in view["settings"] if s["key"] == "vanilla_repo")
@@ -238,8 +221,8 @@ def test_an_unset_setting_reports_the_fallback_runs_use(cfg_files):
     assert "<mod-parent>/vanilla-tracker/repo.git" in config.render_config(view)
 
 
-def test_unset_points_at_the_file_that_actually_holds_the_setting(cfg_files):
-    cfg_files.home.write_text('{"patch_name": "Home"}', encoding="utf-8")
+def test_unset_points_at_the_environment_variable_that_holds_the_setting(cfg_files, monkeypatch):
+    monkeypatch.setenv("PDX_PATCH_NAME", "FromEnv")
     config.invalidate()
     message, = config.unset_value("patch_name")
-    assert str(cfg_files.home) in message and "change it there" in message
+    assert "PDX_PATCH_NAME" in message and "change it there" in message

@@ -87,27 +87,19 @@ def _block_groups(flagged, top):
     return list(groups.values())
 
 
-def layer_label(change):
-    """Who owns what a change touches, in a stack run: vanilla's content, a
-    foundation's content, or an addition of a foundation's the copy lacks."""
-    if not change.layer or change.layer == "vanilla":
-        return "changes vanilla content"
-    return "drops a foundation addition" if change.kind == "vanilla_added" else "changes foundation content"
-
-
 def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
-          unwrap=False, want=False, block_type=None, vanilla_file=None, layers=None, owner=None,
+          unwrap=False, want=False, block_type=None, vanilla_file=None,
           dialect=diff3.SCRIPT):
-    """Compare one copy with vanilla's versions (oldest first, the last current) and
-    return an Audited. tags names each version. line is the copy's first line in
-    `file`. In a stack run `layers` names each version's layer, and `owner` is the id
-    of the foundation owning the compared text, which each finding's key holds as `base`.
-    `dialect` says whether the text is script or GUI, which decides how siblings pair
-    and how a place is named (see diff3). No two findings of the copy share an id
-    (ledger.distinct); `distinct` does the same across an audit's copies."""
+    """Compares one copy with the versions of vanilla, and returns an Audited.
+
+    The oldest version is first, and the last version is the current one. `tags`
+    gives the name of each version. `line` is the first line of the copy in `file`.
+    `dialect` tells the audit if the text is script or GUI.
+
+    The dialect controls how siblings pair, and how the audit names a place (refer
+    to diff3). No two findings of one copy have the same id (refer to
+    ledger.distinct). `distinct` does the same for all the copies of one audit."""
     changes = diff3.compare(mod_text, versions, unwrap, dialect)
-    if layers:
-        changes = [c._replace(layer=layers[c.since]) if c.since is not None else c for c in changes]
     base_i = diff3.baseline(mod_text, versions, unwrap, dialect)
     base = tags[base_i] if base_i is not None else None
     new_text = versions[-1]
@@ -144,8 +136,6 @@ def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
                    "changes": sorted(([f"{c.kind}_{c.priority}", *texts[id(c)]] for c in group),
                                      key=json.dumps)}
             kind, detail = f"{audit_name}_block_changed_{priority}", f"{len(group)} changes"
-        if owner:
-            key["base"] = owner
         f = Finding(kind, name, f"{file}:{at(first)}", detail, None, key, since, base)
         findings.append(f)
         for c in group:
@@ -164,8 +154,6 @@ def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
                    "since": tags[c.since] if c.since is not None else None,
                    "first": None, "last": None, "cols": None, "anchor": None, "inside": False,
                    "vanilla": None if c.new is None else new_text[c.new.start:c.new.end]}
-            if c.layer and c.layer != "vanilla":
-                row["layer"] = c.layer
             if c.new is not None:
                 row["vfirst"], row["vlast"] = vlines.at(c.new.start), vlines.last(c.new)
             parent = c.parent or outer
@@ -203,12 +191,13 @@ def distinct(results):
     return out
 
 
-def print_target(title, facts, result, versions, tags, show_diff, dismissed=frozenset(), stacked=False,
-                 upstream=False):
-    """The detail for one target: its facts, then its findings grouped by priority,
-    high first, each with where it is, when vanilla made it, and both sides' text of
-    every change it holds. In a stack run each finding also says whose content it
-    touches (layer_label). `upstream` labels the other side as an adopted source's."""
+def print_target(title, facts, result, versions, tags, show_diff, dismissed=frozenset()):
+    """Prints the detail for one target.
+
+    The output starts with the facts of the target. Then it shows the findings in
+    groups by priority, with the high priority group first. Each finding shows its
+    location, the version in which vanilla made the change, and the text of both
+    sides."""
     print(f"### {title}")
     for label, value in facts:
         print(f"- **{label}:** {value}")
@@ -233,16 +222,13 @@ def print_target(title, facts, result, versions, tags, show_diff, dismissed=froz
         for fid, f, cs in group:
             where = " > ".join(f.key["path"])
             when = f" *(since {f.since})*" if f.since else ""
-            owned = ""
-            if stacked:
-                owned = " · " + "; ".join(dict.fromkeys(layer_label(c) for c in cs))
-            print(f"    [{ledger.short_id(fid)}] `{f.location}`" + (f" {where}" if where else "") + when + owned)
+            print(f"    [{ledger.short_id(fid)}] `{f.location}`" + (f" {where}" if where else "") + when)
             for c in cs:
                 was = normalized(versions[c.since - 1], c.old) if c.old is not None else None
                 yours, vanilla = value_pair(c.kind, *result.texts[id(c)], tags[c.since] if c.since is not None else None,
                                             was)
                 print(f"        yours:    {yours}")
-                print(f"        {'upstream:' if upstream else 'vanilla: '} {vanilla}")
+                print(f"        vanilla:  {vanilla}")
     if hidden:
         print(f"  {hidden} dismissed finding(s) hidden; list them with `pdx-audit --show-dismissed`")
     if not shown:
