@@ -27,7 +27,7 @@ TOKEN_PATTERN = re.compile(
     r'|(@\\?\[[^\]]+\])'  # @[] variable reference
     r'|(\[\[!?[^\]]*\])'  # [[]] scripted condition
     r'|(\?=|!=|>=|<=|[=\{\}<>!?])'  # operators
-    r'|([^\s=\{\}<>!?]+)'  # word
+    r'|([^\s=\{\}<>!?#]+)'  # word; '#' excluded so a glued comment (foo#bar) ends the word, as the engine reads it
     r'|\n'              # newline (for line counting)
 )
 
