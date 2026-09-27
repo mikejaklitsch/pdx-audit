@@ -331,14 +331,14 @@ def test_patch_name_for_a_snapshot_comes_from_the_config(cfg_cli, tmp_path, monk
     cfg_cli.config.data.write_text('{"patch_name": "Cortes"}')
     monkeypatch.setattr(config, "_CACHE", None)
     seen = {}
-    monkeypatch.setattr("pdxaudit.cli.do_snapshot",
+    monkeypatch.setattr("pdxaudit.cli.do_commit",
                         lambda repo, tag, patch, game=None: seen.update(patch=patch, tag=tag))
-    assert cfg_cli("--snapshot", "1.3.12")[0] == 0
+    assert cfg_cli("--commit", "1.3.12")[0] == 0
     assert seen == {"patch": "Cortes", "tag": "1.3.12"}
     monkeypatch.setenv("PDX_PATCH_NAME", "FromEnv")
-    cfg_cli("--snapshot", "1.3.13")
+    cfg_cli("--commit", "1.3.13")
     assert seen["patch"] == "FromEnv"
-    cfg_cli("--snapshot", "1.3.14", "--patch-name", "FromFlag")
+    cfg_cli("--commit", "1.3.14", "--patch-name", "FromFlag")
     assert seen["patch"] == "FromFlag"
 
 
@@ -364,7 +364,7 @@ def test_a_snapshot_creates_the_tracker_in_a_folder_that_already_exists(cfg_cli,
     (game / "a.txt").write_text("a = {\n\tb = 1\n}\n")
     empty = tmp_path / "picked-in-a-dialog.git"
     empty.mkdir()
-    code, out, _err = cfg_cli("--snapshot", "1.0.0", "--vanilla-repo", str(empty),
+    code, out, _err = cfg_cli("--commit", "1.0.0", "--vanilla-repo", str(empty),
                               "--game-root", str(tmp_path / "game"))
     assert code == 0 and "Created tracker repo" in out
     assert (empty / "HEAD").is_file()
@@ -374,6 +374,6 @@ def test_a_snapshot_refuses_a_folder_that_holds_something_else(cfg_cli, tmp_path
     used = tmp_path / "not-a-tracker"
     used.mkdir()
     (used / "notes.txt").write_text("mine")
-    code, _out, err = cfg_cli("--snapshot", "1.0.0", "--vanilla-repo", str(used))
+    code, _out, err = cfg_cli("--commit", "1.0.0", "--vanilla-repo", str(used))
     assert code == 1 and "is not a tracker repository and is not empty" in err
     assert (used / "notes.txt").read_text() == "mine"

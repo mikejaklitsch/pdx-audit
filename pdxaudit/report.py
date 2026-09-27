@@ -326,7 +326,7 @@ def window_heading(old_msg, new_msg, selected, history_old=None):
               if s in selected]
     if history_old and history_old != old_msg and history:
         if others:
-            return new_msg, (f"{' and '.join(history)} compared with every snapshot from {history_old}; "
+            return new_msg, (f"{' and '.join(history)} compared with every commit from {history_old}; "
                              f"{', '.join(others)} from {old_msg}.")
         return f"{history_old} → {new_msg}", None
     return (f"{old_msg} → {new_msg}" if old_msg or new_msg else ""), None

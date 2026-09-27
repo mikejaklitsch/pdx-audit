@@ -102,7 +102,7 @@ def _commit(repo, files, message, parent):
         args += ["-m", message]
         commit = g(*args)
         g("update-ref", "refs/heads/master", commit)
-        g("tag", message.split()[0], commit)   # version tag, like do_snapshot
+        g("tag", message.split()[0], commit)   # version tag, like do_commit
         return commit
     finally:
         if idx.exists():

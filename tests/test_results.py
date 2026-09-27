@@ -340,10 +340,12 @@ def test_display_rejects_command_flags(cli):
     assert code == 2 and "--display" in err
 
 
-def test_display_without_pyside6_explains_the_install(cli, monkeypatch):
+def test_display_says_the_install_is_incomplete_without_pyside6(cli, monkeypatch):
+    # PySide6 is a dependency of pdx-audit, so it is missing only when the install is
+    # broken. Say that, rather than offer it as something to add.
     monkeypatch.setitem(sys.modules, "pdxaudit.app", None)
     code, _out, err = cli("--display")
-    assert code == 1 and "PySide6" in err
+    assert code == 1 and "incomplete" in err and "PySide6" in err
 
 
 def test_results_file_never_writes_into_the_mod(cli):

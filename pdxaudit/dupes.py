@@ -18,8 +18,8 @@ REPLACE, or one INJECT. The audit reports
 
 Types vanilla itself defines across several files are merged by the engine
 (on_action, defines, named_colors, ...), so they skip the multiple-sources and
-plain-in-other-file checks. They are worked out from the newest snapshot; the
-config key `merge_types` adds more. Only the newest snapshot is needed."""
+plain-in-other-file checks. They are worked out from the newest commit; the
+config key `merge_types` adds more. Only the newest commit is needed."""
 
 import bisect
 import io

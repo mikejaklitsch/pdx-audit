@@ -46,13 +46,13 @@ from .base import VanillaBase
 from .report import ColorWriter, color_enabled, render_triage, window_heading
 from .results import build_payload, mod_fingerprint
 from .store import open_store, orphan_note, remove_orphaned_records
-from .tracker import (do_snapshot, find_mod_root, find_vanilla_repo, get_commits, locate_vanilla_repo,
+from .tracker import (do_commit, find_mod_root, find_vanilla_repo, get_commits, locate_vanilla_repo,
                       patch_name, prune_cache, resolve_ref, resolve_tracker_path, warn_if_tracker_stale)
 
 ALL_AUDITS = ["overrides", "deps", "gui", "loc", "dupes"]
 # Commands that do their own thing and exit; the --display app has a button for each.
 APP_COMMANDS = ("dismiss", "undismiss", "show_dismissed", "remove_orphaned_records",
-                "snapshot", "list_commits", "results_file")
+                "commit", "list_commits", "results_file")
 
 # Config commands, which need no mod and no tracker, so they run before either is found.
 CONFIG_COMMANDS = ("config", "set_value", "unset_value")
@@ -80,7 +80,7 @@ def build_parser():
                          "detail (keeps large mods readable)")
     ap.add_argument("--display", action="store_true",
                     help="Open the desktop app: run the audits and act on the findings "
-                         "with buttons (needs PySide6)")
+                         "with buttons")
     ap.add_argument("--results-file", metavar="FILE", help=argparse.SUPPRESS)
     ap.add_argument("--color", choices=("auto", "always", "never"), default="auto",
                     help="Colorize output: auto (a terminal only), always, or never")
@@ -97,7 +97,7 @@ def build_parser():
     ap.add_argument("--dupes", action="store_true",
                     help="Duplicate audit: one source of truth per definition")
     ap.add_argument("--full", action="store_true",
-                    help="Compare every audit from the oldest tracked snapshot to new")
+                    help="Compare every audit from the oldest tracked commit to new")
     ap.add_argument("--dismiss", nargs="+", metavar="ID",
                     help="Dismiss current findings by the id shown in the summary")
     ap.add_argument("--reason", metavar="TEXT",
@@ -117,8 +117,8 @@ def build_parser():
                     help="Filter to a specific category directory "
                          "(with --overrides and/or --dupes only)")
     ap.add_argument("--old",
-                    help="Old vanilla version tag or commit (default: the oldest snapshot for "
-                         "the override and GUI audits, the snapshot before --new for the others)")
+                    help="Old vanilla version tag or commit hash (default: the oldest commit for "
+                         "the override and GUI audits, the commit before --new for the others)")
     ap.add_argument("--new",
                     help="New vanilla version tag or commit (default: most-recent)")
     ap.add_argument("--list-commits", action="store_true",
@@ -127,15 +127,15 @@ def build_parser():
                     help="Mod root directory (default: auto-detect via .metadata/)")
     ap.add_argument("--vanilla-repo",
                     help="Path to vanilla-tracker bare git repo")
-    ap.add_argument("--snapshot", metavar="TAG",
-                    help="Snapshot the current vanilla install into the "
+    ap.add_argument("--commit", metavar="TAG",
+                    help="Commit the current vanilla install into the "
                          "tracker as version TAG (creates the tracker repo "
                          "on first use), then exit")
     ap.add_argument("--patch-name",
-                    help="Patch name used in the snapshot commit message (default: "
+                    help="Patch name used in the commit message (default: "
                          "$PDX_PATCH_NAME, the config file's patch_name, or Pavia)")
     ap.add_argument("--game-root", metavar="DIR",
-                    help="Game 'game' directory to snapshot from (default: "
+                    help="Game 'game' directory to commit from (default: "
                          "$PDX_GAME_ROOT, the config file's game_root, or the Steam "
                          "install). Point at an extracted old-version copy to "
                          "back-populate history")
@@ -204,8 +204,9 @@ def _open_app(mod_root, vanilla_repo, args, missing=None):
     try:
         from .app import launch
     except ImportError:
-        print('Error: --display needs PySide6. Install it with `pip install "pdx-audit[app]"`, '
-              "or `pipx inject pdx-audit PySide6` for a pipx install.", file=sys.stderr)
+        print("Error: the desktop app needs PySide6, which is part of pdx-audit. This install is "
+              "incomplete. Install pdx-audit again, or add PySide6 with "
+              "`pipx inject pdx-audit PySide6`.", file=sys.stderr)
         return 1
     return launch(mod_root, vanilla_repo, {
         "missing_tracker": missing, "tracker_override": args.vanilla_repo,
@@ -240,7 +241,7 @@ def _main():
             _usage_error(f"--{config_commands[0].split('_')[0]} cannot be combined with "
                          f"{', '.join(others)}; it does its own thing and exits")
     if args.full and args.old:
-        _usage_error("--full and --old cannot be combined; --full starts from the oldest snapshot")
+        _usage_error("--full and --old cannot be combined; --full starts from the oldest commit")
     if args.diff and args.summary:
         _usage_error("--diff and --summary cannot be combined; the diffs are part of the per-audit detail")
     if args.display:
@@ -255,9 +256,9 @@ def _main():
     if config_commands:
         sys.exit(_config_command(args))
 
-    if args.snapshot:
+    if args.commit:
         repo = resolve_tracker_path(args.mod_root, args.vanilla_repo)
-        do_snapshot(repo, args.snapshot, patch_name(args.patch_name), args.game_root)
+        do_commit(repo, args.commit, patch_name(args.patch_name), args.game_root)
         sys.exit(0)
 
     mod_root = find_mod_root(args.mod_root)
@@ -324,7 +325,7 @@ def _main():
         for i, (h, m) in enumerate(commits):
             if (full and full.startswith(h)) or (msg and m == msg):
                 return i
-        print(f"Error: --{side} '{ref}' is not a tracked snapshot.", file=sys.stderr)
+        print(f"Error: --{side} '{ref}' is not a tracked commit.", file=sys.stderr)
         sys.exit(1)
 
     new_i, old_i = 0, 1

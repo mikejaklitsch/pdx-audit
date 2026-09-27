@@ -1,4 +1,4 @@
-"""Vanilla-tracker access: git, snapshots, archives, path resolution."""
+"""Vanilla-tracker access: git, commits, archives, path resolution."""
 
 import subprocess
 import re
@@ -21,7 +21,9 @@ from .safety import remove_file, RefusedRemoval
 # pdx-audit writes cache files with these names in the cache folder of the tracker.
 CACHE_FILE_RE = r"(?:blocks|gui|vocab|dupes)-v\d+-[0-9a-f]{40}(?:-[0-9a-f]{12})?\.json"
 
-# The one temporary file --snapshot creates, inside the tracker repo itself.
+# The one temporary file --commit creates, inside the tracker repo itself. Its name is
+# also the pattern the removal helper checks, and it is left as it is so that a file an
+# earlier version left behind is still recognised and removed.
 SNAPSHOT_INDEX_NAME = "pdx-audit-snapshot.index"
 SNAPSHOT_INDEX_RE = r"pdx-audit-snapshot\.index"
 
@@ -57,7 +59,7 @@ def locate_vanilla_repo(mod_root: Path, override: str | None = None):
                   f"  {candidate}\n"
                   "Point pdx-audit at a tracker under any name with "
                   "`pdx-audit --set vanilla_repo <path>` (or --vanilla-repo <path> for one run), "
-                  "or create one with `pdx-audit --snapshot <version>`.")
+                  "or create one with `pdx-audit --commit <version>`.")
 
 
 def find_vanilla_repo(mod_root: Path, override: str | None = None) -> Path:
@@ -175,7 +177,7 @@ def resolve_ref(vanilla_repo, ref, commits, side):
             if resolved.startswith(h):
                 return msg
         return ""
-    # A snapshot git cannot resolve still has the name the reports and the app show
+    # A commit git cannot resolve still has the name the reports and the app show
     # it by: its version tag, or the first word of its message when it carries no tag.
     named = [(tag_of(msg), msg) for _h, msg in commits if msg]
     exact = next((msg for tag, msg in named if tag == ref), None)
@@ -200,7 +202,7 @@ def game_root(override: str | None = None) -> Path:
     return Path(canonical_path(value or str(DEFAULT_GAME_ROOT)))
 
 def patch_name(override: str | None = None) -> str:
-    """The patch name a snapshot records: `--patch-name`, then $PDX_PATCH_NAME, then
+    """The patch name a commit records: `--patch-name`, then $PDX_PATCH_NAME, then
     the config file's `patch_name`, then the built-in default."""
     value, _origin = setting("patch_name", override)
     return value or SETTINGS["patch_name"]["default"]
@@ -238,7 +240,7 @@ def warn_if_tracker_stale(vanilla_repo, newest_hash, sample_size=40):
         return None
     msg = (f"Warning: vanilla-tracker looks OUT OF DATE: {stale}/{checked} "
            f"sampled game files differ from the newest tracked commit. "
-           f"Record the new game version with `pdx-audit --snapshot <version>`, "
+           f"Record the new game version with `pdx-audit --commit <version>`, "
            f"then re-audit.")
     print(msg, file=sys.stderr)
     return msg
@@ -258,7 +260,7 @@ def resolve_tracker_path(mod_root_arg, vanilla_repo_arg) -> Path:
     return mod_root.parent / "vanilla-tracker" / "repo.git"
 
 class SnapshotError(Exception):
-    """git did not store every file of a snapshot."""
+    """git did not store every file of a commit."""
 
 def snapshot_tree(repo, root, files, index_name=SNAPSHOT_INDEX_NAME, index_re=SNAPSHOT_INDEX_RE):
     """The tree id of `files` (paths under `root`) stored in `repo`. Files are hashed
@@ -302,9 +304,9 @@ def _version_key(tag: str):
     suffix = re.sub(r"[\d.]+", "", tag)
     return (nums, 0 if suffix else 1, suffix)
 
-def do_snapshot(repo: Path, tag: str, patch: str,
-                game_root_arg: str | None = None) -> None:
-    """Snapshot a vanilla install's .txt/.yml/.gui files into the tracker."""
+def do_commit(repo: Path, tag: str, patch: str,
+              game_root_arg: str | None = None) -> None:
+    """Commit a vanilla install's .txt/.yml/.gui files into the tracker."""
     root = game_root(game_root_arg)
     if not root.is_dir():
         print(f"Error: game directory not found: {root}\n"
@@ -339,14 +341,14 @@ def do_snapshot(repo: Path, tag: str, patch: str,
         newest = max(existing, key=_version_key)
         if _version_key(tag) < _version_key(newest):
             print(f"Error: '{tag}' is older than the newest tracked version "
-                  f"('{newest}'), and snapshots must be recorded oldest "
-                  "first. To back-populate history, snapshot the old versions "
+                  f"('{newest}'), and versions must be recorded oldest "
+                  "first. To back-populate history, commit the old versions "
                   "in order into a new tracker (pass --vanilla-repo with a new "
-                  "path), then snapshot the current version last.",
+                  "path), then commit the current version last.",
                   file=sys.stderr)
             sys.exit(1)
 
-    print(f"Snapshotting {root} as {tag}...")
+    print(f"Committing {root} as {tag}...")
     files = sorted({f for ext in ("*.txt", "*.yml", "*.gui")
                     for f in root.rglob(ext) if f.is_file()})
     n_files = len(files)
@@ -359,7 +361,7 @@ def do_snapshot(repo: Path, tag: str, patch: str,
 
     head = git(repo, "rev-parse", "--verify", "--quiet", "HEAD").strip()
     if head and git(repo, "rev-parse", "HEAD^{tree}").strip() == tree:
-        print("No changes from the previous snapshot; nothing committed.")
+        print("No changes from the previous commit; nothing committed.")
         return
     msg = f"{tag} {patch}".strip()
     commit = commit_tree(repo, tree, head or None, msg)

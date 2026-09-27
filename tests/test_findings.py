@@ -76,7 +76,7 @@ def test_a_file_line_names_places_in_its_own_file_by_line():
 def test_the_heading_names_both_windows_when_copies_reach_further_back():
     out = render_triage([_change("A")], "1.1.0 Test", "1.2.0 Test", ["overrides", "gui"], history_old="1.0.0 Test")
     assert out.startswith("# Audit summary: 1.2.0 Test\n")
-    assert "every snapshot from 1.0.0 Test" in out and "INJECT targets from 1.1.0 Test" in out
+    assert "every commit from 1.0.0 Test" in out and "INJECT targets from 1.1.0 Test" in out
     out = render_triage([_change("A")], "1.1.0 Test", "1.2.0 Test", ["gui"], history_old="1.0.0 Test")
     assert out.startswith("# Audit summary: 1.0.0 Test → 1.2.0 Test")
     out = render_triage([_change("A")], "1.0.0 Test", "1.2.0 Test", ["gui"], history_old="1.0.0 Test")

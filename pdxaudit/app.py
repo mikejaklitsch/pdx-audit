@@ -1,7 +1,7 @@
 """The --display desktop app: run the audits, read the findings and act on them
 with buttons.
 
-Runs, snapshots and orphaned-record removal call the command
+Runs, commits and orphaned-record removal call the command
 line in a background process, so they behave exactly as they do in a terminal.
 A run writes its findings to results.json in the per-user data folder, and the
 window reads them back. Dismiss and Restore change the findings record
@@ -78,7 +78,7 @@ _fonts_loaded = False
 RAIL_PAGES = (
     ("findings", "Findings: what to fix, from the last run"),
     ("dismissed", "Dismissed: findings you hid, and how to bring them back"),
-    ("snapshots", "Tracker: the vanilla versions to compare with, and taking a new one"),
+    ("commits", "Tracker: the vanilla commits to compare with, and making a new one"),
     ("output", "Output: the run's report and its log"),
     ("settings", "Settings: where the tracker and the game are"),
 )
@@ -86,7 +86,7 @@ RAIL_PAGES = (
 ICONS = {
     "findings": '<path d="M3 4h10M3 8h10M3 12h6"/>',
     "dismissed": '<path d="M2.5 5h11v8h-11z"/><path d="M2 2.5h12V5H2z"/><path d="M6.5 8h3"/>',
-    "snapshots": '<path d="M8 2v3M8 11v3"/><circle cx="8" cy="8" r="3"/>',
+    "commits": '<path d="M8 2v3M8 11v3"/><circle cx="8" cy="8" r="3"/>',
     "output": '<path d="M2.5 3.5h11v9h-11z"/><path d="M5 7l2 1.5L5 10M8.5 10.5h2.5"/>',
     "folders": '<path d="M2 4.5h4.5l1.5 1.5H14v6.5H2z"/>',
     "files": '<path d="M3 4h10M3 8h10M3 12h10"/>',
@@ -946,7 +946,7 @@ class MainWindow(QMainWindow):
         app.setStyleSheet(stylesheet())
         self.mod_root = Path(mod_root)
         # The tracker can be absent: the app opens on its Settings page to be pointed at
-        # one, or the Tracker page takes the first snapshot, which creates it.
+        # one, or the Tracker page makes the first commit, which creates it.
         self.vanilla_repo = str(vanilla_repo) if vanilla_repo else ""
         self.tracker_override = (options or {}).get("tracker_override") or None
         self.missing_tracker = (options or {}).get("missing_tracker") or None
@@ -1152,7 +1152,7 @@ class MainWindow(QMainWindow):
         self.block_combo.setMaxVisibleItems(18)
         lay.addWidget(self.block_combo)
         lay.addSpacing(6)
-        self.full_box = QCheckBox("Compare from the oldest snapshot")
+        self.full_box = QCheckBox("Compare from the oldest commit")
         self.full_box.setToolTip("Every audit over the whole history, not just the last patch: "
                                  "the thorough, slow run")
         self.full_box.toggled.connect(lambda _on: self._update_window_label())
@@ -1445,18 +1445,18 @@ class MainWindow(QMainWindow):
         page, lay = self._page()
         row = QHBoxLayout()
         row.setSpacing(14)
-        snaps, sv = self._card("Snapshots", self._tracker_line())
-        self.snapshot_card = snaps
-        self.snapshot_tree = QTreeWidget(objectName="dataTree")
-        self.snapshot_tree.setHeaderLabels(["Version", "Commit"])
-        self.snapshot_tree.setRootIsDecorated(False)
-        OverlayScrollBar(self.snapshot_tree)
-        sv.addWidget(self.snapshot_tree, 1)
+        snaps, sv = self._card("Commits", self._tracker_line())
+        self.version_card = snaps
+        self.version_tree = QTreeWidget(objectName="dataTree")
+        self.version_tree.setHeaderLabels(["Version", "Hash"])
+        self.version_tree.setRootIsDecorated(False)
+        OverlayScrollBar(self.version_tree)
+        sv.addWidget(self.version_tree, 1)
         row.addWidget(snaps, 1)
 
         side = QVBoxLayout()
         side.setSpacing(14)
-        take, tv = self._card("Take a snapshot", "Record the installed game as a new version after each "
+        take, tv = self._card("Make a commit", "Record the installed game as a new version after each "
                                                  "patch, then run the audits. Add versions oldest first.")
         form = QFormLayout()
         form.setSpacing(8)
@@ -1475,10 +1475,10 @@ class MainWindow(QMainWindow):
         form.addRow("Patch name", self.snap_patch)
         form.addRow("Game folder", game_row)
         tv.addLayout(form)
-        self.snapshot_button = QPushButton("Take snapshot")
-        self.snapshot_button.setProperty("kind", "primary")
-        self.snapshot_button.clicked.connect(self.take_snapshot)
-        tv.addWidget(self.snapshot_button, 0, Qt.AlignmentFlag.AlignRight)
+        self.commit_button = QPushButton("Commit version")
+        self.commit_button.setProperty("kind", "primary")
+        self.commit_button.clicked.connect(self.commit_version)
+        tv.addWidget(self.commit_button, 0, Qt.AlignmentFlag.AlignRight)
         side.addWidget(take)
 
         orphans, ov = self._card("Orphaned records", "Remove the records left behind by rebased or "
@@ -1627,8 +1627,8 @@ class MainWindow(QMainWindow):
             return
         self.vanilla_repo = str(repo) if repo else ""
         self.missing_tracker = missing
-        if self.snapshot_card.hint is not None:
-            self.snapshot_card.hint.setText(self._tracker_line())
+        if self.version_card.hint is not None:
+            self.version_card.hint.setText(self._tracker_line())
         if self.tracker_override:
             self._settings_note(f"Saved. This window keeps the tracker it was opened with, "
                                 f"--vanilla-repo {self.tracker_override}.")
@@ -1705,11 +1705,11 @@ class MainWindow(QMainWindow):
             self.commits = get_commits(self.vanilla_repo) if self.vanilla_repo else []
         except Exception:
             self.commits = []
-        self.snapshot_tree.clear()
+        self.version_tree.clear()
         for h, msg in self.commits:
-            self.snapshot_tree.addTopLevelItem(QTreeWidgetItem([msg, h]))
-        self.snapshot_tree.resizeColumnToContents(0)
-        for combo, default in ((self.old_combo, "Previous snapshot"), (self.new_combo, "Newest snapshot")):
+            self.version_tree.addTopLevelItem(QTreeWidgetItem([msg, h]))
+        self.version_tree.resizeColumnToContents(0)
+        for combo, default in ((self.old_combo, "Previous commit"), (self.new_combo, "Newest commit")):
             keep = combo.currentData()
             combo.blockSignals(True)
             combo.clear()
@@ -1720,7 +1720,7 @@ class MainWindow(QMainWindow):
             combo.setCurrentIndex(i if i >= 0 else 0)
             combo.blockSignals(False)
         n = len(self.commits)
-        self.status_right.setText(f"{self._tracker_name()} · {n} snapshot{'' if n == 1 else 's'}")
+        self.status_right.setText(f"{self._tracker_name()} · {n} commit{'' if n == 1 else 's'}")
         self._update_window_label()
 
     def _update_window_label(self):
@@ -1733,13 +1733,13 @@ class MainWindow(QMainWindow):
         elif self.old_combo.currentData():
             old = by_commit.get(self.old_combo.currentData(), "")
         else:
-            # REPLACE blocks and GUI copies reach back to the oldest snapshot, so the
+            # REPLACE blocks and GUI copies reach back to the oldest commit, so the
             # pill names only the new version and the tooltip names both windows.
             i = msgs.index(new) if new in msgs else 0
             previous = msgs[i + 1] if i + 1 < len(msgs) else ""
             old = ""
             if previous:
-                tip = (f"REPLACE blocks and GUI copies: every snapshot up to {new}. "
+                tip = (f"REPLACE blocks and GUI copies: every commit up to {new}. "
                        f"Other audits: from {previous}.")
         self.window_button.setText(f"{old}  →  {new}" if old else new)
         self.window_button.setToolTip(tip)
@@ -1792,8 +1792,9 @@ class MainWindow(QMainWindow):
                 outcome = (None, e)
             try:
                 self._background_done.emit((name, generation, apply, failed), outcome)
-            except RuntimeError:     # the window was deleted while this ran
-                pass
+            except (RuntimeError, TypeError):
+                pass                 # the window was deleted while this ran; Qt reports
+                                     # the deleted signal as either of these
         threading.Thread(target=run, daemon=True).start()
 
     def _apply_background(self, job, outcome):
@@ -1862,13 +1863,13 @@ class MainWindow(QMainWindow):
     # --- background jobs --------------------------------------------------------
 
     def _set_busy(self, busy, text=None):
-        for w in (self.run_button, self.run_arrow, self.restore_button, self.snapshot_button,
+        for w in (self.run_button, self.run_arrow, self.restore_button, self.commit_button,
                   self.orphan_button):
             w.setEnabled(not busy)
         for w in (self.run_button, self.run_arrow):
             if not self.vanilla_repo:
                 w.setEnabled(False)
-                w.setToolTip("Choose a tracker in Settings, or take the first snapshot")
+                w.setToolTip("Choose a tracker in Settings, or make the first commit")
             else:
                 w.setToolTip("")
         # Settings are not edited while a run is reading the tracker they name.
@@ -1898,7 +1899,7 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(f"\n$ pdx-audit {' '.join(argv)}")
         self.log_fresh = True       # the first output of this run starts its own line
         self._set_busy(True, text)
-        # With no tracker, --snapshot is the one command that runs: it creates the repo
+        # With no tracker, --commit is the one command that runs: it creates the repo
         # where the settings say, so the flag is left off for it to resolve that itself.
         tracker = ["--vanilla-repo", self.vanilla_repo] if self.vanilla_repo else []
         proc.start(sys.executable, ["-m", "pdxaudit.cli", "--mod-root", str(self.mod_root),
@@ -1951,7 +1952,7 @@ class MainWindow(QMainWindow):
     def start_run(self):
         if not self.vanilla_repo:
             self._go_to_page(4)
-            self._settings_note("Choose a tracker, or take the first snapshot on the Tracker page.",
+            self._settings_note("Choose a tracker, or make the first commit on the Tracker page.",
                                 error=True)
             return
         path = self.store.results_path
@@ -1978,9 +1979,9 @@ class MainWindow(QMainWindow):
         self.run_banners = []
         for w in payload.get("warnings") or []:
             if "OUT OF DATE" in w:
-                self.run_banners.append(("warn", "The game has changed since the newest snapshot. Take a "
-                                         "snapshot of the new version, then run the audits again.",
-                                         "Take snapshot", self._go_to_snapshot))
+                self.run_banners.append(("warn", "The game has changed since the newest commit. Commit "
+                                         "the new version, then run the audits again.",
+                                         "Commit version", self._go_to_commit))
             else:
                 self.run_banners.append(("warn", w, None, None))
         self._render_banners()
@@ -2049,7 +2050,7 @@ class MainWindow(QMainWindow):
         banners = list(self.run_banners)
         if not self.vanilla_repo:
             banners.append(("error", "No vanilla tracker yet. Choose one in Settings, or take the "
-                            "first snapshot on the Tracker page.", "Settings",
+                            "first commit on the Tracker page.", "Settings",
                             lambda: self._go_to_page(4)))
         if self.orphans:
             banners.append(("warn", f"{len(self.orphans)} findings record(s) for this mod point at "
@@ -2080,7 +2081,7 @@ class MainWindow(QMainWindow):
         self.rail_group.button(index).setChecked(True)
         self._open_page(index)
 
-    def _go_to_snapshot(self):
+    def _go_to_commit(self):
         self._go_to_tracker()
         self.snap_version.setFocus()
 
@@ -2485,29 +2486,29 @@ class MainWindow(QMainWindow):
         if removed:
             self._status(f"Restored {len(removed)} finding(s). Run the audits again to list them.")
 
-    def take_snapshot(self):
+    def commit_version(self):
         tag = self.snap_version.text().strip()
         if not tag:
             self._status("Enter the game version to record, for example 1.3.12.")
             self.snap_version.setFocus()
             return
-        argv = ["--snapshot", tag]
+        argv = ["--commit", tag]
         if self.snap_patch.text().strip():
             argv += ["--patch-name", self.snap_patch.text().strip()]
         if self.snap_game.text().strip():
             argv += ["--game-root", self.snap_game.text().strip()]
-        self._start(argv, self._snapshot_done, f"Taking snapshot {tag}…")
+        self._start(argv, self._commit_done, f"Committing {tag}…")
 
-    def _snapshot_done(self, code):
+    def _commit_done(self, code):
         if not self.vanilla_repo:
-            self.reload_tracker()    # the first snapshot creates the tracker, which reloads them
+            self.reload_tracker()    # the first commit creates the tracker, which reloads them
         else:
             self.load_commits()
         if code != 0:
-            self._job_failed(f"The snapshot was not taken: {self.last_line}")
+            self._job_failed(f"The commit was not made: {self.last_line}")
             return
         self.snap_version.clear()
-        self._status(self.last_line or "Snapshot taken.")
+        self._status(self.last_line or "Commit made.")
 
     def _browse_game_root(self):
         path = QFileDialog.getExistingDirectory(self, "The game's 'game' folder",

@@ -61,7 +61,7 @@ def build_loc_vanilla(vanilla_repo, commit, wanted, label="", exclude=()):
     """(language, key) -> value at `commit`, restricted to the `wanted` keys the
     mod defines. Reads only vanilla .yml files in the languages the mod uses, in
     tree order so the first file defining a key wins, leaving out the paths in
-    `exclude`. Most files are identical across snapshots, so a run reads and parses
+    `exclude`. Most files are identical across commits, so a run reads and parses
     each distinct file once."""
     langs = {lang for lang, _ in wanted}
     if label:

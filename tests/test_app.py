@@ -330,7 +330,7 @@ def test_saving_a_tracker_writes_the_config_and_the_window_uses_it(window, cfg_f
     assert json.loads(cfg_files.data.read_text())["vanilla_repo"] == str(world.repo)
     assert str(window.vanilla_repo) == str(world.repo)
     assert window.commits                       # the tracker's history was read
-    assert str(world.repo) in window.snapshot_card.hint.text()
+    assert str(world.repo) in window.version_card.hint.text()
     assert window.setting_edits["vanilla_repo"].text() == str(world.repo)
     assert window.setting_notes["vanilla_repo"].text() == ""      # it is stored here now
 
@@ -392,7 +392,7 @@ def test_the_patch_name_setting_reaches_a_snapshot_taken_in_the_app(window, cfg_
     started = []
     window._start = lambda argv, on_done, text: started.append(argv)
     window.snap_version.setText("1.3.12")
-    window.take_snapshot()
+    window.commit_version()
     assert "--patch-name" not in started[0]      # so the CLI resolves the setting
 
 
@@ -411,7 +411,7 @@ def test_a_terminal_set_of_the_tracker_is_applied_to_the_open_window(window, cfg
     _settle(window)
     assert window.setting_edits["vanilla_repo"].text() == str(other)
     assert window.vanilla_repo == str(other)     # applied, not only displayed
-    assert str(other) in window.snapshot_card.hint.text()
+    assert str(other) in window.version_card.hint.text()
 
 
 def test_the_run_tooltip_goes_once_a_tracker_is_chosen(window):

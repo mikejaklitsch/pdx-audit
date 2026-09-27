@@ -16,9 +16,9 @@ A run compares the mod against a window of these versions. `new` is the newest v
 
 ## The copy and its baseline
 
-A REPLACE block, a GUI template or type that the mod defines again, and a `.gui` file at the path of a vanilla file are each a **copy**. A copy is vanilla text from some game version, with your edits on top.
+Three things are each a **copy**: a REPLACE block, a GUI template or type that the mod defines again, and a `.gui` file at the path of a vanilla file. A copy is vanilla text from some game version, with your edits on top.
 
-The audit must tell your edits from the changes of vanilla. It reads the copy at each version in the window and finds the version that the copy differs from least. That version is the **baseline**: the version that you took the copy from. Of two versions that are equally close, the older one wins.
+The audit must tell your edits from the changes of vanilla. It reads the copy at each version in the window and finds the version that the copy differs from least. That version is the **baseline**: the version that you took the copy from. If two versions are equally close, pdx-audit uses the older one.
 
 ## How a difference gets a cause
 
@@ -44,9 +44,9 @@ For example, vanilla reads:
 
 Your copy reads `cost = 100` and `custom = yes`. The baseline is 1.0. `cost` is an old value of vanilla, `upkeep` is an addition of vanilla, and `custom` is your edit. Your edit is in the same block, so both changes of vanilla are high.
 
-If your copy has a vanilla statement as a comment, word for word (`#trade_income = 0.1`), that is your own deletion and the audit does not report it. A statement that vanilla added at or before your baseline is also your own deletion, because you saw it when you made the copy.
+Your copy can hold a vanilla statement as a comment, word for word (`#trade_income = 0.1`). That is your own deletion, and the audit does not report it. A statement that vanilla added at or before your baseline is also your own deletion, because you saw it when you made the copy.
 
-A rename reads as one addition and one removal of the same text. The audit uses the history of vanilla to tell them apart: if the block that vanilla held under the old key reads the same as the block it holds under the new key, the two are one change. Only a block counts, because two short statements read alike too often. A history that starts after you made the copy cannot tell your edits from the earlier changes of vanilla, so a difference that is older than the oldest snapshot reads as yours.
+A rename reads as one addition and one removal of the same text. The audit uses the history of vanilla to tell them apart. Vanilla held a block under the old key, and it holds a block under the new key. If the two read the same, they are one change. Only a block counts, because two short statements read alike too often. A history that starts after you made the copy cannot tell your edits from the earlier changes of vanilla. A difference that is older than the oldest commit reads as yours.
 
 ## What each audit compares
 
@@ -72,14 +72,14 @@ A dismissal applies while that content is the same. When vanilla changes its sta
 
 pdx-audit keeps the record in the data folder of the user, with one file for each git commit of the mod. It never writes in the mod, and it never removes a folder. A branch sees the decisions up to its start point, and its own decisions.
 
-A finding stays in the report until you correct it or dismiss it, also after later snapshots move the window past its patch.
+A finding stays in the report until you correct it or dismiss it, also after later commits move the window past its patch.
 
 ## The version window
 
 | Invocation | Versions for copies | Window for the other audits |
 |---|---|---|
-| `pdx-audit` | each snapshot up to the newest | the last patch |
-| `pdx-audit --full` | each snapshot up to the newest | the oldest snapshot to the newest |
+| `pdx-audit` | each commit up to the newest | the last patch |
+| `pdx-audit --full` | each commit up to the newest | the oldest commit to the newest |
 | `pdx-audit --old X --new Y` | X through Y | X to Y |
 
 A default run writes the open findings. A run with a filter or a fixed window applies the dismissals, but never closes a finding that it did not examine.

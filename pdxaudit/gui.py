@@ -238,7 +238,7 @@ def commits_up_to(commits, new_hash):
 
 def version_window(commits, new_hash, old_hash=None):
     """The (hash, message) pairs from old_hash through new_hash, oldest first; from
-    the oldest tracked snapshot when old_hash is None."""
+    the oldest tracked commit when old_hash is None."""
     newest_first = commits_up_to(commits, new_hash)
     if old_hash:
         for i, (h, _msg) in enumerate(newest_first):
@@ -248,7 +248,7 @@ def version_window(commits, new_hash, old_hash=None):
 
 def audit_window(base, old_hash, new_hash, args, ctx=None):
     """The versions the GUI and override audits compare a copy with: from --old,
-    else the oldest snapshot, through the new version."""
+    else the oldest commit, through the new version."""
     from .base import as_base
     commits = ctx.commits if ctx is not None else as_base(base).commits()
     return version_window(commits, new_hash, old_hash if getattr(args, "old", None) else None)

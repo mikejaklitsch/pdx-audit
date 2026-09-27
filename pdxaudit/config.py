@@ -10,7 +10,7 @@ built-in default.
 Recognized keys:
     vanilla_repo   path to the vanilla-tracker bare git repo, under any name
     game_root      path to the game's install "game" directory
-    patch_name     the patch name a snapshot commit records
+    patch_name     the patch name a commit records
     skip_dirs      directories excluded from every scan
     skip_files     filename globs excluded from every scan
     merge_types    common/ folders the engine merges across files, beyond the
@@ -39,10 +39,10 @@ SETTINGS = {
                      "help": "the vanilla-tracker bare git repo, under any name"},
     "game_root": {"label": "Game folder", "kind": "path", "env": "PDX_GAME_ROOT",
                   "flag": "--game-root", "default": str(DEFAULT_VANILLA_ROOT),
-                  "help": "the game install's \"game\" directory, snapshotted into the tracker"},
+                  "help": "the game install's \"game\" directory, committed into the tracker"},
     "patch_name": {"label": "Default patch name", "kind": "text", "env": "PDX_PATCH_NAME",
                    "flag": "--patch-name", "default": "Pavia",
-                   "help": "the patch name a snapshot commit records"},
+                   "help": "the patch name a commit records"},
     "skip_dirs": {"kind": "list", "help": "directories excluded from every scan"},
     "skip_files": {"kind": "list", "help": "filename globs excluded from every scan"},
     "merge_types": {"kind": "list",
@@ -179,20 +179,20 @@ def _outranking(key):
 
 def _check_tracker(path):
     """A tracker path to store, and a note about it. A path that does not exist yet
-    is kept, since `--snapshot` creates the repo there."""
+    is kept, since `--commit` creates the repo there."""
     p = Path(canonical_path(path))
     if p.is_file():
         raise ConfigError(f"{p} is a file, not a folder. The tracker is a bare git repository, "
                           f"such as /path/to/my-tracker.git.")
     if not p.exists():
-        return str(p), (f"Note: {p} does not exist yet. `pdx-audit --snapshot <version>` creates the "
+        return str(p), (f"Note: {p} does not exist yet. `pdx-audit --commit <version>` creates the "
                         f"tracker there and records the installed game as its first version.")
     if not (p / "objects").is_dir() or not (p / "HEAD").is_file():
         if any(p.iterdir()):
             raise ConfigError(f"{p} is not a bare git repository: it has no HEAD and no objects/ "
                               f"directory. Point --set vanilla_repo at a tracker repo, or at a new "
-                              f"path for `--snapshot` to create.")
-        return str(p), f"Note: {p} is empty. `pdx-audit --snapshot <version>` creates the tracker there."
+                              f"path for `--commit` to create.")
+        return str(p), f"Note: {p} is empty. `pdx-audit --commit <version>` creates the tracker there."
     return str(p), None
 
 
@@ -203,14 +203,14 @@ def _check_game_root(path):
                           f"\"game\" directory.")
     if not (p / "in_game").is_dir():
         return str(p), (f"Note: {p} has no in_game/ directory, so it may not be the game's \"game\" "
-                        f"directory. Snapshots read .txt, .yml and .gui files under it.")
+                        f"directory. A commit reads the .txt, .yml and .gui files under it.")
     return str(p), None
 
 
 def _check_patch_name(value):
     text = " ".join(str(value).split())
     if not text:
-        raise ConfigError("the patch name cannot be empty. It is the name a snapshot commit records, "
+        raise ConfigError("the patch name cannot be empty. It is the name a commit records, "
                           "such as Pavia.")
     return text, None
 

@@ -25,7 +25,7 @@ def test_script_only_patch_is_detected(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(config, "_CACHE", {})
     warn_if_tracker_stale(tr.repo, tr.hashes["1.0"])
     err = capsys.readouterr().err
-    assert "OUT OF DATE" in err and "pdx-audit --snapshot" in err
+    assert "OUT OF DATE" in err and "pdx-audit --commit" in err
 
 
 def test_matching_install_is_quiet(tmp_path, monkeypatch, capsys):
