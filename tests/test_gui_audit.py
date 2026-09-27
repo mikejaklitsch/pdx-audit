@@ -22,7 +22,9 @@ def test_a_vanilla_change_the_copy_lacks_is_one_finding(world):
     [f] = findings
     assert (f.kind, f.name, f.location, f.since, f.base) == (
         "gui_vanilla_changed_mid", "foo", "in_game/gui/aaa_mod.gui:2", "1.1.0", "1.0.0")
-    assert f.key == {"target": "gui:in_game/template/foo", "path": ["foo", "size"],
+    # `template foo = {` is one header, named like `template foo {` (it once
+    # parsed as a stray word `template` and a block `foo`)
+    assert f.key == {"target": "gui:in_game/template/foo", "path": ["template foo", "size"],
                      "yours": "10 10", "vanilla": "20 20"}
     assert "yours:    10 10" in out and "vanilla:  10 10  →  20 20  (1.1.0)" in out
 

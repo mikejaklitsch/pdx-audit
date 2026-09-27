@@ -7,7 +7,12 @@ for ordinary code, not a sandbox: deliberately obfuscated calls can get past."""
 import ast
 from pathlib import Path
 
+import pdx_utilities
+
 ROOT = Path(__file__).resolve().parent.parent
+# pdx_utilities is the shared package (../pdx-utilities), not a vendored copy;
+# pdx-audit runs its code, so it is scanned too.
+SHARED = Path(pdx_utilities.__file__).resolve().parent
 
 BANNED_CALLS = {"rmtree", "removedirs", "rmdir", "TemporaryDirectory"}
 BANNED_FROM_IMPORTS = {
@@ -23,9 +28,12 @@ ALLOWED_FUNCTION = "remove_file"
 
 
 def _sources():
-    files = [*ROOT.glob("pdxaudit/*.py"), *ROOT.glob("pdx_utilities/*.py"),
-             *ROOT.glob("tests/*.py"), ROOT / "pdx-audit"]
-    return sorted(f for f in files if f.is_file())
+    """(path, display path) for every file the guard covers."""
+    files = [*ROOT.glob("pdxaudit/*.py"), *ROOT.glob("tests/*.py"),
+             ROOT / "pdx-audit"]
+    out = [(f, f.relative_to(ROOT).as_posix()) for f in files if f.is_file()]
+    out += [(f, f"pdx_utilities/{f.name}") for f in SHARED.glob("*.py")]
+    return sorted(out)
 
 
 def _first_word(node):
@@ -87,8 +95,7 @@ def violations(source, rel):
 
 def test_codebase_has_no_recursive_or_unguarded_removal():
     problems = []
-    for fp in _sources():
-        rel = fp.relative_to(ROOT).as_posix()
+    for fp, rel in _sources():
         for line, msg in violations(fp.read_text(encoding="utf-8"), rel):
             problems.append(f"{rel}:{line}: {msg}")
     assert not problems, "banned removal constructs:\n" + "\n".join(problems)

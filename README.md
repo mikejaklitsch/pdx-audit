@@ -85,4 +85,4 @@ pdx-audit --undismiss cc01a5e3
 
 ## From a clone
 
-Run `./pdx-audit`, or install it with `pipx install --editable .`. The tests run with `python -m pytest`.
+Clone [pdx-utilities](https://github.com/mikejaklitsch/pdx-utilities) next to this repo: pdx-audit's shared helpers live there. Then run `./pdx-audit`, or install with `pipx install --editable .` followed by `pipx inject pdx-audit --editable ../pdx-utilities`, so edits to the shared helpers reach pdx-audit immediately. The tests run with `python -m pytest`.
