@@ -177,7 +177,7 @@ def _dismissed_entries(store):
 
 
 def run_argv(options):
-    """The command-line flags for a run the app starts. Every run covers all five
+    """The command-line flags for a run the app starts. Every run covers all six
     audits, except that a category applies only to the override and duplicate
     audits, so a run with one covers just those two."""
     argv = ["--overrides", "--dupes"] if options.get("category") else []

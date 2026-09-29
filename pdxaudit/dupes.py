@@ -1,8 +1,9 @@
 """Duplicate audit: one source of truth per definition.
 
-For every `common/<type>` folder (all module roots together) the mod should
-define or override each name in exactly one place: one plain definition, one
-REPLACE, or one INJECT. The audit reports
+For every `common/<type>` folder, and for the events folder (all module roots
+together), the mod should define or override each name in exactly one place: one
+plain definition, one REPLACE, or one INJECT. An event id is one name, and the
+`namespace` statement of an events file is not a definition. The audit reports
 
   multiple sources        a name defined or overridden in 2+ places in the mod
   define key set twice    the same define key set in 2+ places in the mod
@@ -37,19 +38,31 @@ from .loc import is_replace_loc, loc_entries, mod_loc_files
 from .report import Finding
 from .tracker import MODULE_ROOTS, _git_archive, cache_path, full_hash
 
-DUPES_CACHE_VERSION = 1
+DUPES_CACHE_VERSION = 2
 _HEAD = re.compile(r"^\s*(?:([A-Z][A-Z_]*):)?([A-Za-z0-9_.\-:]+)\s*\??=")
 ON_ACTION = "common/on_action"
+EVENTS = "events"
+# Top-level statements of a type that are not definitions.
+NOT_DEFINITIONS = {EVENTS: frozenset({"namespace"})}
 # Keys an on_action holds once: a later one replaces the earlier one.
 ON_ACTION_SINGLE = ("effect", "trigger")
 
 
 def type_of(rel):
-    """'common/<type>' for a module-root-relative .txt path, else None."""
+    """'common/<type>' or 'events' for a module-root-relative .txt path, else None."""
     parts = rel.split("/")
     if len(parts) >= 4 and parts[0] in MODULE_ROOTS and parts[1] == "common":
         return f"common/{parts[2]}"
+    if len(parts) >= 3 and parts[0] in MODULE_ROOTS and parts[1] == EVENTS:
+        return EVENTS
     return None
+
+
+def definitions_of(t, entries):
+    """`entries` of scan_script without the top-level statements of type `t` that
+    are not definitions."""
+    skip = NOT_DEFINITIONS.get(t, frozenset())
+    return [e for e in entries if e[1] not in skip]
 
 
 def _code(line):
@@ -101,8 +114,8 @@ def vanilla_definitions(vanilla_repo, commit):
             pass
     names = defaultdict(lambda: defaultdict(list))
     files = {}
-    raw = _git_archive(vanilla_repo, commit, [f"{m}/common" for m in MODULE_ROOTS],
-                       timeout=180)
+    raw = _git_archive(vanilla_repo, commit,
+                       [f"{m}/{d}" for m in MODULE_ROOTS for d in ("common", EVENTS)], timeout=180)
     try:
         with tarfile.open(fileobj=io.BytesIO(raw or b""), ignore_zeros=True) as tf:
             for member in tf.getmembers():
@@ -113,6 +126,7 @@ def vanilla_definitions(vanilla_repo, commit):
                 if t is None or f is None:
                     continue
                 entries, _keys = scan_script(f.read().decode("utf-8-sig", errors="replace"))
+                entries = definitions_of(t, entries)
                 files[member.name] = sorted({n for _p, n, _l in entries})
                 for _p, n, _l in entries:
                     if member.name not in names[t][n]:
@@ -188,6 +202,7 @@ def run_dupes_audit(mod_root, base, new_hash, new_msg, args, ctx=None):
         except Exception:
             continue
         found, keys = scan_script(text)
+        found = definitions_of(t, found)
         file_names[rel] = {n for _p, n, _l in found}
         for prefix, name, line in found:
             if not block or name == block:

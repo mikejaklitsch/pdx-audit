@@ -86,3 +86,27 @@ def test_fingerprint_keys(tmp_path):
     findings, _out, _ = _run(tr, _mod(tmp_path), "1.2", "1.3")
     f = next(f for f in findings if f.name == "old_key")
     assert f.key == {"target": "deps:old_key", "use": "key"}
+
+
+def test_gui_templates_and_blocks_vanilla_dropped_are_found(tmp_path):
+    lib = "in_game/gui/shared/lib.gui"
+    old = 'template vanilla_button = {\n\tsize = { 1 1 }\n}\ntypes T {\n\ttype t = widget {\n\t\tblock "caption" {}\n\t}\n}\n'
+    new = 'template other_button = {\n\tsize = { 1 1 }\n}\ntypes T {\n\ttype t = widget {\n\t}\n}\n'
+    tr = build_tracker(tmp_path, [("1.0", {lib: old, F: "a = 1\n"}), ("1.1", {lib: new, F: "a = 1\n"})])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {
+        ".metadata/metadata.json": '{"id": "t"}',
+        # vanilla_button and "caption" came from vanilla; my_button and "mine" are the mod's own
+        "in_game/gui/mine.gui": ('template my_button = {\n\tsize = { 1 1 }\n}\n'
+                                 'window = {\n\tbutton = { using = vanilla_button }\n'
+                                 '\tbutton = { using = my_button }\n'
+                                 '\tt = { blockoverride "caption" {} blockoverride "mine" {} }\n'
+                                 '\twidget = { block "mine" {} }  # using = commented_out\n}\n'),
+    })
+    with redirect_stdout(io.StringIO()) as buf:
+        found = run_deps_audit(mod, tr.repo, tr.hashes["1.0"], "1.0 Test", tr.hashes["1.1"], "1.1 Test",
+                               make_ctx(tr.repo, "1.1"))
+    gui = sorted((f.name, f.detail, f.location) for f in found if f.kind == "deps_gui_dropped")
+    assert gui == [("caption", "block dropped in 1.1", "in_game/gui/mine.gui:7"),
+                   ("vanilla_button", "template dropped in 1.1", "in_game/gui/mine.gui:5")]
+    assert "GUI templates and blocks the mod uses that vanilla no longer defines" in buf.getvalue()

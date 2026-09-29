@@ -304,9 +304,16 @@ def _version_key(tag: str):
     suffix = re.sub(r"[\d.]+", "", tag)
     return (nums, 0 if suffix else 1, suffix)
 
+# The game files a commit records: script, localization and GUI, plus the small text
+# formats mods also replace whole (map data, shaders, entity assets). A commit made
+# before a format was added holds none of it; the same-path file audit reads a
+# format only from the commits that hold it.
+TRACKED_EXTS = (".txt", ".yml", ".gui", ".csv", ".map", ".shader", ".fxh", ".asset")
+
+
 def do_commit(repo: Path, tag: str, patch: str,
               game_root_arg: str | None = None) -> None:
-    """Commit a vanilla install's .txt/.yml/.gui files into the tracker."""
+    """Commit a vanilla install's TRACKED_EXTS files into the tracker."""
     root = game_root(game_root_arg)
     if not root.is_dir():
         print(f"Error: game directory not found: {root}\n"
@@ -349,8 +356,8 @@ def do_commit(repo: Path, tag: str, patch: str,
             sys.exit(1)
 
     print(f"Committing {root} as {tag}...")
-    files = sorted({f for ext in ("*.txt", "*.yml", "*.gui")
-                    for f in root.rglob(ext) if f.is_file()})
+    files = sorted({f for ext in TRACKED_EXTS
+                    for f in root.rglob(f"*{ext}") if f.is_file()})
     n_files = len(files)
     try:
         tree = snapshot_tree(repo, root, files)

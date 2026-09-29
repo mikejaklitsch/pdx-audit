@@ -231,3 +231,18 @@ def test_a_name_only_the_mod_has_may_sit_in_two_folders(tmp_path, monkeypatch):
                       "main_menu/common/modifier_type_definitions/b.txt": "my_modifier = {\n\tcolor = y\n}\n"})
     findings, _out, _ctx = _run(tr, mod, monkeypatch)
     assert "my_modifier" not in _by_name(findings)
+
+
+def test_event_ids_are_definitions_and_namespace_is_not(tmp_path, monkeypatch):
+    vanilla = dict(VANILLA, **{"in_game/events/flavor.txt": "namespace = fl\nfl.1 = {\n}\nfl.2 = {\n}\n"})
+    tr = build_tracker(tmp_path, [("1.0", vanilla)])
+    mod = tmp_path / "mod3"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}',
+                      "in_game/events/a.txt": "namespace = my\nmy.1 = {\n}\nfl.2 = {\n}\n",
+                      "in_game/events/b.txt": "namespace = my\nmy.1 = {\n}\n",
+                      "in_game/events/flavor.txt": "namespace = fl\nfl.1 = {\n}\n"})
+    names = _by_name(_run(tr, mod, monkeypatch)[0])
+    assert names["my.1"] == {"dupes_multiple_sources"}
+    assert names["fl.2"] == {"dupes_plain_other_file"}
+    assert names["in_game/events/flavor.txt"] == {"dupes_file_override_drops"}
+    assert "namespace" not in names and "fl.1" not in names

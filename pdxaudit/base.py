@@ -45,6 +45,17 @@ class VanillaBase:
         from .loc import build_loc_vanilla
         return build_loc_vanilla(self.repo, point, wanted, label)
 
+    def files(self, point):
+        """{path: blob id} for the files of vanilla at `point`."""
+        from .tracker import tree_files
+        return session.memo(("base.files", self.repo, point),
+                            lambda: dict(tree_files(self.repo, point)))
+
+    def blobs(self, ids):
+        """{blob id: bytes} for the blobs `files` names."""
+        from .tracker import read_blobs
+        return read_blobs(self.repo, ids)
+
     def definitions(self, point):
         from .dupes import vanilla_definitions
         return vanilla_definitions(self.repo, point)

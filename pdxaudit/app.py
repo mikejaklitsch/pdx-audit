@@ -35,8 +35,9 @@ HERE = Path(__file__).parent
 ROLE = Qt.ItemDataRole.UserRole
 SEV_ORDER = ("broken", "stale", "review")
 AUDIT_CHIPS = (("override", "Override"), ("deps", "Dependency"), ("gui", "GUI"),
-               ("loc", "Localization"), ("dupes", "Duplicate"))
-CLI_TO_AUDIT = {"overrides": "override", "deps": "deps", "gui": "gui", "loc": "loc", "dupes": "dupes"}
+               ("files", "File copy"), ("loc", "Localization"), ("dupes", "Duplicate"))
+CLI_TO_AUDIT = {"overrides": "override", "deps": "deps", "gui": "gui", "files": "files", "loc": "loc",
+                "dupes": "dupes"}
 AUDIT_LABEL = dict(AUDIT_CHIPS)
 
 C = {"bg": "#14161a", "rail": "#101215", "bar": "#171a1f", "list": "#16191d", "code": "#111317",

@@ -1,9 +1,10 @@
 """One copy of vanilla text measured against vanilla's history: diff3's changes as
 findings, the block view the app shows, and the per-target detail.
 
-A target is a GUI definition, a replaced GUI file, or a REPLACE block. Every change
-whose priority is high or mid is flagged. In a REPLACE each flagged change is one
-finding, of kind `override_<change>_<priority>`. In a GUI copy the changes vanilla
+A target is a GUI definition, a replaced GUI file, a REPLACE block, or one
+definition of a replaced script file. Every change whose priority is high or mid is
+flagged. In a REPLACE each flagged change is one finding, of kind
+`override_<change>_<priority>`. In a GUI copy and a file copy the changes vanilla
 made inside one block are one finding: a change joins the outermost block above it
 in an unbroken run of blocks that each hold a flagged change of their own, and a
 block with several changes is one `gui_block_changed_<priority>` finding. A finding's
@@ -89,7 +90,7 @@ def _block_groups(flagged, top):
 
 def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
           unwrap=False, want=False, block_type=None, vanilla_file=None,
-          dialect=diff3.SCRIPT):
+          dialect=diff3.SCRIPT, grouped=None):
     """Compares one copy with the versions of vanilla, and returns an Audited.
 
     The oldest version is first, and the last version is the current one. `tags`
@@ -98,7 +99,10 @@ def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
 
     The dialect controls how siblings pair, and how the audit names a place (refer
     to diff3). No two findings of one copy have the same id (refer to
-    ledger.distinct). `distinct` does the same for all the copies of one audit."""
+    ledger.distinct). `distinct` does the same for all the copies of one audit.
+
+    `grouped` makes the changes in one block one finding; by default only the GUI
+    audit groups them."""
     changes = diff3.compare(mod_text, versions, unwrap, dialect)
     base_i = diff3.baseline(mod_text, versions, unwrap, dialect)
     base = tags[base_i] if base_i is not None else None
@@ -115,7 +119,9 @@ def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
 
     texts = {id(c): (normalized(mod_text, c.mod), normalized(new_text, c.new)) for c in changes}
     flagged = [c for c in changes if c.priority in FLAGGED]
-    groups = (_block_groups(flagged, diff3.nodes(mod_text)) if audit_name == "gui"
+    if grouped is None:
+        grouped = audit_name == "gui"
+    groups = (_block_groups(flagged, diff3.nodes(mod_text)) if grouped
               else [[c] for c in flagged])
     findings, finding_of = [], {}
     for group in groups:

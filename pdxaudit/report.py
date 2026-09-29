@@ -104,6 +104,9 @@ KIND = {
     "override_orphaned": (
         SEV_BROKEN, "override", "overrides whose target vanilla no longer defines",
         "remove the override, or point it at the block vanilla replaced it with"),
+    "override_target_shadowed": (
+        SEV_BROKEN, "override", "overrides whose target vanilla defines only in a file the mod replaces",
+        "define the target in your copy of that file, or move the override's content into the copy"),
     "override_unreadable": (
         SEV_BROKEN, "override", "REPLACE blocks whose braces never close",
         "close the block so the game and the audit can read it"),
@@ -220,13 +223,66 @@ KIND.update({
     "deps_ref_dropped": (
         SEV_REVIEW, "deps", "names the mod references that vanilla no longer uses",
         "find what vanilla uses now and update or remove the reference"),
+    "deps_gui_dropped": (
+        SEV_REVIEW, "deps", "GUI templates and blocks the mod uses that vanilla no longer defines",
+        "find what vanilla uses now and update the `using` or `blockoverride`, or confirm another mod "
+        "defines it"),
     "dupes_plain_other_file": (
         SEV_REVIEW, "dupes", "plain definitions of a vanilla name in a file not at vanilla's path",
         "use REPLACE or INJECT, or give the file vanilla's path to replace the whole file"),
     "dupes_loc_key_same": (
         SEV_REVIEW, "dupes", "localization keys the mod defines more than once with the same text",
         "delete the extra copies"),
+    "file_block_changed_high": (
+        SEV_STALE, "files", "blocks of a file copy vanilla changed in several places, beside or over an edit "
+        "of yours", _BLOCK),
+    "file_block_changed_mid": (
+        SEV_REVIEW, "files", "blocks of a file copy vanilla changed in several places", _BLOCK),
+    "file_vanilla_changed_high": (
+        SEV_STALE, "files", "statements a file copy keeps at an old vanilla value, beside an edit of yours", _TAKE),
+    "file_vanilla_changed_mid": (
+        SEV_REVIEW, "files", "statements a file copy keeps at an old vanilla value", _TAKE),
+    "file_vanilla_added_high": (
+        SEV_STALE, "files", "statements vanilla added that a file copy lacks, beside an edit of yours", _ADD),
+    "file_vanilla_added_mid": (
+        SEV_REVIEW, "files", "statements vanilla added that a file copy lacks", _ADD),
+    "file_vanilla_removed_high": (
+        SEV_STALE, "files", "statements vanilla deleted that a file copy still carries, beside an edit of yours",
+        _DELETE),
+    "file_vanilla_removed_mid": (
+        SEV_REVIEW, "files", "statements vanilla deleted that a file copy still carries", _DELETE),
+    "file_vanilla_renamed_high": (
+        SEV_STALE, "files", "statements vanilla moved to another key that a file copy still sets under the old "
+        "one, beside an edit of yours", _RENAME),
+    "file_vanilla_renamed_mid": (
+        SEV_REVIEW, "files", "statements vanilla moved to another key that a file copy still sets under the old "
+        "one", _RENAME),
+    "file_vanilla_moved_high": (
+        SEV_STALE, "files", "statements vanilla moved into another block that a file copy still sets in the "
+        "old place, beside an edit of yours", _MOVE),
+    "file_vanilla_moved_mid": (
+        SEV_REVIEW, "files", "statements vanilla moved into another block that a file copy still sets in the "
+        "old place", _MOVE),
+    "file_both_changed_mid": (
+        SEV_REVIEW, "files", "statements you changed in a file copy that vanilla also changed or deleted", _CHECK),
+    "file_removed_changed_mid": (
+        SEV_REVIEW, "files", "statements you deleted from a file copy that vanilla has since changed", _RESTORE),
+    "file_def_added": (
+        SEV_STALE, "files", "definitions vanilla added to a file your copy replaces, so the game does not have "
+        "them", "copy the definition into your file, or dismiss the finding if leaving it out is deliberate"),
+    "file_def_removed": (
+        SEV_REVIEW, "files", "definitions vanilla deleted that your file copy still defines",
+        "delete the definition, or confirm the mod still needs it"),
+    "file_bulk_changed": (
+        SEV_REVIEW, "files", "definitions or files too large to compare statement by statement that vanilla "
+        "changed after the version your copy matches",
+        "compare your copy with vanilla's current text and take its changes, or dismiss the finding once "
+        "you have"),
+    "file_review": (
+        SEV_REVIEW, "files", "same-path files where vanilla added or removed its copy",
+        "confirm your file still makes sense against vanilla"),
     # informational: counted, never listed
+    "file_untracked": (SEV_INFO, "files", "", ""),
     "override_inject_context": (SEV_INFO, "override", "", ""),
     "override_nonblock": (SEV_INFO, "override", "", ""),
     "dupes_file_override_drops": (SEV_INFO, "dupes", "", ""),
@@ -237,8 +293,8 @@ _KIND_ORDER = sorted(KIND, key=lambda k: _SEV_ORDER.index(KIND[k][0]))
 BY_FILE = frozenset({"dupes_loc_key", "dupes_loc_key_same", "dupes_on_action_syntax",
                      "dupes_on_action_key"})
 
-_AUDIT_NAME = {"overrides": "override", "deps": "dependency",
-               "gui": "GUI", "loc": "localization", "dupes": "duplicate"}
+_AUDIT_NAME = {"overrides": "override", "deps": "dependency", "gui": "GUI",
+               "files": "same-path file", "loc": "localization", "dupes": "duplicate"}
 
 
 def finding_severity(f):
@@ -321,12 +377,14 @@ def window_heading(old_msg, new_msg, selected, history_old=None):
     copies with. If `history_old` is older than `old_msg`, and other audits also ran,
     the window is the new version only. The note then gives the name of both windows.
     In all other conditions, the note is None."""
-    history = [n for s, n in (("overrides", "REPLACE blocks"), ("gui", "GUI copies")) if s in selected]
+    history = [n for s, n in (("overrides", "REPLACE blocks"), ("gui", "GUI copies"), ("files", "file copies"))
+               if s in selected]
     others = [n for s, n in (("overrides", "INJECT targets"), ("deps", "dependencies"), ("loc", "localization"))
               if s in selected]
     if history_old and history_old != old_msg and history:
         if others:
-            return new_msg, (f"{' and '.join(history)} compared with every commit from {history_old}; "
+            named = history[0] if len(history) == 1 else f"{', '.join(history[:-1])} and {history[-1]}"
+            return new_msg, (f"{named} compared with every commit from {history_old}; "
                              f"{', '.join(others)} from {old_msg}.")
         return f"{history_old} → {new_msg}", None
     return (f"{old_msg} → {new_msg}" if old_msg or new_msg else ""), None

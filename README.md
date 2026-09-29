@@ -27,7 +27,7 @@ On the **Settings** page, fill the two boxes and press **Save** under each one.
 
 ## Build the history
 
-Each commit holds the `.txt`, `.yml` and `.gui` files of one game version, read from your install. The audits compare your mod with these commits. A commit does not read your mod.
+Each commit holds the `.txt`, `.yml` and `.gui` files of one game version, read from your install, and the small text formats that mods also replace whole: `.csv`, `.map`, `.shader`, `.fxh` and `.asset`. A tracker made before a format was added holds none of it; commit the installed version again under a new tag (for example `1.3.11.1`) to start its history. The audits compare your mod with these commits. A commit does not read your mod.
 
 **Commit the versions oldest first.** pdx-audit refuses a version that is older than the newest one in the tracker, because the audits read the git order as the patch order. So if you commit the current version first, you cannot add older versions. You must start again with a new tracker.
 
@@ -54,10 +54,11 @@ Press **Run audits**. Each chip in the top bar gives the number of findings of o
 The app runs the audits through this interface, and you can use it to script them. Run pdx-audit in your mod folder, or in a folder below it. It finds the mod root by the `.metadata` folder, and `--mod-root` gives the root directly.
 
 ```bash
-pdx-audit                     # all five audits
+pdx-audit                     # all six audits
 pdx-audit --overrides         # REPLACE and INJECT blocks against vanilla
-pdx-audit --deps              # names that vanilla no longer uses
+pdx-audit --deps              # names and GUI templates that vanilla no longer uses
 pdx-audit --gui               # vanilla GUI changes that your copies do not have
+pdx-audit --files             # vanilla changes inside files your mod replaces at the same path
 pdx-audit --loc               # vanilla strings that changed under keys you override
 pdx-audit --dupes             # names that the mod defines in more than one place
 

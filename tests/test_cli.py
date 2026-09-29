@@ -130,7 +130,7 @@ def test_category_only_with_overrides_or_dupes(cli):
 def test_block_skips_the_dependency_audit(cli):
     code, out, _ = cli("--block", "some_building")
     assert code == 0
-    assert "Ran override, GUI, localization, duplicate." in out
+    assert "Ran override, GUI, same-path file, localization, duplicate." in out
 
 
 def test_duplicates_cannot_be_dismissed(cli):

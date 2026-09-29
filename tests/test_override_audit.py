@@ -159,3 +159,23 @@ def test_a_dismissed_change_keeps_no_mark_in_the_block(world):
     rows = results.block_rows(block)
     assert not any(r["ghost"] for r in rows)
     assert [r["n"] for r in rows if r["mark"]] == [3]
+
+
+def test_an_override_of_a_target_only_in_a_replaced_file_is_orphaned(tmp_path):
+    a = "in_game/common/building_types/a.txt"
+    vanilla = {a: "foo = {\n\tcost = 1\n}\nbar = {\n\tcost = 1\n}\nbaz = {\n\tcost = 1\n}\n"}
+    tr = build_tracker(tmp_path, [("1.0", vanilla), ("1.1", vanilla)])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {
+        ".metadata/metadata.json": '{"id": "t"}',
+        # The copy of a.txt drops foo, keeps baz, and injects into bar, which it also drops.
+        a: "baz = {\n\tcost = 2\n}\nINJECT:bar = {\n\tx = 1\n}\n",
+        "in_game/common/building_types/m.txt": ("INJECT:foo = {\n\tx = 1\n}\nINJECT:baz = {\n\tx = 1\n}\n"
+                                                "INJECT_OR_CREATE:foo = {\n\tx = 1\n}\n"),
+    })
+    with redirect_stdout(io.StringIO()) as buf:
+        found = run_override_audit(mod, tr.repo, tr.hashes["1.0"], "1.0 Test", tr.hashes["1.1"], "1.1 Test",
+                                   audit_args(), make_ctx(tr.repo, "1.1"))
+    shadowed = sorted((f.name, f.location) for f in found if f.kind == "override_target_shadowed")
+    assert shadowed == [("bar", f"{a}:4"), ("foo", "in_game/common/building_types/m.txt:1")]
+    assert "Targets Only in a Vanilla File the Mod Replaces (2)" in buf.getvalue()

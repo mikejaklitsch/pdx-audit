@@ -399,6 +399,56 @@ def mod_top_level_names(mod_root):
             depth = max(0, depth + code.count("{") - code.count("}"))
     return names
 
+GUI_USING = re.compile(r'(?<![\w.])using\s*=\s*"?([A-Za-z_][\w.]*)"?')
+GUI_BLOCKOVERRIDE = re.compile(r'(?<![\w.])blockoverride\s+"([^"]+)"')
+GUI_BLOCK = re.compile(r'(?<![\w.])block\s+"([^"]+)"')
+
+
+def _gui_code_keeping_strings(line):
+    """A .gui line without its comment; a # inside a string is not a comment."""
+    in_str = False
+    for i, c in enumerate(line):
+        if c == '"':
+            in_str = not in_str
+        elif c == "#" and not in_str:
+            return line[:i]
+    return line
+
+
+def mod_gui_references(mod_root):
+    """({('template' | 'block', name): ['file:line', ...]}, modules) for the GUI
+    templates the mod's .gui files use (`using = name`) and the blocks they override
+    (`blockoverride "name"`), leaving out the templates and blocks the mod defines
+    itself. modules: the module roots holding the mod's .gui files."""
+    from .gui import mod_gui_files, parse_gui_defs
+    uses, own, modules = defaultdict(list), set(), set()
+    for rel, text in mod_gui_files(mod_root):
+        modules.add(rel.split("/", 1)[0])
+        own |= {("template", d["name"]) for d in parse_gui_defs(text)[0]
+                if d["kind"] in ("template", "local_template")}
+        for ln, raw in enumerate(text.split("\n"), 1):
+            code = _gui_code_keeping_strings(raw)
+            own |= {("block", n) for n in GUI_BLOCK.findall(code)}
+            for n in GUI_USING.findall(code):
+                uses[("template", n)].append(f"{rel}:{ln}")
+            for n in GUI_BLOCKOVERRIDE.findall(code):
+                uses[("block", n)].append(f"{rel}:{ln}")
+    return {k: v for k, v in uses.items() if k not in own}, sorted(modules)
+
+
+def gui_vocab(base, point, modules, label=""):
+    """{('template' | 'block', name)} that vanilla's .gui files define at `point`."""
+    def build():
+        defs, files, _bad = base.gui_index(point, modules, label)
+        out = {("template", name) for (_m, kind, name) in defs if kind == "template"}
+        for text in files.values():
+            for raw in text.split("\n"):
+                if "block" in raw:
+                    out |= {("block", n) for n in GUI_BLOCK.findall(_gui_code_keeping_strings(raw))}
+        return out
+    return session.memo(("gui_vocab", id(base), point, tuple(modules)), build)
+
+
 def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=None):
     """Names the mod uses that the base used at some tracked version up to the new
     version but no longer uses at it, each with the patch that dropped it. The
@@ -411,8 +461,9 @@ def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=Non
     keys = mod_referenced_tokens(mod_root)
     refs = mod_referenced_values(mod_root)
     own = mod_top_level_names(mod_root)
+    gui_uses, gui_modules = mod_gui_references(mod_root)
     if ctx is not None:
-        ctx.scanned["deps"] = len(keys) + len(refs)
+        ctx.scanned["deps"] = len(keys) + len(refs) + len(gui_uses)
     print(f"Scanning {len(keys)} keys and {len(refs)} references in {mod_root.name}...",
           file=sys.stderr)
 
@@ -451,6 +502,21 @@ def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=Non
     dropped_keys = dropped(keys)
     dropped_refs = dropped(refs, skip=set(keys))   # a name the mod also writes is a key
 
+    # GUI templates and blocks, measured against vanilla's .gui files at each version.
+    dropped_gui = []
+    if gui_uses:
+        gui_vocabs = [(_tag(msg), gui_vocab(base, h, gui_modules, f"gui names {i + 1}/{len(old_first)} ({h[:7]})"))
+                      for i, (h, msg) in enumerate(old_first)]
+        if gui_vocabs[-1][1]:
+            for (kind, name), sites in gui_uses.items():
+                if (kind, name) in gui_vocabs[-1][1]:
+                    continue
+                for i in range(len(gui_vocabs) - 2, -1, -1):
+                    if (kind, name) in gui_vocabs[i][1]:
+                        dropped_gui.append((kind, name, gui_vocabs[i][0], gui_vocabs[i + 1][0], sites))
+                        break
+        dropped_gui.sort(key=lambda x: (x[3], x[0], x[1]))
+
     summary = [f"# Dependency Audit: {vocabs[0][0]} → {vocabs[-1][0]}"]
     if old_msg or new_msg:
         summary.append(f"*every tracked version up to {new_msg}*" if not fixed_window
@@ -461,11 +527,13 @@ def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=Non
         f"against vanilla's vocabulary at {len(vocabs)} tracked versions.",
         f"- **{len(dropped_keys)}** keys the mod writes that vanilla no longer uses",
         f"- **{len(dropped_refs)}** names the mod references that vanilla no longer uses",
+        f"- **{len(dropped_gui)}** GUI templates and blocks the mod uses that vanilla no longer defines "
+        f"(of {len(gui_uses)} it uses)",
         "",
     ]
     print("\n".join(summary))
 
-    if not dropped_keys and not dropped_refs:
+    if not dropped_keys and not dropped_refs and not dropped_gui:
         print("**No keys or references the mod uses were dropped by vanilla.**")
         return []
 
@@ -483,6 +551,16 @@ def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=Non
 
     section("Keys the mod writes that vanilla no longer uses", dropped_keys, "writes")
     section("Names the mod references that vanilla no longer uses", dropped_refs, "references")
+    if dropped_gui:
+        print("## GUI templates and blocks the mod uses that vanilla no longer defines")
+        print()
+        for kind, name, last, gone, sites in dropped_gui:
+            more = f" (+{len(sites) - 1} more)" if len(sites) > 1 else ""
+            how = "`using`" if kind == "template" else "`blockoverride`"
+            print(f"### {name}")
+            print(f"- **Vanilla:** {kind} defined at {last}, gone since {gone}")
+            print(f"- **Mod uses it with {how} at:** `{sites[0]}`{more}")
+            print()
 
     findings = []
     for kind, use, items in (("deps_key_dropped", "key", dropped_keys),
@@ -490,6 +568,9 @@ def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=Non
         for name, _last, gone, _count, sites in items:
             findings.append(Finding(kind, name, sites[0], f"dropped in {gone}", None,
                                     {"target": f"deps:{name}", "use": use}, gone))
+    for kind, name, _last, gone, sites in dropped_gui:
+        findings.append(Finding("deps_gui_dropped", name, sites[0], f"{kind} dropped in {gone}", None,
+                                {"target": f"deps:gui/{kind}/{name}", "use": kind}, gone))
     return findings
 
 def names_defined_in_vanilla(vanilla_repo, commit, categories, names):
@@ -527,6 +608,33 @@ def names_defined_in_vanilla(vanilla_repo, commit, categories, names):
 
 def override_target(ov):
     return f"override:{ov['category']}/{ov['block']}"
+
+
+def shadowed_targets(mod_root, overrides, new_idx):
+    """[(override, vanilla file)] for each override whose target vanilla defines
+    only in a file the mod replaces at the same path, while the mod's copy of that
+    file does not define the target. The copy loads instead of vanilla's file, so the
+    target does not exist when the override applies: an INJECT or REPLACE fails and a
+    TRY_ one does nothing. An _OR_CREATE override creates the target and is left out."""
+    from .dupes import scan_script
+    out = []
+    for ov in overrides:
+        if ov["type"].endswith("_OR_CREATE"):
+            continue
+        entry = new_idx.get((ov["category"], ov["block"]))
+        if not entry:
+            continue
+        copy = Path(mod_root) / entry[0]
+        if not copy.is_file():
+            continue
+        try:
+            entries, _keys = scan_script(session.read_text(copy))
+        except (OSError, UnicodeDecodeError):
+            continue
+        # Only a plain definition makes the target; an override in the copy does not.
+        if ov["block"] not in {name for prefix, name, _line in entries if not prefix}:
+            out.append((ov, entry[0]))
+    return out
 
 def _tag(msg):
     return tag_of(msg)
@@ -835,6 +943,8 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
         defined_elsewhere = [o for o in hard_misses if o["block"] in present]
         absent = [o for o in hard_misses if o["block"] not in present]
 
+    shadowed = shadowed_targets(mod_root, unique, new_idx)
+
     # An _OR_CREATE override whose target vanilla removed creates the object instead
     # of being orphaned.
     created = [r for r in removed if r[0]["type"].endswith("_OR_CREATE")]
@@ -856,6 +966,7 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
         f"- **{len(changed_inject)}** INJECT targets vanilla changed",
         f"- **{len(scalar_results)}** single-value REPLACEs vanilla changed",
         f"- **{len(removed)}** vanilla blocks removed: override orphaned",
+        f"- **{len(shadowed)}** targets defined only in a vanilla file the mod replaces: override orphaned",
         f"- **{len(created)}** vanilla blocks removed that an _OR_CREATE override now creates",
         f"- **{len(absent)}** not found in vanilla, **{len(defined_elsewhere)}** defined but not as a block",
         f"- **{len(unchanged)}** current with vanilla",
@@ -869,6 +980,17 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
         for ov, vfile, since, _base in removed:
             print(f"- **{ov['type']}:{ov['block']}**, `{ov['file']}:{ov['line']}` "
                   f"(was in `{vfile}`, removed in {since})")
+        print()
+
+    if shadowed:
+        print(f"## Targets Only in a Vanilla File the Mod Replaces ({len(shadowed)})")
+        print()
+        print("The mod's file at the same path loads instead of vanilla's, and it does not "
+              "define these targets, so the override finds nothing to change.")
+        print()
+        for ov, vfile in shadowed:
+            print(f"- ✗ **{ov['type']}:{ov['block']}**, `{ov['file']}:{ov['line']}`: vanilla defines it "
+                  f"in `{vfile}`, which the mod replaces")
         print()
 
     if created:
@@ -974,6 +1096,10 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
             # injection still lands the same way, so this is informational.
             findings.append(Finding("override_inject_context", ov["block"], loc, "", None,
                                     {"target": override_target(ov)}))
+    for ov, vfile in shadowed:
+        findings.append(Finding("override_target_shadowed", ov["block"], f"{ov['file']}:{ov['line']}",
+                                f"defined in {vfile}", None,
+                                {"target": override_target(ov), "copy": vfile}))
     for ov in absent:
         findings.append(Finding("override_absent", ov["block"], f"{ov['file']}:{ov['line']}",
                                 "", None, {"target": override_target(ov)}))
@@ -982,12 +1108,12 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
                                 "", None, {"target": override_target(ov)}))
 
     if (not n_changes and not overlaps_found and not removed and not created and not absent
-            and not unreadable):
+            and not unreadable and not shadowed):
         print("**All overrides are current with vanilla.** No action needed.")
     else:
         print("---")
         print(f"**Action needed:** {n_changes} REPLACE changes to take or check, "
-              f"{overlaps_found} INJECT collisions, {len(removed)} orphaned.")
+              f"{overlaps_found} INJECT collisions, {len(removed) + len(shadowed)} orphaned.")
         if not args.diff and (changed_replace or changed_inject):
             print("Run with `--diff` for vanilla's changes since each copy's version.")
     return findings

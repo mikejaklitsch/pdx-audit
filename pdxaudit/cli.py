@@ -1,6 +1,6 @@
 """Diff mod overrides and referenced names against vanilla patch changes.
 
-Five audits (name one or more to run just those, or none to run all five), all
+Six audits (name one or more to run just those, or none to run all six), all
 driven by the vanilla-tracker bare git repo:
 
   Override audit (--overrides): finds every INJECT:, REPLACE:, TRY_ and _OR_CREATE
@@ -15,6 +15,11 @@ driven by the vanilla-tracker bare git repo:
   GUI audit (--gui): finds mod .gui templates/types that shadow vanilla's and
   mod .gui files that replace a vanilla file, and compares each copy with
   vanilla's tracked versions the same way.
+
+  Same-path file audit (--files): every other mod file at a vanilla file's path
+  (events, map_data, setup, common/ files, .csv, shaders) replaces vanilla's whole
+  file. Each copy is compared with vanilla's tracked versions definition by
+  definition, and definitions vanilla added that the copy lacks are reported.
 
   Localization audit (--loc): loc keys the mod redefines whose vanilla value
   changed or was removed.
@@ -39,6 +44,7 @@ from contextlib import redirect_stdout
 
 from . import config, ledger, session
 from .dupes import run_dupes_audit
+from .files import run_file_audit
 from .gui import run_gui_audit
 from .loc import run_loc_audit
 from .overrides import run_deps_audit, run_override_audit
@@ -49,7 +55,7 @@ from .store import open_store, orphan_note, remove_orphaned_records
 from .tracker import (do_commit, find_mod_root, find_vanilla_repo, get_commits, locate_vanilla_repo,
                       patch_name, prune_cache, resolve_ref, resolve_tracker_path, warn_if_tracker_stale)
 
-ALL_AUDITS = ["overrides", "deps", "gui", "loc", "dupes"]
+ALL_AUDITS = ["overrides", "deps", "gui", "files", "loc", "dupes"]
 # Commands that do their own thing and exit; the --display app has a button for each.
 APP_COMMANDS = ("dismiss", "undismiss", "show_dismissed", "remove_orphaned_records",
                 "commit", "list_commits", "results_file")
@@ -91,6 +97,9 @@ def build_parser():
     ap.add_argument("--gui", action="store_true",
                     help="GUI audit: implicit template/type shadowing and "
                          "same-path .gui file replacements")
+    ap.add_argument("--files", action="store_true",
+                    help="Same-path file audit: mod files that replace a vanilla file "
+                         "(events, map_data, setup, common/), compared definition by definition")
     ap.add_argument("--loc", action="store_true",
                     help="Localization audit: loc keys the mod overrides "
                          "whose vanilla value changed or was removed")
@@ -373,6 +382,8 @@ def _main():
         "deps": lambda: run_deps_audit(
             mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx),
         "gui": lambda: run_gui_audit(
+            mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx),
+        "files": lambda: run_file_audit(
             mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx),
         "loc": lambda: run_loc_audit(
             mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx),

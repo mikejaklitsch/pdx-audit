@@ -4,7 +4,7 @@ This document gives what the audits compare, and why they report what they repor
 
 ## What the audits compare against
 
-pdx-audit keeps the `.txt`, `.yml` and `.gui` files of the game in a bare git repository, the tracker. Each commit is one game version:
+pdx-audit keeps the `.txt`, `.yml` and `.gui` files of the game, and the small text formats `.csv`, `.map`, `.shader`, `.fxh` and `.asset`, in a bare git repository, the tracker. Each commit is one game version:
 
 ```
 23272f5  1.3.11 Pavia      <- newest
@@ -16,7 +16,7 @@ A run compares the mod against a window of these versions. `new` is the newest v
 
 ## The copy and its baseline
 
-Three things are each a **copy**: a REPLACE block, a GUI template or type that the mod defines again, and a `.gui` file at the path of a vanilla file. A copy is vanilla text from some game version, with your edits on top.
+Four things are each a **copy**: a REPLACE block, a GUI template or type that the mod defines again, a `.gui` file at the path of a vanilla file, and each top-level definition of any other file at the path of a vanilla file. A copy is vanilla text from some game version, with your edits on top.
 
 The audit must tell your edits from the changes of vanilla. It reads the copy at each version in the window and finds the version that the copy differs from least. That version is the **baseline**: the version that you took the copy from. If two versions are equally close, pdx-audit uses the older one.
 
@@ -50,11 +50,12 @@ A rename reads as one addition and one removal of the same text. The audit uses 
 
 ## What each audit compares
 
-- **Override** (`--overrides`): each `REPLACE:` block against its own history, by the method above. An `INJECT:` adds children to a vanilla block, so the audit compares the top-level keys of that block between the old version and the new version. A key that the INJECT sets and vanilla also changed is stale, because the final value in the game is different. A target that vanilla removed is an orphaned override.
-- **Dependency** (`--deps`): each name that your script uses against the vocabulary of vanilla at each version. The audit reports a name that vanilla used at an earlier version and no longer uses, with the patch that removed it. It does not guess renames.
+- **Override** (`--overrides`): each `REPLACE:` block against its own history, by the method above. An `INJECT:` adds children to a vanilla block, so the audit compares the top-level keys of that block between the old version and the new version. A key that the INJECT sets and vanilla also changed is stale, because the final value in the game is different. A target that vanilla removed is an orphaned override. So is a target that vanilla defines only in a file the mod replaces at the same path, when the mod's copy of that file does not define it: the copy loads instead of vanilla's file, and the target does not exist.
+- **Dependency** (`--deps`): each name that your script uses against the vocabulary of vanilla at each version, and each GUI template (`using = name`) and block (`blockoverride "name"`) that your `.gui` files use against the templates and blocks of vanilla's `.gui` files. The audit reports a name that vanilla used at an earlier version and no longer uses, with the patch that removed it. It does not guess renames, and it leaves out the names that the mod defines itself.
 - **GUI** (`--gui`): a GUI override has no keyword. The same name or the same path *is* the override. The audit compares each copy against its history, and reports all the changes in one block as one finding.
+- **Same-path file** (`--files`): a mod file at the path of a vanilla file replaces vanilla's whole file. This audit reads every such file that the GUI and localization audits do not: events, map data, setup files, plain definitions in `common/`, `.csv` files and shaders. A script file is split into its top-level definitions, and each definition is a copy, compared with vanilla's versions of the same definition by the method above, with its own baseline. Top-level statements that are not blocks, such as `namespace`, count as one more definition. A definition that vanilla added after the version the copy's definitions match is missing from the game, unless another mod file in the same folder keeps it. A definition that vanilla deleted and the copy keeps is reported for review. A file that is not script is compared line by line. A definition or file too large to compare statement by statement (a generated locator file holds one block of 20,000 entries) gets one finding that says how many lines vanilla changed after the version the copy matches. A file that the tracker holds no versions of, such as an image, is listed as not audited.
 - **Localization** (`--loc`): the unit is `(language, key)` and never a file name, because vanilla moves keys between files. The audit reports a key whose vanilla value changed or went away.
-- **Duplicate** (`--dupes`): one source of truth for each definition. The audit reports a name that the mod defines or overrides in more than one place, such as two INJECTs, or an INJECT and a REPLACE. It leaves out the types that the engine merges across files, such as on_action, and finds those types in vanilla itself.
+- **Duplicate** (`--dupes`): one source of truth for each definition. The audit reports a name that the mod defines or overrides in more than one place, such as two INJECTs, or an INJECT and a REPLACE. It reads the `common/` folders and the event ids in the `events` folders. It leaves out the types that the engine merges across files, such as on_action, and finds those types in vanilla itself.
 
 ## Severity
 
