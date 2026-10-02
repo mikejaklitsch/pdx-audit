@@ -366,3 +366,17 @@ def test_comments_of_a_node_inserted_into_a_one_line_block_stay():
     r = merge_texts(base, ours, theirs, unwrap=True)
     assert r.text == "a = {\n\tenabled = {\n\t\tx = 2\n\t\t# why y\n\t\t# more\n\t\ty = 1 # note\n\t}\n}\n"
     assert r.check_passed
+
+
+def test_a_new_vanilla_block_holding_a_block_the_mod_moved_is_open():
+    """Vanilla 1.4 wraps a button in a new block; SUL had moved the same button into
+    a block of its own. Taking vanilla's block would show the button two times, so
+    the new block is an open decision."""
+    base = "card = {\n\thbox = {\n\t\tsize = 1\n\t\tbutton_regular = { a = 1 b = 1 c = 1 }\n\t}\n}\n"
+    ours = ("card = {\n\thbox = {\n\t\tsize = 1\n\t}\n\tblock \"mine\" = {\n"
+            "\t\tbutton_regular = { a = 1 b = 1 c = 1 }\n\t}\n}\n")
+    theirs = ("card = {\n\thbox = {\n\t\tsize = 1\n\t\tblock \"control\" = {\n"
+              "\t\t\tbutton_regular = { a = 1 b = 1 c = 1 }\n\t\t}\n\t}\n}\n")
+    r = merge_texts(base, ours, theirs, dialect=diff3.GUI)
+    assert r.text == ours
+    assert [(d.kind, d.action) for d in r.decisions if "moved" in d.reason] == [("vanilla_added", OPEN)]

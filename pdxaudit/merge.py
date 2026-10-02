@@ -410,7 +410,7 @@ class _Merge:
                 self.decide_conflict("both_added", here, None, O[twins[j]], t, None)
                 continue
             anchor = self.anchor(T, j, tb, bo, O, twins)
-            if self.movable(t):
+            if self.movable(t) or any(self.movable(x) for x in _walk(t.children or [])):
                 self.deferred.append(("vanilla_added", here, None, t, (anchor, o_parent)))
             else:
                 self.vanilla_added(here, t, (anchor, o_parent))
@@ -446,6 +446,17 @@ class _Merge:
                 continue                 # the mod moved it: decided below
             if kind == "removed_changed":
                 self.decide_conflict(kind, here, b, None, t, place)
+            elif any(x.sig in inside for x in _walk(t.children or []) if x.children is not None
+                     and x.size >= MOVE_MIN_SIZE):
+                # Vanilla's new block holds a block that the mod moved into a block of
+                # its own: taking it would write that block two times.
+                action, by = self.decide(here, "vanilla_added", None, t, self.t_text, "conflict")
+                self.decisions.append(Decision(
+                    here, "vanilla_added", OPEN if action == TAKE and by is None else action, by,
+                    theirs=intent.canon(t),
+                    reason="vanilla's new block holds a block that the mod moved into a block of its own"))
+                if action == TAKE and by is not None:
+                    self.insert(place[0], t, place[1], by)
             else:
                 self.vanilla_added(here, t, place)
         if not self.ours_only:
