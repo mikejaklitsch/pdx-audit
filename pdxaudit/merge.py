@@ -331,9 +331,26 @@ def merge_align(a, b, dialect, hints=None):
     return sorted(pairs)
 
 
+def template_keys(text):
+    """{template name: {lower-case key: value}} for the statements at the top of each
+    `template` block in GUI `text`. A `using = X` line gives its block these
+    statements of template X."""
+    out = {}
+    for n in diff3.nodes(text):
+        if n.children is None or not n.key.lower().startswith("template "):
+            continue
+        name = n.key.split(None, 1)[1].strip()
+        out[name] = {c.key.lower(): c.value for c in n.children if c.kind == "stmt"}
+    return out
+
+
 class _Merge:
-    def __init__(self, base, ours, theirs, dialect, unwrap, decide, history=(), old=None, older=()):
+    def __init__(self, base, ours, theirs, dialect, unwrap, decide, history=(), old=None, older=(),
+                 templates=None):
         self.b_text, self.o_text, self.t_text = base, ours, theirs
+        # {template name: {key: value}} for GUI templates (template_keys), or None.
+        self.templates = templates or {}
+        self.template_block = {}         # id(node): reason (template_moves)
         # (vanilla's text at --old, its tag) when the base is older than --old.
         self.old_text, self.old_tag = old if old is not None else (None, None)
         self._old_view = None
@@ -368,6 +385,7 @@ class _Merge:
         bo = dict(merge_align(B, O, self.dialect, {i: T[j] for i, j in bt.items()}))
         tb = {j: i for i, j in bt.items()}
         ob = {j: i for i, j in bo.items()}
+        self.template_moves(B, O, T)
         for i, b in enumerate(B):
             o = O[bo[i]] if i in bo else None
             t = T[bt[i]] if i in bt else None
@@ -402,7 +420,14 @@ class _Merge:
                 self.vanilla_change(kind, here, b, o, t, gap)
             elif o is None:
                 place = (self.anchor(T, bt[i], tb, bo, O), o_parent)
-                if self.movable(b):
+                if t.children is not None and t.size >= MOVE_MIN_SIZE and t.sig in self.ours_sigs:
+                    # The mod moved the block and already holds vanilla's new text there.
+                    # 1.4 marker_rank_icon: SUL moved the name flowcontainer into its own
+                    # type, with vanilla's new snap_to_pixels.
+                    self.decisions.append(Decision(
+                        here, "removed_changed", KEEP, base=intent.canon(b), theirs=intent.canon(t),
+                        reason="the mod moved this block to another place, and holds vanilla's new text there"))
+                elif self.movable(b):
                     self.deferred.append(("removed_changed", here, b, t, place))
                 else:
                     self.decide_conflict("removed_changed", here, b, None, t, place)
@@ -441,6 +466,44 @@ class _Merge:
         t_sigs = {n.sig for n in T}
         self.ours_only += [O[j] for j in range(len(O)) if j not in ob and j not in self._taken_o
                            and j not in twin_o and O[j].sig not in t_sigs]
+
+    def template_moves(self, B, O, T):
+        """Find each `using = X` line that vanilla added at this level, where template X
+        sets a statement that the mod sets to another value. The template line would
+        override the mod's value, or the mod's value would override the template, so
+        the merge cannot take the line alone. The line, and each statement that vanilla
+        removed because the template now sets it, become open decisions (see
+        template_gate). 1.4 bg_circle_piechart: vanilla moved `texture` into
+        bg_round_button_alt_texture, and SUL draws its own texture."""
+        if not self.templates:
+            return
+        b_sigs, o_sigs, t_sigs = {n.sig for n in B}, {n.sig for n in O}, {n.sig for n in T}
+        for t in T:
+            if t.kind != "stmt" or t.key.lower() != "using" or t.sig in b_sigs or t.sig in o_sigs:
+                continue
+            name = str(t.value[1]).strip('"')
+            sets = self.templates.get(name)
+            if not sets:
+                continue
+            clash = sorted({n.key for n in O if n.kind == "stmt" and n.key.lower() in sets
+                            and n.value != sets[n.key.lower()]})
+            if not clash:
+                continue
+            reason = (f"vanilla moved {', '.join(sorted(sets))} into template {name}; the mod sets "
+                      f"{', '.join(clash)} to its own value, so take the template line and its removals "
+                      "together by hand, or keep the mod's lines")
+            self.template_block[id(t)] = reason
+            for b in B:
+                if b.kind == "stmt" and b.key.lower() in sets and b.sig not in t_sigs:
+                    self.template_block[id(b)] = reason
+
+    def template_gate(self, action, by, node):
+        """(action, reason) for a change that is part of a template move that the mod's
+        own values block (template_moves)."""
+        why = self.template_block.get(id(node)) if node is not None else None
+        if why and action == TAKE and by is None:
+            return OPEN, why
+        return action, ""
 
     def gate(self, action, by, here, kind, ref, t, src=None):
         """(action, reason) for a change that the merge would take with no rule or
@@ -509,7 +572,9 @@ class _Merge:
 
     def vanilla_added(self, here, t, place):
         action, by = self.decide(here, "vanilla_added", None, t, self.t_text, None)
-        action, why = self.gate(action, by, here, "vanilla_added", None, t)
+        action, why = self.template_gate(action, by, t)
+        if not why:
+            action, why = self.gate(action, by, here, "vanilla_added", None, t)
         self.decisions.append(Decision(here, "vanilla_added", action, by, theirs=intent.canon(t), reason=why))
         if action == TAKE:
             self.insert(place[0], t, place[1], by or "vanilla added")
@@ -575,7 +640,10 @@ class _Merge:
             here = intent.path_of(ours_top, n, self.dialect) or [{"key": n.key}]
             kind = "vanilla_changed" if t is not None else "vanilla_removed"
             action, by = self.decide(here, kind, n, t, self.t_text, None)
-            why = ""
+            why, what = "", "the mod moved this vanilla block into a block of its own"
+            if action == TAKE and by is None and t is None and self.copied(n, origin, otop, parent_path, ours_top):
+                what = "the mod copied this vanilla block into a block of its own; the original place still holds it"
+                action, why = OPEN, "; vanilla's change to the original does not say what the copy needs"
             if action == TAKE and by is None and t is not None and self.moved_across(origin, otop, parent_path, t, level):
                 action, why = OPEN, ("; vanilla moved text between this block and the block around it, "
                                      "so the copy cannot follow it alone")
@@ -587,7 +655,7 @@ class _Merge:
                     action, why = OPEN, f"; vanilla changed it before --old {self.old_tag}; the mod never took it"
             self.decisions.append(Decision(here, kind, action, by, base=intent.canon(origin), ours=intent.canon(n),
                                            theirs=intent.canon(t),
-                                           reason="the mod moved this vanilla block into a block of its own" + why,
+                                           reason=what + why,
                                            line=self.o_text.count("\n", 0, n.start) + 1))
             if action != TAKE:
                 continue
@@ -595,6 +663,21 @@ class _Merge:
                 self.remove(n, by or "vanilla removed the block the mod moved")
             else:
                 self.replace(None, n, t, by or "vanilla changed the block the mod moved")
+
+    def copied(self, n, origin, otop, parent_path, ours_top):
+        """True when ours still holds as many blocks of n's key at the original's place
+        as vanilla held there: the mod copied the vanilla block into its own block, and
+        did not move it. 1.4 map_markers: SUL's overcrowding box copies the navy
+        background of combat_side_marker, which stays at its place."""
+        def count(top, path):
+            if not path:
+                level = top
+            else:
+                node, _loose = intent.resolve(top, path, self.dialect)
+                level = node.children if node is not None and node.children is not None else None
+            return None if level is None else sum(1 for c in level if c.key == n.key and c.children is not None)
+        there = count(ours_top, parent_path)
+        return there is not None and there >= (count(otop, parent_path) or 1)
 
     def older_sigs(self, path):
         """The signatures of the nodes at `path` in vanilla's versions before the base."""
@@ -865,7 +948,9 @@ class _Merge:
 
     def vanilla_change(self, kind, here, b, o, t, gap=None):
         action, by = self.decide(here, kind, o, t, self.t_text, None)
-        action, why = self.gate(action, by, here, kind, b, t, (self.b_text, b))
+        action, why = self.template_gate(action, by, b)
+        if not why:
+            action, why = self.gate(action, by, here, kind, b, t, (self.b_text, b))
         self.decisions.append(Decision(here, kind, action, by, base=intent.canon(b), ours=intent.canon(o),
                                        theirs=intent.canon(t), reason=why,
                                        line=self.o_text.count("\n", 0, o.start) + 1))
@@ -1211,7 +1296,7 @@ def removed_lines(ours, merged, ops):
 
 
 def merge_texts(base, ours, theirs, dialect=diff3.SCRIPT, unwrap=False, decide=None, history=(), old=None,
-                older=()):
+                older=(), templates=None):
     """Result of a three-way merge of one copy. `decide(path, kind, ours node, theirs
     node, theirs text, what)` returns (action, by); by default a vanilla change where
     ours equals base is taken and every conflict is open. `history`: vanilla's texts
@@ -1219,9 +1304,10 @@ def merge_texts(base, ours, theirs, dialect=diff3.SCRIPT, unwrap=False, decide=N
     counts as vanilla's (see _Merge.later_vanilla). `old`: (vanilla's text at --old,
     its tag) when the base is older than --old (see _Merge.gate). `older`: vanilla's
     texts before the base, oldest first; a node the mod still holds from one of them
-    is vanilla's old text too."""
+    is vanilla's old text too. `templates`: {name: {key: value}} of the GUI templates
+    (template_keys), for _Merge.template_moves."""
     decide = decide or (lambda path, kind, o, t, tt, what: (OPEN, None) if what == "conflict" else (TAKE, None))
-    m = _Merge(base, ours, theirs, dialect, unwrap, decide, history, old, older)
+    m = _Merge(base, ours, theirs, dialect, unwrap, decide, history, old, older, templates)
     text, ops = m.run()
     res = Result(text, ops, m.decisions)
     res.unexplained = removed_lines(ours, text, ops) + [

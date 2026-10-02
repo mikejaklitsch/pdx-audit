@@ -175,6 +175,21 @@ def _walk(nodes):
             yield from _walk(n.children)
 
 
+def gui_templates(mod_root, base, new_hash):
+    """{template name: {key: value}} of the GUI templates the game loads at `new_hash`:
+    vanilla's, with the mod's own template in place of vanilla's of the same name."""
+    from .gui import mod_gui_files
+    from .tracker import MODULE_ROOTS
+    _defs, files, _bad = base.gui_index(new_hash, MODULE_ROOTS)
+    out = {}
+    for _rel, text in sorted(files.items()):
+        for name, keys in merge.template_keys(text).items():
+            out.setdefault(name, keys)
+    for _rel, text in mod_gui_files(mod_root):
+        out.update(merge.template_keys(text))
+    return out
+
+
 def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, block=None):
     """{"files": [...], "regenerate": [...], "skipped": [...]} for a dry run."""
     from .tracker import tag_of
@@ -223,7 +238,7 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
     added = _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, reg, regenerate, it,
                              states, skipped)
     whole = _whole_copies(mod_root, findings, order, old_tag, file, block, it, states, reg, skipped)
-    files = []
+    files, templates = [], None
     for rel in sorted(set(by_file) | set(added) | set(whole)):
         items = by_file.get(rel, [])
         path = Path(mod_root) / rel
@@ -242,9 +257,12 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
                 old = None
                 if base_tag != NO_BASE and old_tag in c.tags:
                     old = (c.versions[c.tags.index(old_tag)] or "", old_tag)
+                if c.dialect == diff3.GUI and templates is None:
+                    templates = gui_templates(mod_root, base, new_hash)
                 res = merge.merge_texts(base_text, c.mod_text, theirs, c.dialect, c.unwrap,
                                         _decider(tpl, it, states, mod_root), later, old,
-                                        c.versions[:c.tags.index(base_tag)] if base_tag in c.tags else ())
+                                        c.versions[:c.tags.index(base_tag)] if base_tag in c.tags else (),
+                                        templates if c.dialect == diff3.GUI else None)
             # An op must not touch a character that the copy holds blank for another
             # definition. Such an op would overwrite that definition.
             if any(text[start + op.start:start + op.end] != c.mod_text[op.start:op.end] for op in res.ops):

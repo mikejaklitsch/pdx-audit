@@ -1,7 +1,7 @@
 """The node-level three-way merge: each row of the decision table, insertion anchors,
 order, adjacent edits, double insertions, GUI and the removed-line check."""
 from pdxaudit import diff3
-from pdxaudit.merge import KEEP, OPEN, TAKE, Op, merge_texts, removed_lines
+from pdxaudit.merge import KEEP, OPEN, TAKE, Op, merge_texts, removed_lines, template_keys
 
 BASE = ("a = {\n\tcost = 1\n"
         "\tif = { limit = { x = yes } add = 1 }\n"
@@ -512,3 +512,59 @@ def test_a_moved_copy_stays_open_when_vanilla_also_changed_the_block_around_it()
     moved = [d for d in r.decisions if "moved this vanilla block" in d.reason]
     assert [(d.kind, d.action) for d in moved] == [("vanilla_changed", OPEN)]
     assert "is_neighbor_of = root" in r.text
+
+
+TEMPLATE = template_keys('template bg_t {\n\ttexture = "v.dds"\n\ttexture_density = 2\n}\n')
+BG_BASE = 'w = {\n\tbackground = {\n\t\ttexture = "v.dds"\n\t\ttexture_density = 2\n\t\tmargin = 1\n\t}\n}\n'
+BG_THEIRS = "w = {\n\tbackground = {\n\t\tusing = bg_t\n\t\tmargin = 1\n\t}\n}\n"
+
+
+def test_a_template_line_that_overrides_a_mod_value_is_open():
+    """1.4 bg_circle_piechart: vanilla moved texture and texture_density into template
+    bg_round_button_alt_texture. SUL draws its own texture, so the template line and
+    the removal of texture_density are open, and the mod's text stays."""
+    ours = BG_BASE.replace("v.dds", "mine.dds")
+    r = merge_texts(BG_BASE, ours, BG_THEIRS, dialect=diff3.GUI, templates=TEMPLATE)
+    assert r.text == ours
+    got = sorted((d.kind, d.action, d.path[-1]["key"]) for d in r.decisions)
+    assert got == [("both_changed", OPEN, "texture"), ("vanilla_added", OPEN, "using"),
+                   ("vanilla_removed", OPEN, "texture_density")]
+    assert all("bg_t" in d.reason for d in r.decisions if d.kind != "both_changed")
+
+
+def test_a_template_line_with_no_mod_value_in_its_way_is_taken():
+    """The mod left the texture as vanilla had it, so vanilla's move into the template
+    is a plain vanilla change."""
+    r = merge_texts(BG_BASE, BG_BASE, BG_THEIRS, dialect=diff3.GUI, templates=TEMPLATE)
+    assert all(d.action == TAKE for d in r.decisions)
+    assert "using = bg_t" in r.text and "texture" not in r.text
+    assert r.check_passed
+
+
+def test_a_copied_vanilla_block_is_open_when_vanilla_changes_the_original():
+    """1.4 map_markers: SUL's overcrowding box holds a copy of the navy background of
+    combat_side_marker, and the original stays at its place. Vanilla rewrote the
+    original, so the copy is open; the merge never deletes it."""
+    base = "m = {\n\tside = {\n\t\tbackground = { a = 1 b = 1 c = 1 }\n\t}\n}\n"
+    ours = ("m = {\n\tside = {\n\t\tbackground = { using = t c = 1 }\n\t}\n\tblock \"mine\" = {\n"
+            "\t\tbackground = { a = 1 b = 1 c = 1 }\n\t}\n}\n")
+    theirs = "m = {\n\tside = {\n\t\tbackground = { using = t c = 1 }\n\t}\n}\n"
+    r = merge_texts(base, ours, theirs, dialect=diff3.GUI)
+    assert r.text == ours
+    copied = [(d.kind, d.action) for d in r.decisions if "copied" in d.reason]
+    assert copied == [("vanilla_removed", OPEN)]
+
+
+def test_a_moved_block_that_holds_vanilla_new_text_needs_no_decision():
+    """1.4 marker_rank_icon: SUL moved the name flowcontainer into a type of its own
+    and gave it vanilla's new snap_to_pixels. Vanilla's change is in the mod already."""
+    base = ("w = {\n\tone = {\n\t\tflow = { x = 1 y = 1 z = 1 }\n\t}\n"
+            "\ttwo = {\n\t\tsize = 1\n\t}\n}\n")
+    ours = ("w = {\n\tone = {\n\t\tsize = 2\n\t}\n"
+            "\ttwo = {\n\t\tsize = 1\n\t\tflow = { x = 1 y = 1 z = 2 }\n\t}\n}\n")
+    theirs = ("w = {\n\tone = {\n\t\tflow = { x = 1 y = 1 z = 2 }\n\t}\n"
+              "\ttwo = {\n\t\tsize = 1\n\t}\n}\n")
+    r = merge_texts(base, ours, theirs, dialect=diff3.GUI)
+    assert r.text == ours
+    assert not r.open
+    assert [(d.kind, d.action) for d in r.decisions] == [("removed_changed", KEEP)]
