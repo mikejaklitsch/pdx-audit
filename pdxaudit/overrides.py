@@ -49,6 +49,12 @@ def parse_top_blocks(text):
     return blocks
 
 def find_overrides(mod_root):
+    """[{type, block, file, line, category}] for each override directive. A run reads
+    the mod once."""
+    return [dict(o) for o in session.memo(("find_overrides", str(mod_root)), lambda: _find_overrides(mod_root))]
+
+
+def _find_overrides(mod_root):
     results = []
     for fp in session.mod_paths(mod_root):
         if fp.suffix not in (".txt", ".gui"):
@@ -786,6 +792,11 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
         if dedup_key not in seen:
             seen.add(dedup_key)
             unique.append(ov)
+    # An intent check of some files reads only their overrides, against the block
+    # indexes of every category, so the indexes on disk serve every check.
+    only = getattr(ctx, "only_files", None)
+    if only is not None:
+        unique = [o for o in unique if o["file"] in only]
     replaces = [o for o in unique if o["type"] in REPLACE_TYPES]
     injects = [o for o in unique if o["type"] not in REPLACE_TYPES]
 

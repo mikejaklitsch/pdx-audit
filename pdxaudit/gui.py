@@ -289,6 +289,10 @@ def run_gui_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
     if args.block:
         mdefs = [d for d in mdefs if d["name"] == args.block]
         files_audited = []
+    only = getattr(ctx, "only_files", None)          # an intent check of some files
+    if only is not None:
+        mdefs = [d for d in mdefs if d["file"] in only]
+        files_audited = [(rel, text) for rel, text in files_audited if rel in only]
     if ctx is not None:
         ctx.scanned["gui"] = len(mdefs) + len(files_audited)
 

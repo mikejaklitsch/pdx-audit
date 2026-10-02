@@ -340,8 +340,37 @@ def views(copy):
     return mine, theirs, None
 
 
+_PER_FILE = ("file", "vanilla_file", "line", "generated", "tool", "systems")
+
+
+def _to_cache(devs, copy):
+    """The deviations of one copy without what depends on its place in the mod."""
+    out = []
+    for d in devs:
+        rec = {k: v for k, v in d.__dict__.items() if k not in _PER_FILE}
+        rec["keys"] = list(d.keys)
+        rec["row"] = d.line - copy.line
+        out.append(rec)
+    return out
+
+
+def _from_cache(recs, copy, reg):
+    generated, tool = reg.generated_by(copy.file) if reg is not None else (False, None)
+    systems = reg.systems_of(copy.file) if reg is not None else []
+    out = []
+    for rec in recs:
+        rec = dict(rec)
+        row = rec.pop("row")
+        rec["keys"] = tuple(rec["keys"])
+        out.append(Deviation(file=copy.file, vanilla_file=copy.vanilla_file, line=copy.line + row,
+                             generated=generated, tool=tool, systems=systems, **rec))
+    return out
+
+
 def deviations_of(copy, mod_root=None):
-    """[Deviation] for one Copy that changes.audit compared."""
+    """[Deviation] for one Copy that changes.audit compared, or that the cache gave."""
+    if copy.cached is not None:
+        return _from_cache(copy.cached, copy, registry(mod_root) if mod_root is not None else None)
     mod_top, van_top, root = views(copy)
     mod_lines = copy.mod_text.split("\n")
     ident = identity_of(copy)
@@ -427,10 +456,10 @@ def inject_deviations(mod_root, base, window, overrides, reg=None):
     return out
 
 
-def collect(mod_root, base, commits, new_hash, new_msg):
+def collect(mod_root, base, commits, new_hash, new_msg, only=None):
     """(copies, deviations) of the whole mod against vanilla at `new_hash`, measured
     across every tracked version up to it. The copy audits run with their output
-    discarded."""
+    discarded. `only`: a set of mod paths; the other files are not read."""
     from .files import run_file_audit
     from .gui import run_gui_audit, version_window
     from .overrides import find_overrides, run_override_audit
@@ -439,15 +468,63 @@ def collect(mod_root, base, commits, new_hash, new_msg):
     args = types.SimpleNamespace(diff=False, block=None, category=None, full=False, old=None, new=None,
                                  results_file=None)
     ctx = types.SimpleNamespace(commits=commits, new_tag=tag_of(new_msg), base=base, fixed_window=False,
-                                bases={}, scanned={}, dismissed=set())
-    with changes.collect() as copies, redirect_stdout(io.StringIO()):
+                                bases={}, scanned={}, dismissed=set(), only_files=only)
+    path = _cache_path(base, new_hash)
+    cache = _read_cache(path)
+    with changes.collect(cache) as copies, redirect_stdout(io.StringIO()):
         run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx)
         run_gui_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx)
         run_file_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx)
-    devs = [d for c in copies for d in deviations_of(c, mod_root)]
+    devs, fresh = [], {}
+    for c in copies:
+        found = deviations_of(c, mod_root)
+        devs += found
+        if c.key:
+            fresh[c.key] = c.cached if c.cached is not None else _to_cache(found, c)
+    if path is not None and only is not None:
+        fresh = {**cache, **fresh}                   # a part of the mod: keep the rest
+    if path is not None and fresh.keys() != cache.keys():
+        _write_cache(path, fresh)
     window = version_window(commits, new_hash)
-    devs += inject_deviations(mod_root, base, window, find_overrides(mod_root), registry(mod_root))
+    overrides = [o for o in find_overrides(mod_root) if only is None or o["file"] in only]
+    devs += inject_deviations(mod_root, base, window, overrides, registry(mod_root))
     return list(copies), devs
+
+
+# --- the deviation cache --------------------------------------------------------------
+
+DEV_CACHE_VERSION = 1
+
+
+def _cache_path(base, new_hash):
+    """The deviation cache of one vanilla version, in the cache folder of the tracker.
+    A copy's key hashes its text and vanilla's history, so an entry never goes stale;
+    each run keeps only the entries of the copies it read."""
+    from .tracker import cache_path, full_hash
+    repo = getattr(base, "repo", None)
+    full = full_hash(repo, new_hash) if repo else ""
+    return cache_path(repo, f"devs-v{DEV_CACHE_VERSION}-{full}.json") if full else None
+
+
+def _read_cache(path):
+    if path is None or not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_cache(path, data):
+    import os
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        tmp.write_text(json.dumps(data, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 # --- matching -----------------------------------------------------------------------
@@ -534,10 +611,13 @@ def entry_states(intent, copies, devs):
     """{entry id: (state, detail)}. recorded: the address resolves on both sides as
     the user saw it. stale: vanilla or the mod changed the node since. lost: the
     address resolves on neither side."""
+    wanted = {e["address"]["identity"] for e in intent["entries"].values()}
     trees = {}
     for c in copies:
-        mine, theirs, _root = views(c)
-        trees[identity_of(c)] = (mine, theirs, c.dialect)
+        ident = identity_of(c)
+        if ident in wanted:
+            mine, theirs, _root = views(c)
+            trees[ident] = (mine, theirs, c.dialect)
     inject_text = {}
     for d in devs:
         if d.copy == "inject":
@@ -596,7 +676,7 @@ def seal(entry, copies, devs):
     return entry
 
 
-def run_collect(mod_root, base, commits, new_hash, new_msg):
+def run_collect(mod_root, base, commits, new_hash, new_msg, only=None):
     """collect() inside a session run, so the parsed texts are shared."""
     with session.run():
-        return collect(mod_root, base, commits, new_hash, new_msg)
+        return collect(mod_root, base, commits, new_hash, new_msg, only)

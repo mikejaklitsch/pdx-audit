@@ -103,6 +103,15 @@ pdx-audit intent confirm <entry id>          # take a stale entry as the node re
 pdx-audit intent remove <id>
 ```
 
+### The lint gate
+
+```bash
+pdx-audit intent baseline --set              # exempt the differences that nothing explains now
+pdx-audit intent check [--changed FILE ...]  # differences that are new since, with no rule or entry
+```
+
+A difference that no rule and no recorded entry explains is a finding when it is new or changed since the baseline, or when vanilla changed it after the baseline. A banned use, a stale or lost entry and two rules that disagree are findings too. `contrib/port_intent.py` runs the check as a pdx-lint check: copy it into the `tools/lint/` folder of the mod. A cache keeps the differences of each copy, so a check with `--changed` compares only the copies in those files.
+
 A proposal is a JSON file in the per-user data folder. The proposer fills a reason only from a pdx-maint note, and gives the note id as the source. It shows commits and comments as evidence only. Write the reason, the system and the disposition of each candidate in the file, then accept it.
 
 ## From a clone

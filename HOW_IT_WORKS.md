@@ -89,6 +89,8 @@ Each deviation has an **address**. The address names the copy by vanilla identit
 
 An entry records the hash of its node on both sides when you confirm it. On each run the entry is **recorded** when both hashes are the same, **stale** when vanilla or your node changed, and **lost** when the node is gone. Only a recorded entry explains a deviation. An entry wins over a rule. Two rules with different dispositions on one deviation explain nothing, and the conflict is reported.
 
+The **baseline** records the deviations that nothing explains at one moment. The gate (`intent check`) exempts them until they change, or until vanilla changes them after the baseline. A new or changed deviation needs a rule or an entry. The deviations of each copy go into a cache in the cache folder of the tracker (`devs-v1-<commit>.json`), keyed by a hash of the copy's text and of vanilla's history. A check of some files reads only their copies.
+
 A file that a tool generates (an `AUTO-GENERATED` header, or an output of a tool in `pdx-maint.toml`) is never proposed or merged. Its tool reads vanilla again: `pdx-maint run <id>` regenerates it.
 
 ## The version window

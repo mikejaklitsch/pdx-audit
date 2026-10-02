@@ -20,26 +20,44 @@ from .report import Finding, diff_lines, value_pair
 
 FLAGGED = (diff3.HIGH, diff3.MID)
 
-# The copies an intent run reads (see `collect`). None outside such a run.
+# The copies an intent run reads (see `collect`), and the deviation cache it uses.
+# None outside such a run.
 _COPIES = None
+_CACHE = None
 
 Copy = namedtuple("Copy", "audit name target mod_text versions tags file line unwrap dialect "
-                          "vanilla_file changes finding_ids")
+                          "vanilla_file changes finding_ids cached key")
+Copy.__new__.__defaults__ = (None, None)
 Copy.__doc__ = """One copy that audit() compared. changes: diff3's [Change], all kinds.
-finding_ids: {id(Change): the id of the finding the change belongs to}."""
+finding_ids: {id(Change): the id of the finding the change belongs to}. cached: the
+deviations a cache gave in place of a comparison, or None. key: the cache key."""
+
+
+def copy_key(target, mod_text, versions, tags, unwrap, dialect):
+    """The cache key of a copy: a hash of all that its comparison reads."""
+    import hashlib
+    h = hashlib.sha1()
+    for part in (target, mod_text, *[v if v is not None else "\x00" for v in versions], *tags,
+                 str(unwrap), dialect):
+        h.update(part.encode("utf-8"))
+        h.update(b"\x01")
+    return h.hexdigest()
 
 
 @contextmanager
-def collect():
+def collect(cache=None):
     """Within the block, audit() appends each copy it compares to the list it yields.
     The file audit then also compares the copies that vanilla never changed, because
-    the intent store explains every difference, not only the ones vanilla made."""
-    global _COPIES
+    the intent store explains every difference, not only the ones vanilla made.
+    `cache` ({key: deviations}) lets audit() skip the comparison of a copy whose text
+    and history it has seen."""
+    global _COPIES, _CACHE
     outer, _COPIES = _COPIES, []
+    outer_cache, _CACHE = _CACHE, cache
     try:
         yield _COPIES
     finally:
-        _COPIES = outer
+        _COPIES, _CACHE = outer, outer_cache
 
 
 def collecting():
@@ -130,6 +148,13 @@ def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
 
     `grouped` makes the changes in one block one finding; by default only the GUI
     audit groups them."""
+    cache_key = None
+    if _COPIES is not None and _CACHE is not None:
+        cache_key = copy_key(target, mod_text, versions, tags, unwrap, dialect)
+        if cache_key in _CACHE:
+            _COPIES.append(Copy(audit_name, name, target, mod_text, versions, tags, file, line, unwrap,
+                                dialect, vanilla_file, None, {}, _CACHE[cache_key], cache_key))
+            return Audited([], [], None, None, {})
     changes = diff3.compare(mod_text, versions, unwrap, dialect)
     base_i = diff3.baseline(mod_text, versions, unwrap, dialect)
     base = tags[base_i] if base_i is not None else None
@@ -211,7 +236,7 @@ def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
     if _COPIES is not None:
         _COPIES.append(Copy(audit_name, name, target, mod_text, versions, tags, file, line, unwrap,
                             dialect, vanilla_file, changes,
-                            {k: ledger.finding_id(f) for k, f in finding_of.items()}))
+                            {k: ledger.finding_id(f) for k, f in finding_of.items()}, None, cache_key))
     return Audited(findings, [(c, finding_of[id(c)]) for c in flagged], base, block, texts)
 
 

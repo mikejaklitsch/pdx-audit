@@ -19,7 +19,7 @@ from .config import cfg, config_file, setting, SETTINGS
 from .safety import remove_file, RefusedRemoval
 
 # pdx-audit writes cache files with these names in the cache folder of the tracker.
-CACHE_FILE_RE = r"(?:blocks|gui|guinames|locbind|vocab|dupes)-v\d+-[0-9a-f]{40}(?:-[0-9a-f]{12})?\.json"
+CACHE_FILE_RE = r"(?:blocks|gui|guinames|locbind|vocab|dupes|devs|tree)-v\d+-[0-9a-f]{40}(?:-[0-9a-f]{12})?\.json"
 
 # The one temporary file --commit creates, inside the tracker repo itself. Its name is
 # also the pattern the removal helper checks, and it is left as it is so that a file an
@@ -93,7 +93,28 @@ def full_hash(vanilla_repo, commit):
 
 def tree_files(vanilla_repo, commit):
     """[(path, blob id)] for the regular files at `commit`, in tree order, which
-    is the order `git archive` writes them in."""
+    is the order `git archive` writes them in. The cache folder keeps the listing,
+    because a commit never changes."""
+    def cached():
+        import json
+        full = full_hash(vanilla_repo, commit)
+        path = cache_path(vanilla_repo, f"tree-v1-{full}.json") if full else None
+        if path is not None and path.is_file():
+            try:
+                return [tuple(x) for x in json.loads(path.read_text())]
+            except (OSError, ValueError):
+                pass
+        files = list_tree()
+        if path is not None and files:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(files, separators=(",", ":")))
+                tmp.replace(path)
+            except OSError:
+                pass
+        return files
+
     def list_tree():
         files = []
         for rec in git(vanilla_repo, "ls-tree", "-r", "-z", commit, timeout=60).split("\0"):
@@ -102,7 +123,7 @@ def tree_files(vanilla_repo, commit):
             if len(parts) == 3 and parts[1] == "blob" and parts[0] in ("100644", "100755"):
                 files.append((path, parts[2]))
         return files
-    return session.memo(("ls-tree", str(vanilla_repo), commit), list_tree)
+    return session.memo(("ls-tree", str(vanilla_repo), commit), cached)
 
 def read_blobs(vanilla_repo, blob_ids, timeout=180, workers=8):
     """{blob id: bytes} for tracker blobs. Git inflates one blob at a time per

@@ -390,6 +390,10 @@ def run_file_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, c
                 tracked.append((rel, points, ids))
         elif ext and (install / rel).is_file() and (mod_root / rel).is_file():
             untracked.append(rel)
+    only = getattr(ctx, "only_files", None)          # an intent check of some files
+    if only is not None:
+        tracked = [t for t in tracked if t[0] in only]
+        untracked = [r for r in untracked if r in only]
     by_scope = {}
     for rel in rels:
         if PurePosixPath(rel).suffix.lower() in SCRIPT_EXTS:

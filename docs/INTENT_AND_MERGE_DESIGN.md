@@ -410,6 +410,8 @@ pdx-lint takes about 35 s for the whole mod. The three copy audits take 109 s on
 
 A deviation cache solves this: `<tracker cache>/deviations-v1-<vanilla commit>.json`, keyed by (identity, SHA-1 of the copy's text). An unchanged copy costs one hash. Only a changed copy runs `diff3.compare` against the cached block index. Phase 3 measures the cost of a full run against the budget. A full lint run after a patch fills the cache once. The default lint run gets `changed` files only.
 
+Measured on 2026-10-01 (SUL, 33,408 copies, 63,293 deviations, warm caches): a full check takes 19 s, a check of one or two changed files 8 to 10 s. The first collection after a vanilla version or a large mod change takes about 50 s. The lint check file is `contrib/port_intent.py` in this repo, because the mod repo is read only for the tool sessions; the mod session copies it into `tools/lint/`.
+
 ## 9. Renames
 
 ### 9.1 Detection in the dependency audit

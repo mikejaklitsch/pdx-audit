@@ -28,10 +28,10 @@ def _vanilla(mod_root, args):
     return VanillaBase(repo), commits, commits[0][0], commits[0][1]
 
 
-def collect(mod_root, args):
+def collect(mod_root, args, only=None):
     base, commits, new_hash, new_msg = _vanilla(mod_root, args)
     print("Reading the copies of the mod (this runs the copy audits)...", file=sys.stderr)
-    copies, devs = intent.collect(mod_root, base, commits, new_hash, new_msg)
+    copies, devs = intent.collect(mod_root, base, commits, new_hash, new_msg, only)
     from .tracker import tag_of
     return copies, devs, tag_of(new_msg)
 
@@ -78,6 +78,10 @@ def build_parser():
     p.add_argument("--keep-file", help="a keep file: `<block>.<path>  <reason>` on each line")
     p.add_argument("--rules", help="a JSON file with a list of rules")
     p.add_argument("--out")
+    p = sub.add_parser("check", help="the lint gate: deviations that no rule or entry explains")
+    p.add_argument("--changed", nargs="*", help="mod paths to limit the check to")
+    p = sub.add_parser("baseline", help="exempt the deviations that nothing explains now")
+    p.add_argument("--set", action="store_true", required=True)
     p = sub.add_parser("accept", help="add the candidates of a proposal file to the store")
     p.add_argument("file")
     p.add_argument("--only", help="candidate ids, such as c1,c3")
@@ -146,10 +150,36 @@ def _main(args):
         store.save()
         return 1 if errors else 0
 
-    if args.cmd == "seed" and args.rules and not (args.dismissals or args.keep_file):
-        devs, copies, tag = None, None, None
-    else:
-        copies, devs, tag = collect(mod_root, args)
+    only = set(args.changed) if args.cmd == "check" and args.changed is not None else None
+    if only is not None and not only:
+        print(json.dumps({"findings": [], "lines": [], "exempt": 0, "attributed": 0}) if args.json
+              else "No files to check.")
+        return 0
+    copies, devs, tag = collect(mod_root, args, only)
+
+    if args.cmd == "check":
+        from . import intent_check
+        from .tracker import get_commits, tag_of
+        order = [tag_of(m) for _h, m in reversed(get_commits(_vanilla(mod_root, args)[0].repo))]
+        changed = set(args.changed) if args.changed is not None else None
+        result = intent_check.check(it, copies, devs, order, changed)
+        result["vanilla"] = tag
+        result["lines"] = intent_check.lines(result)
+        if args.json:
+            print(json.dumps(result, indent=1, ensure_ascii=False))
+        else:
+            for line in result["lines"]:
+                print(line)
+            print(f"{len(result['findings'])} findings; {result['attributed']} deviations explained, "
+                  f"{result['exempt']} exempt by the baseline.")
+        return 1 if result["findings"] else 0
+
+    if args.cmd == "baseline":
+        from . import intent_check
+        n = intent_check.set_baseline(it, copies, devs, store.head, tag, today)
+        store.save()
+        print(f"Set the baseline at {tag}: {n} deviations that nothing explains are exempt until they change.")
+        return 0
 
     if args.cmd == "list":
         states = intent.entry_states(it, copies, devs)
@@ -228,8 +258,6 @@ def _main(args):
             for line in unmatched:
                 print(f"Note: no deviation matches the keep line {line}", file=sys.stderr)
         if args.rules:
-            if devs is None:
-                copies, devs, tag = collect(mod_root, args)
             cands += proposer.seed_rules(devs, args.rules, notes, today)
     path = proposer.write(cands, store.dir, store.mod_id, tag, args.out)
     print(f"Wrote {len(cands)} candidate(s) to {path}")
