@@ -364,3 +364,22 @@ def test_a_generated_file_is_listed_to_regenerate_and_never_skipped(tmp_path, mo
                       "tools/rivers/m.json": json.dumps([dm]), dm: "lakes = { 1 }\n"})
     p = _plan(tmp_path, mod, tr)
     assert not p["skipped"] and [r["file"] for r in p["regenerate"]] == [dm]
+
+
+def test_a_file_with_no_tracker_history_is_skipped_with_the_reason(tmp_path, monkeypatch):
+    """The tracker holds no .splnet file in any version. The mod copies one from the
+    installed game, so the file audit reports it as file_untracked. The merge has no
+    vanilla version to compare, so it lists the file with the reason."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    net = "in_game/map_data/roads.splnet"
+    install = tmp_path / "game"
+    _write_tree(install, {net: "vanilla net\n"})
+    monkeypatch.setenv("PDX_GAME_ROOT", str(install))
+    tr = build_tracker(tmp_path, [("1.0", {DEFS: _block("Z")}), ("1.1", {DEFS: _block("Z", 2)})])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}', net: "mod net\n"})
+    p = _plan(tmp_path, mod, tr)
+    assert not p["files"]
+    assert [(s["file"], "the tracker holds no version of this file" in s["why"]) for s in p["skipped"]] \
+        == [(net, True)]
+    assert "differs from the installed game" in p["skipped"][0]["why"]
