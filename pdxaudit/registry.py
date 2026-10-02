@@ -8,6 +8,7 @@ report names the tool, and `pdx-maint run <id>` regenerates the file.
 
 pdx-audit never imports mod code and never runs a mod tool here. It reads the
 registry file only."""
+import json
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -100,8 +101,13 @@ class Registry:
         for tid, tool in self.tools.items():
             if tool.get("status") == "retired":
                 continue
-            if any(glob_regex(g).match(rel) for g in tool.get("outputs", []) if isinstance(g, str)):
-                return True, tid
+            for g in tool.get("outputs", []):
+                if not isinstance(g, str):
+                    continue
+                if g.startswith("manifest:") and rel in self.manifest(g[len("manifest:"):]):
+                    return True, tid
+                if not g.startswith("manifest:") and glob_regex(g).match(rel):
+                    return True, tid
         line = header_line(self.mod_root / rel) if text is None else _first_line(text)
         if not any(m in line for m in GENERATED_MARKERS):
             return False, None
@@ -112,6 +118,24 @@ class Registry:
                 if re.search(r"(?<![\w.-])" + re.escape(name) + r"(?![\w-])", line):
                     return True, tid
         return True, None
+
+    def manifest(self, rel):
+        """The mod paths a tool's manifest lists: `manifest:<file>` in `outputs` names
+        a file the tool writes, a JSON list of paths or one path on each line (the
+        pdx-maint form). An absent or unreadable manifest lists nothing: the tool
+        has not run in this checkout, so no file is its output yet."""
+        key = ("manifest", rel)
+        if key not in self._generated_cache:
+            try:
+                text = (self.mod_root / rel).read_text(encoding="utf-8-sig")
+            except OSError:
+                text = ""
+            try:
+                items = json.loads(text) if text.strip() else []
+            except ValueError:
+                items = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            self._generated_cache[key] = {str(x) for x in items} if isinstance(items, list) else set()
+        return self._generated_cache[key]
 
     def regenerate_hint(self, tid):
         if tid:

@@ -62,3 +62,20 @@ def test_a_localization_header_is_read_after_the_language_key(tmp_path):
     root = tmp_path / "mod"
     _write_tree(root, {"pdx-maint.toml": REG, "x_l_english.yml": "l_english:\n" + HEADER + ' K:0 "v"\n'})
     assert Registry(root).generated_by("x_l_english.yml") == (True, "compose_location_templates")
+
+
+def test_a_tool_manifest_names_its_outputs(tmp_path):
+    """pdx-maint lets a tool list its outputs in a manifest file it writes
+    (`outputs = ["manifest:tools/t/output/manifest.json"]`). Each file the manifest
+    lists is that tool's output; with no manifest, no file is."""
+    import json
+    from pdxaudit.registry import Registry
+    root = tmp_path / "mod"
+    reg = '[tool.rivers]\npath = "tools/rivers/"\nstatus = "active"\noutputs = ["manifest:tools/rivers/out.json"]\n'
+    _write_tree(root, {"pdx-maint.toml": reg, "in_game/map_data/definitions.txt": "x = 1\n",
+                       "in_game/map_data/other.txt": "y = 1\n"})
+    assert Registry(root).generated_by("in_game/map_data/definitions.txt") == (False, None)
+    _write_tree(root, {"tools/rivers/out.json": json.dumps(["in_game/map_data/definitions.txt"])})
+    r = Registry(root)
+    assert r.generated_by("in_game/map_data/definitions.txt") == (True, "rivers")
+    assert r.generated_by("in_game/map_data/other.txt") == (False, None)
