@@ -452,3 +452,63 @@ def test_a_weight_changed_by_vanilla_alone_is_taken():
     theirs = "a = {\n\tl = {\n\t\t10 = army_heavy_cavalry\n\t\t8 = army_artillery\n\t}\n}\n"
     r = merge_texts(base, "REPLACE:" + base, theirs, unwrap=True)
     assert "\t\t8 = army_artillery\n" in r.text and "5 = army_artillery" not in r.text
+
+
+def test_a_value_the_mod_holds_from_before_the_base_is_flagged_even_when_vanilla_is_unchanged():
+    """The copy matches 1.1 best, and 1.1 equals --new: vanilla changed nothing in the
+    window. The mod's transport_capacity is vanilla's 1.0 value, so vanilla changed
+    it before the base. That is an open decision, never the mod's own edit, and the
+    merge writes nothing by itself."""
+    v0 = "a = {\n\tcategory = t\n\ttransport_capacity = -0.15\n\tcrew = 1\n}\n"
+    v1 = "a = {\n\tcategory = t\n\ttransport_capacity = 0.10\n\tcrew = 1\n}\n"
+    ours = "REPLACE:a = {\n\tcategory = t\n\ttransport_capacity = -0.15\n\tcrew = 1\n\tmine = yes\n}\n"
+    r = merge_texts(v1, ours, v1, unwrap=True, older=[v0], old=(v1, "1.1"))
+    assert r.text == ours
+    [d] = r.decisions
+    assert (d.kind, d.action, d.path[-1]["key"], d.theirs) == (
+        "vanilla_changed", OPEN, "transport_capacity", "transport_capacity = 0.1")
+    assert "before --old 1.1" in d.reason
+
+
+def test_a_renamed_line_inside_an_unchanged_block_is_flagged_both_ways():
+    """Vanilla renamed a trigger inside location_potential before the base. The mod
+    still holds the old name, next to a line of its own. The old line is a
+    vanilla_removed decision and the new one a vanilla_added decision, both open;
+    taking both gives vanilla's line and keeps the mod's own."""
+    v0 = "a = {\n\tlocation_potential = {\n\t\tunit_iberian = yes\n\t}\n\tx = 1\n}\n"
+    v1 = "a = {\n\tlocation_potential = {\n\t\tunit_catalan = yes\n\t}\n\tx = 1\n}\n"
+    ours = ("REPLACE:a = {\n\tlocation_potential = {\n\t\tunit_iberian = yes\n\t\tmine = yes\n\t}\n"
+            "\tx = 1\n}\n")
+    r = merge_texts(v1, ours, v1, unwrap=True, older=[v0], old=(v1, "1.1"))
+    got = sorted((d.kind, d.action, d.path[-1]["key"]) for d in r.decisions)
+    assert got == [("vanilla_added", OPEN, "unit_catalan"), ("vanilla_removed", OPEN, "unit_iberian")]
+    take = lambda path, kind, o, t, tt, what: (TAKE, "rule:r") if what is None else (OPEN, None)  # noqa: E731
+    r = merge_texts(v1, ours, v1, unwrap=True, decide=take, older=[v0], old=(v1, "1.1"))
+    assert "\t\tunit_catalan = yes\n" in r.text and "unit_iberian" not in r.text and "mine = yes" in r.text
+
+
+def test_an_addition_vanilla_held_at_old_in_another_form_is_open():
+    """Vanilla added create_enabled before --old and changed it after. The mod never
+    had it. It is not a new 1.4 block, so the merge does not take it by itself."""
+    base = "a = {\n\tyears = 15\n}\n"
+    old = "a = {\n\tyears = 15\n\tcreate_enabled = { x = yes }\n}\n"
+    new = "a = {\n\tyears = 15\n\tcreate_enabled = { x = yes y = yes }\n\tbrand_new = 1\n}\n"
+    r = merge_texts(base, "REPLACE:" + base, new, unwrap=True, old=(old, "1.1"))
+    got = {d.path[-1]["key"]: d.action for d in r.decisions}
+    assert got == {"create_enabled": OPEN, "brand_new": TAKE}
+
+
+def test_a_moved_copy_stays_open_when_vanilla_also_changed_the_block_around_it():
+    """The mod holds a copy of vanilla's scope:target block inside a block of its own.
+    Vanilla then moved is_neighbor_of out of that block, one level up. Taking
+    vanilla's new scope:target alone would drop the condition, so it is open."""
+    base = ("a = {\n\tcreate_enabled = {\n\t\tscope:target = {\n\t\t\tcountry_type = pop\n"
+            "\t\t\tis_neighbor_of = root\n\t\t}\n\t}\n}\n")
+    new = ("a = {\n\tcreate_enabled = {\n\t\tscope:target = {\n\t\t\tcountry_type = pop\n\t\t}\n"
+           "\t\tis_neighbor_of = scope:target\n\t}\n}\n")
+    ours = ("REPLACE:a = {\n\tcreate_visible = {\n\t\tmodifier:x = yes\n\t\tscope:target = {\n"
+            "\t\t\tcountry_type = pop\n\t\t\tis_neighbor_of = root\n\t\t}\n\t}\n}\n")
+    r = merge_texts(base, ours, new, unwrap=True)
+    moved = [d for d in r.decisions if "moved this vanilla block" in d.reason]
+    assert [(d.kind, d.action) for d in moved] == [("vanilla_changed", OPEN)]
+    assert "is_neighbor_of = root" in r.text

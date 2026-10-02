@@ -92,6 +92,7 @@ def _apply_intent(dev, it, states, what, stale):
 def _decider(dev_template, it, states, mod_root):
     """decide(path, kind, ours node, theirs node, theirs text, what) for one copy."""
     def decide(path, kind, o, t, _tt, what):
+        path = path[dev_template.root_depth:]
         dev = intent.Deviation(
             copy=dev_template.copy, identity=dev_template.identity, block=dev_template.block,
             content=dev_template.content, file=dev_template.file, vanilla_file=dev_template.vanilla_file,
@@ -157,6 +158,10 @@ class _Template:
         self.systems = reg.systems_of(copy.file)
         self.comments = {}
         self.stale = set()
+        # The intent store addresses a definition copy (a file definition, a GUI
+        # template or type) from inside its one top block (intent.views). The merge
+        # walks the copy's text from the top, so its paths carry that block first.
+        self.root_depth = 1 if not copy.unwrap and intent.views(copy)[2] is not None else 0
         text = copy.mod_text
         for n in _walk(diff3.nodes(text)):
             line = text[text.rfind("\n", 0, n.start) + 1:merge._line_end(text, n.end)]
@@ -207,7 +212,10 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
             base_text, base_tag = "", NO_BASE
         else:
             base_text, base_tag = c.versions[base_i], c.tags[base_i]
-        if base_text == theirs:
+        # Vanilla changed nothing since the base. The mod can still hold vanilla's text
+        # from a version before the base (merge._Merge.older_change), so such a copy
+        # merges too.
+        if base_text == theirs and not any(v and v != base_text for v in c.versions[:base_i or 0]):
             continue
         later = c.versions[(base_i + 1 if base_i is not None else 0):-1]
         by_file[c.file].append((c, base_tag, base_text, theirs, later))
@@ -232,10 +240,11 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
                 res = merge.merge_inject(base_text, c.mod_text, theirs, _decider(tpl, it, states, mod_root))
             else:
                 old = None
-                if base_tag not in (old_tag, NO_BASE) and old_tag in c.tags:
+                if base_tag != NO_BASE and old_tag in c.tags:
                     old = (c.versions[c.tags.index(old_tag)] or "", old_tag)
                 res = merge.merge_texts(base_text, c.mod_text, theirs, c.dialect, c.unwrap,
-                                        _decider(tpl, it, states, mod_root), later, old)
+                                        _decider(tpl, it, states, mod_root), later, old,
+                                        c.versions[:c.tags.index(base_tag)] if base_tag in c.tags else ())
             # An op must not touch a character that the copy holds blank for another
             # definition. Such an op would overwrite that definition.
             if any(text[start + op.start:start + op.end] != c.mod_text[op.start:op.end] for op in res.ops):
@@ -245,6 +254,7 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
             stale |= tpl.stale
             first_line = text.count("\n", 0, start)
             for d in res.decisions:
+                d.path = d.path[tpl.root_depth:]          # the intent store's address
                 if d.line is not None:
                     d.line += first_line
                 decisions.append((d, c.name, base_tag))

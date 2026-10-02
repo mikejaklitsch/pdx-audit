@@ -406,3 +406,47 @@ def test_a_copy_with_a_base_older_than_old_opens_the_older_changes(tmp_path, mon
     assert (got["x"]["action"], got["cost"]["action"]) == ("take", "open")
     assert got["cost"]["base_version"] == "1.0" and "before --old 1.1" in got["cost"]["reason"]
     assert f["open"] == 1
+
+
+def test_a_rule_on_a_node_of_a_file_definition_decides_it_in_the_merge(tmp_path, monkeypatch):
+    """The intent store addresses a node of a same-path file definition from inside
+    the definition (path ["x"]), as intent check reports it. The merge uses the same
+    address, so a keep_mod rule on ["x"] keeps the mod's x, and vanilla's y is taken."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    tr = build_tracker(tmp_path, [("1.0", {DEFS: "A = {\n\tx = 1\n\ty = 1\n}\n"}),
+                                  ("1.1", {DEFS: "A = {\n\tx = 2\n\ty = 3\n}\n"})])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}', DEFS: "A = {\n\tx = 5\n\ty = 1\n}\n"})
+    _rules(tmp_path, mod, [{"id": "x.keep", "system": "x", "disposition": "keep_mod",
+                            "reason": "Test: the mod's x stays.", "source": {"kind": "user"},
+                            "match": {"content": ["in_game/common/x"], "path": ["x"]}}])
+    p = _plan(tmp_path, mod, tr)
+    [f] = p["files"]
+    got = {d["path"][-1]["key"]: (d["action"], [s["key"] for s in d["path"]]) for d in f["decisions"]}
+    assert got == {"x": ("keep", ["x"]), "y": ("take", ["y"])}
+    assert f["merged"] == "A = {\n\tx = 5\n\ty = 3\n}\n"
+
+
+def test_a_line_vanilla_removed_before_the_base_is_not_the_mods_own(tmp_path, monkeypatch):
+    """The copy matches 1.1 best (a = 2), but it still holds `flag = no`, which
+    vanilla removed in 1.1. That line is vanilla's old text, not the mod's own: the
+    merge makes it a vanilla_removed decision, open because the change is older
+    than --old. Vanilla's change to b in 1.3 is taken."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    law = "in_game/common/laws/l.txt"
+    v = lambda flag, a, b: ("law_a = {\n" + ("\tflag = no\n" if flag else "")  # noqa: E731
+                            + "".join(f"\t{k} = {a}\n" for k in "acde") + f"\tb = {b}\n}}\n")
+    tr = build_tracker(tmp_path, [("1.0", {law: v(True, 1, 1)}), ("1.1", {law: v(False, 2, 1)}),
+                                  ("1.2", {law: v(False, 2, 1) + "\n"}), ("1.3", {law: v(False, 2, 3)})])
+    mod = tmp_path / "mod"
+    fe = "in_game/common/laws/fe.txt"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}', fe: "REPLACE:" + v(True, 2, 1)})
+    plan = tmp_path / "plan.json"
+    assert main(["--mod-root", str(mod), "--vanilla-repo", tr.repo, "--old", "1.2", "--new", "1.3",
+                 "--dry-run", "--plan-out", str(plan)]) == 0
+    [f] = json.loads(plan.read_text(encoding="utf-8"))["files"]
+    got = {d["path"][-1]["key"]: d for d in f["decisions"]}
+    assert got["b"]["base_version"] == "1.1"          # the copy matches 1.1 best
+    assert (got["flag"]["kind"], got["flag"]["action"]) == ("vanilla_removed", "open")
+    assert "before --old 1.2" in got["flag"]["reason"]
+    assert got["b"]["action"] == "take"

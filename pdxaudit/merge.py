@@ -35,6 +35,7 @@ The removed-line check compares the merged text with ours line by line. Every li
 that the merge removes must lie inside an operation that a vanilla change explains.
 Any other removal fails the file, and `--apply` does not write it."""
 import difflib
+import json
 import re
 from dataclasses import dataclass, field
 
@@ -331,7 +332,7 @@ def merge_align(a, b, dialect, hints=None):
 
 
 class _Merge:
-    def __init__(self, base, ours, theirs, dialect, unwrap, decide, history=(), old=None):
+    def __init__(self, base, ours, theirs, dialect, unwrap, decide, history=(), old=None, older=()):
         self.b_text, self.o_text, self.t_text = base, ours, theirs
         # (vanilla's text at --old, its tag) when the base is older than --old.
         self.old_text, self.old_tag = old if old is not None else (None, None)
@@ -340,6 +341,10 @@ class _Merge:
         self.dialect, self.unwrap, self.decide = dialect, unwrap, decide
         self.ops, self.decisions, self.overlaps = [], [], []
         self.history = [h for h in history if h is not None]
+        # vanilla's texts before the base, oldest first: a node the mod still holds
+        # from one of them is vanilla's old text, not the mod's own.
+        self.older = [h for h in older if h is not None]
+        self._older_cache, self._from_older = {}, False
         self.ours_only = []              # nodes only ours has, for moved()
         self.deferred = []               # decisions that wait for moved()
         self.ours_sigs = {n.sig for n in _walk(self.view(ours))}
@@ -377,6 +382,12 @@ class _Merge:
                 if o_same and b.children and o.children is not None and t.children is not None \
                         and _notes(self.b_text, b) != _notes(self.t_text, t):
                     self.level(b.children, o.children, t.children, here, o, (b, t))
+                elif not o_same and self.older:
+                    if o.sig in self.older_sigs(path):
+                        # The mod holds vanilla's text from before the base.
+                        self.older_change(here, o, t)
+                    elif o.children is not None and b.children is not None and o.key == b.key:
+                        self.level(b.children, o.children, t.children, here, o, (b, t))
                 continue
             if t_same or (o is None and t is None):
                 continue
@@ -405,6 +416,8 @@ class _Merge:
         # it is, is vanilla's text: the mod took it from that version. Vanilla's later
         # change to it is a vanilla change, not the mod's.
         used_t = self.later_vanilla(path, B, O, T, ob, tb)
+        if self._from_older:
+            self.older_additions(path, B, O, T, bo, bt, tb, o_parent)
         # Nodes that only theirs has. A node that ours holds as it is stays once. A
         # node that ours added in another form is a both_added decision, so the
         # merge never writes one key two times.
@@ -459,16 +472,35 @@ class _Merge:
             if parent is not None and parent.children is not None:
                 level = parent.children
                 break
-        sigs = {n.sig for n in level or []}
+        level = level or []
+        sigs = {n.sig for n in level}
         if ref is not None:
             older = ref.sig not in sigs
+        elif t is None:
+            older = False
         else:
-            older = t is not None and t.sig in sigs
+            # An addition is older when --old held it already, in this form or in another
+            # one that vanilla changed later. A node of the same identity (key, name,
+            # selector) counts when that identity is unique among vanilla's new siblings.
+            ident = intent._ident(t, self.dialect)
+            siblings = self._theirs_level(here[:-1])
+            unique = sum(1 for n in siblings if intent._ident(n, self.dialect) == ident) <= 1
+            older = t.sig in sigs or (unique and any(intent._ident(n, self.dialect) == ident for n in level))
         if not older:
             return action, ""
         return OPEN, (f"vanilla made this change before --old {self.old_tag}; the mod never took it. "
                       "Take it if an earlier port missed it, keep the mod's text if the mod left it out "
                       "on purpose")
+
+    def _theirs_level(self, parent_path):
+        """The nodes at `parent_path` in theirs."""
+        if "theirs" not in self._views:
+            self._views["theirs"] = self.view(self.t_text)
+        top = self._views["theirs"]
+        if not parent_path:
+            return top
+        node, _loose = intent.resolve(top, parent_path, self.dialect)
+        return node.children if node is not None and node.children is not None else []
 
     def movable(self, node):
         """True when a block that the base or theirs holds at this place may sit as it
@@ -544,6 +576,9 @@ class _Merge:
             kind = "vanilla_changed" if t is not None else "vanilla_removed"
             action, by = self.decide(here, kind, n, t, self.t_text, None)
             why = ""
+            if action == TAKE and by is None and t is not None and self.moved_across(origin, otop, parent_path, t, level):
+                action, why = OPEN, ("; vanilla moved text between this block and the block around it, "
+                                     "so the copy cannot follow it alone")
             if action == TAKE and by is None and self.old_text is not None:
                 # Ours holds the block at its own place, so look for it anywhere at --old.
                 if self._old_view is None:
@@ -561,10 +596,78 @@ class _Merge:
             else:
                 self.replace(None, n, t, by or "vanilla changed the block the mod moved")
 
-    def history_level(self, path):
-        """The nodes at `path` in each vanilla version between the base and theirs."""
+    def older_sigs(self, path):
+        """The signatures of the nodes at `path` in vanilla's versions before the base."""
+        key = json.dumps(path, sort_keys=True)
+        if key not in self._older_cache:
+            self._older_cache[key] = {n.sig for n in self.history_level(path, self.older)}
+        return self._older_cache[key]
+
+    def older_gate(self, action, by):
+        """(action, reason) for a change vanilla made before the base. The mod never
+        took it, so without a rule or an entry it is open, whatever --old is."""
+        if action == TAKE and by is None:
+            # The base is never later than --old, so the change is older than --old too.
+            old = f"--old {self.old_tag}" if self.old_tag else "--old"
+            return OPEN, (f"vanilla made this change before {old}; the mod never took it. Take it "
+                          "if an earlier port missed it, keep the mod's text if the mod left it out on purpose")
+        return action, ""
+
+    def older_change(self, here, o, t):
+        """Decide ours node `o`, which a vanilla version before the base held as it is:
+        vanilla's change from it to `t` is a vanilla change, not the mod's edit."""
+        action, by = self.decide(here, "vanilla_changed", o, t, self.t_text, None)
+        action, why = self.older_gate(action, by)
+        self.decisions.append(Decision(here, "vanilla_changed", action, by, base=intent.canon(o),
+                                       ours=intent.canon(o), theirs=intent.canon(t),
+                                       reason="the mod holds this node as a vanilla version before the base "
+                                              "held it" + (f"; {why}" if why else ""),
+                                       line=self.o_text.count("\n", 0, o.start) + 1))
+        if action == TAKE:
+            self.replace(None, o, t, by or "vanilla changed")
+
+    def older_additions(self, path, B, O, T, bo, bt, tb, o_parent):
+        """At a level where the mod holds nodes from a vanilla version before the base:
+        a base node that the mod lacks and that no such version held is vanilla's
+        addition the mod never took, not the mod's deletion."""
+        older = self.older_sigs(path)
+        for i, b in enumerate(B):
+            if i in bo or i not in bt or T[bt[i]].sig != b.sig or b.sig in older:
+                continue
+            t = T[bt[i]]
+            here = path + [intent.segment(t, T, self.dialect)]
+            action, by = self.decide(here, "vanilla_added", None, t, self.t_text, None)
+            action, why = self.older_gate(action, by)
+            self.decisions.append(Decision(here, "vanilla_added", action, by, theirs=intent.canon(t),
+                                           reason="vanilla added this before the base, next to text the "
+                                                  "mod holds from an older version" + (f"; {why}" if why else "")))
+            if action == TAKE:
+                self.insert(self.anchor(T, bt[i], tb, bo, O), t, o_parent, by)
+
+    def moved_across(self, origin, otop, parent_path, t, level):
+        """True when vanilla moved text between the block `origin` (now `t`) and the
+        block around it: a key that left the block appears new beside it, or a key
+        that came into the block left its side. 1.4 cb_native_subjugation moved
+        is_neighbor_of out of scope:target into its parent."""
+        if parent_path:
+            o_parent, _loose = intent.resolve(otop, parent_path, self.dialect)
+            around_o = o_parent.children if o_parent is not None and o_parent.children is not None else []
+        else:
+            around_o = otop
+        around_t = (level.children or []) if level is not None else []
+        in_o, in_t = {c.sig for c in origin.children}, {c.sig for c in t.children or []}
+        left = {c.key for c in origin.children if c.sig not in in_t}
+        came = {c.key for c in t.children or [] if c.sig not in in_o}
+        sig_o, sig_t = {c.sig for c in around_o}, {c.sig for c in around_t}
+        new_beside = {c.key for c in around_t if c is not t and c.sig not in sig_o}
+        gone_beside = {c.key for c in around_o if c is not origin and c.sig not in sig_t}
+        return bool(left & new_beside or came & gone_beside)
+
+    def history_level(self, path, texts=None):
+        """The nodes at `path` in each vanilla version between the base and theirs, or
+        in `texts`."""
         out = []
-        for text in self.history:
+        for text in self.history if texts is None else texts:
             node, _loose = intent.resolve(self.view(text), path, self.dialect)
             if node is not None and node.children is not None:
                 out.extend(node.children)
@@ -576,15 +679,20 @@ class _Merge:
         theirs is vanilla's change to it (vanilla_changed); with none, vanilla removed
         it (vanilla_removed). Returns the theirs indexes it used."""
         self._taken_o, used = set(), set()
-        if not self.history:
+        self._from_older = False
+        if not self.history and not self.older:
             return used
         free_o = [j for j in range(len(O)) if j not in ob]
         t_sigs = {n.sig for n in T}
         if not free_o:
             return used
-        earlier = {}
+        earlier, before_base = {}, set()
         for n in self.history_level(path):
             earlier.setdefault(n.sig, n)
+        for n in self.history_level(path, self.older):
+            if n.sig not in earlier:
+                earlier[n.sig] = n
+                before_base.add(n.sig)
         b_sigs = {n.sig for n in B}
         cand = [j for j in free_o if O[j].sig in earlier and O[j].sig not in t_sigs and O[j].sig not in b_sigs]
         if not cand:
@@ -598,10 +706,16 @@ class _Merge:
             here = path + [intent.segment(t if t is not None else o, T if t is not None else O, self.dialect)]
             kind = "vanilla_changed" if t is not None else "vanilla_removed"
             action, by = self.decide(here, kind, o, t, self.t_text, None)
-            action, why = self.gate(action, by, here, kind, o, t)
+            if o.sig in before_base:
+                self._from_older = True
+                action, why = self.older_gate(action, by)
+            else:
+                action, why = self.gate(action, by, here, kind, o, t)
             self.decisions.append(Decision(here, kind, action, by, base=intent.canon(earlier[o.sig]),
                                            ours=intent.canon(o), theirs=intent.canon(t),
-                                           reason="the mod took this node from a later vanilla version"
+                                           reason=("the mod holds this node as a vanilla version before the "
+                                                   "base held it" if o.sig in before_base else
+                                                   "the mod took this node from a later vanilla version")
                                            + (f"; {why}" if why else ""),
                                            line=self.o_text.count("\n", 0, o.start) + 1))
             self._taken_o.add(j)
@@ -1096,15 +1210,18 @@ def removed_lines(ours, merged, ops):
     return out
 
 
-def merge_texts(base, ours, theirs, dialect=diff3.SCRIPT, unwrap=False, decide=None, history=(), old=None):
+def merge_texts(base, ours, theirs, dialect=diff3.SCRIPT, unwrap=False, decide=None, history=(), old=None,
+                older=()):
     """Result of a three-way merge of one copy. `decide(path, kind, ours node, theirs
     node, theirs text, what)` returns (action, by); by default a vanilla change where
     ours equals base is taken and every conflict is open. `history`: vanilla's texts
     between the base and theirs, oldest first; a node the mod took from one of them
     counts as vanilla's (see _Merge.later_vanilla). `old`: (vanilla's text at --old,
-    its tag) when the base is older than --old (see _Merge.gate)."""
+    its tag) when the base is older than --old (see _Merge.gate). `older`: vanilla's
+    texts before the base, oldest first; a node the mod still holds from one of them
+    is vanilla's old text too."""
     decide = decide or (lambda path, kind, o, t, tt, what: (OPEN, None) if what == "conflict" else (TAKE, None))
-    m = _Merge(base, ours, theirs, dialect, unwrap, decide, history, old)
+    m = _Merge(base, ours, theirs, dialect, unwrap, decide, history, old, older)
     text, ops = m.run()
     res = Result(text, ops, m.decisions)
     res.unexplained = removed_lines(ours, text, ops) + [
