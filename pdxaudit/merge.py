@@ -19,7 +19,8 @@ own, so two adjacent edits never fuse into one conflict:
 
 A node that only theirs has goes after the ours counterpart of its nearest earlier
 sibling; a node that both added is kept once. The merge splices into the ours text at
-node offsets, so the mod's layout, order and comments stay.
+node offsets, so the mod's layout, order and comments stay. A one-line block that a
+merged node gives a line break gets one child per line, so the text stays readable.
 
 A rule or an entry without a disposition (a grouping), a banned rule and a stale
 entry never apply: each node goes to the user as an open decision.
@@ -415,17 +416,109 @@ class _Merge:
 
     # --- output -----------------------------------------------------------------
     def apply(self):
-        ops = sorted(self.ops, key=lambda op: (op.start, op.end))
-        out, pos, clean = [], 0, []
+        ops = _splice_ops(self.ops)
+        ops = sorted(self.expand_one_line_blocks(ops), key=lambda op: (op.start, op.end))
+        out, pos = [], 0
         for op in ops:
-            if op.start < pos:                       # overlapping ops: keep the first
-                continue
             out.append(self.o_text[pos:op.start])
             out.append(op.text)
             pos = op.end
-            clean.append(op)
         out.append(self.o_text[pos:])
-        return "".join(out), clean
+        return "".join(out), ops
+
+    def expand_one_line_blocks(self, ops):
+        """`ops`, with each one-line block of ours that an op gives a line break made
+        into one op that lays the block out on more lines. The block is the outermost
+        one-line block around the op, so no one-line ancestor holds a line break."""
+        units, stack = [], list(diff3.nodes(self.o_text))
+        while stack:
+            n = stack.pop()
+            if n.kind != "block":
+                continue
+            if "\n" in self.o_text[n.start:n.end]:
+                stack.extend(n.children)
+            else:
+                units.append(n)
+        out = list(ops)
+        for u in units:
+            if not any("\n" in op.text and op.start >= u.open_end and op.end <= u.end - 1 for op in ops):
+                continue
+            inside = [op for op in out if u.start <= op.start and op.end <= u.end
+                      and not (op.start == op.end and op.start in (u.start, u.end))]
+            ids = {id(op) for op in inside}
+            if any(op.start < u.end and op.end > u.start and id(op) not in ids for op in out):
+                continue                             # an op crosses the edge of the block
+            text = _spliced(self.o_text[u.start:u.end],
+                            [Op(op.start - u.start, op.end - u.start, op.text, op.why) for op in inside])
+            new = _expand(text, _indent(self.o_text, u.start))
+            if new is None:
+                continue
+            why = next(op.why for op in inside if "\n" in op.text)
+            out = [op for op in out if id(op) not in ids] + [Op(u.start, u.end, new, why)]
+        return out
+
+
+def _splice_ops(ops):
+    """`ops` in order, less each op that overlaps an earlier one."""
+    clean, pos = [], 0
+    for op in sorted(ops, key=lambda op: (op.start, op.end)):
+        if op.start < pos:                           # overlapping ops: keep the first
+            continue
+        clean.append(op)
+        pos = op.end
+    return clean
+
+
+def _spliced(text, ops):
+    """`text` with `ops` applied."""
+    out, pos = [], 0
+    for op in _splice_ops(ops):
+        out.append(text[pos:op.start])
+        out.append(op.text)
+        pos = op.end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _shift(text, indent):
+    """`text` with its later lines moved from the indent of its last line to `indent`."""
+    lines = text.split("\n")
+    old = lines[-1][:len(lines[-1]) - len(lines[-1].lstrip(" \t"))]
+    return "\n".join(lines[:1] + [indent + ln[len(old):] if ln.startswith(old) else ln for ln in lines[1:]])
+
+
+def _expand(text, indent):
+    """The block that `text` holds, with each child on its own line at `indent` and a
+    tab, and the closing brace on its own line at `indent`. A child block that opens
+    on its first child's line and holds a line break is laid out the same way. None
+    when anything but white space lies between the children, or when the layout
+    changes more than white space."""
+    top = diff3.nodes(text)
+    if len(top) != 1 or top[0].kind != "block" or top[0].start != 0 or text[top[0].end:].strip():
+        return None
+
+    def lay(node, ind):
+        inner = ind + "\t"
+        kids = node.children
+        edges = [node.open_end] + [x for c in kids for x in (c.start, c.end)] + [node.end - 1]
+        if any(text[edges[k]:edges[k + 1]].strip() for k in range(0, len(edges), 2)):
+            return None
+        parts = [text[node.start:node.open_end]]
+        for c in kids:
+            body = text[c.start:c.end]
+            if "\n" in body and c.kind == "block" and "\n" not in text[c.open_end:(c.children[0].start
+                                                                         if c.children else c.end)]:
+                body = lay(c, inner)
+                if body is None:
+                    return None
+            elif "\n" in body:
+                body = _shift(body, inner)
+            parts.append("\n" + inner + body)
+        parts.append("\n" + ind + "}")
+        return "".join(parts)
+
+    new = lay(top[0], indent)
+    return new if new is not None and "".join(new.split()) == "".join(text.split()) else None
 
 
 def removed_lines(ours, merged, ops):

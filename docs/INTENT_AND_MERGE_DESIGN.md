@@ -359,7 +359,7 @@ The merge works on nodes, never on lines.
 
 4. Insertions. A node that only theirs has goes after the ours counterpart of its nearest earlier base sibling. With none, it goes before the counterpart of its nearest later sibling. With neither, it goes at the end of the block. A node that only ours has stays where it is. A node that both inserted with the same signature is kept once, at the ours position. This prevents the double insertion of v2.
 5. Each base node is decided alone, so two adjacent edits never fuse into one conflict. Hunks exist only in the printed diff.
-6. Output: the merge splices into the ours text at node offsets (`Node.start`, `Node.end`). The mod's layout and comments stay. An inserted vanilla node takes vanilla's text, re-indented to the depth of its new place.
+6. Output: the merge splices into the ours text at node offsets (`Node.start`, `Node.end`). The mod's layout and comments stay. An inserted vanilla node takes vanilla's text, re-indented to the depth of its new place. A one-line block of ours that a merged node gives a line break gets one child per line, with tab indents.
 
 ### 7.4 Decision list
 

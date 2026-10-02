@@ -201,3 +201,25 @@ def test_a_multi_line_insertion_inside_a_line_is_not_a_removal():
     theirs = "a = {\n\tt = { x = 1 o = 1 if = {\n\t\tlimit = { y = 1 }\n\t} }\n\tif = {\n\t\tk = 1\n\t}\n}\n"
     r = merge_texts(base, ours, theirs, unwrap=True)
     assert r.check_passed and r.text.count("if = {") == 2
+
+
+def test_a_one_line_block_that_gets_a_multi_line_child_is_laid_out_on_more_lines():
+    """The merge lays out the one-line block, and its one-line parent, with one child
+    per line. The blocks around it keep their layout."""
+    base = "a = {\n\tx = { y = { a = 1 } z = 1 }\n\tw = { k = 1 }\n}\n"
+    ours = "a = {\n\tx = { y = { a = 1 } z = 2 }\n\tw = { k = 1 }\n}\n"
+    theirs = ("a = {\n\tx = {\n\t\ty = {\n\t\t\ta = 1\n\t\t\tb = {\n\t\t\t\tc = 1\n\t\t\t}\n\t\t}\n"
+              "\t\tz = 1\n\t}\n\tw = { k = 1 m = 1 }\n}\n")
+    r = merge_texts(base, ours, theirs, unwrap=True)
+    assert r.text == ("a = {\n\tx = {\n\t\ty = {\n\t\t\ta = 1\n\t\t\tb = {\n\t\t\t\tc = 1\n\t\t\t}\n\t\t}\n"
+                      "\t\tz = 2\n\t}\n\tw = { k = 1 m = 1 }\n}\n")
+    assert r.check_passed and not r.open
+
+
+def test_a_multi_line_child_in_place_of_a_statement_lays_out_its_block():
+    base = "a = {\n\tx = { a = 1 b = 1 }\n}\n"
+    ours = "a = {\n\tx = { a = 1 b = 2 }\n}\n"
+    theirs = "a = {\n\tx = {\n\t\ta = {\n\t\t\tc = 1\n\t\t}\n\t\tb = 1\n\t}\n}\n"
+    r = merge_texts(base, ours, theirs, unwrap=True)
+    assert r.text == "a = {\n\tx = {\n\t\ta = {\n\t\t\tc = 1\n\t\t}\n\t\tb = 2\n\t}\n}\n"
+    assert r.check_passed
