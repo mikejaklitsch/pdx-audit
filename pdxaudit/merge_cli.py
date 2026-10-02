@@ -253,14 +253,94 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
                      for d, name, btag in decisions]
         merged, _spans = merge.splice(text, edits)
         files.append({"file": rel, "before_sha": _sha(text), "merged": merged, "bom": bom, "crlf": crlf,
-                      "diff": merge.unified(rel, text, merged), "decisions": decisions,
+                      "ours": text, "decisions": decisions,
                       "open": sum(1 for d in decisions if d["action"] == merge.OPEN),
                       "removed_check": {"passed": not unexplained,
                                         "unexplained": [{"line": ln, "text": s} for ln, s in unexplained]},
                       "stale_entries": sorted(stale)})
+    lay_out(files)
+    for f in files:
+        f["diff"] = merge.unified(f["file"], f.pop("ours"), f["merged"])
     return {"old": old_tag, "new": tag_of(new_msg), "files": files,
             "regenerate": [{"file": f, "tool": t, "hint": reg.regenerate_hint(t)} for f, t in sorted(regenerate.items())],
             "skipped": _distinct_skips(skipped)}
+
+
+FORMAT_EXTS = (".txt", ".gui")
+
+
+def pdx_format(texts):
+    """{name: formatted text, or None when pdx-format refused it} for {name: text}.
+    Each text goes through `pdx-format -` (standard input to standard output), in a
+    few threads; pdx-format reports a refusal on standard error and returns the text
+    as it was. Raises FileNotFoundError when pdx-format is not installed."""
+    import shutil
+    import subprocess
+    from concurrent.futures import ThreadPoolExecutor
+    exe = shutil.which("pdx-format") or str(Path.home() / ".local" / "bin" / "pdx-format")
+    if not Path(exe).is_file():
+        raise FileNotFoundError("pdx-format is not installed")
+
+    def one(text):
+        r = subprocess.run([exe, "-"], input=text, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        if r.returncode != 0 or "Error" in r.stderr:
+            return None
+        return r.stdout.lstrip("\ufeff").replace("\r\n", "\n")
+    names = list(texts)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return dict(zip(names, pool.map(one, (texts[n] for n in names))))
+
+
+# The formatter the plan uses; a test replaces it.
+FORMATTER = pdx_format
+
+
+def same_content(a, b):
+    """True when two texts hold the same code tokens in order (letter case aside, as
+    pdx-format changes the case of some keywords) and the same comments."""
+    from pdx_utilities.script_parser import tokenize
+    ta, tb = tokenize(a), tokenize(b)
+    code = lambda ts: [t["val"].lower() for t in ts if t["type"] != "comment"]   # noqa: E731
+    notes = lambda ts: sorted(" ".join(t["val"].split()) for t in ts if t["type"] == "comment")   # noqa: E731
+    return code(ta) == code(tb) and notes(ta) == notes(tb)
+
+
+def lay_out(files):
+    """Give each merged .txt and .gui file the layout of pdx-format, so `--apply`
+    needs no format pass. Only a file that pdx-format leaves as it is before the
+    merge gets it: the mod keeps some files out of pdx-format (map data, setup
+    files, generated locators), and formatting them would change lines the merge did
+    not touch. The formatted text must hold the same tokens and comments as the
+    merge, or the file fails. Each file records the outcome in `format`."""
+    todo = [f for f in files if PurePosixPath(f["file"]).suffix.lower() in FORMAT_EXTS
+            and f["merged"] != f["ours"]]
+    for f in files:
+        f["format"] = {"applied": False, "why": "not a .txt or .gui file"
+                       if PurePosixPath(f["file"]).suffix.lower() not in FORMAT_EXTS else "no change"}
+    if not todo:
+        return
+    texts = {}
+    for f in todo:
+        texts["ours/" + f["file"]] = f["ours"]
+        texts["merged/" + f["file"]] = f["merged"]
+    try:
+        done = FORMATTER(texts)
+    except FileNotFoundError as e:
+        for f in todo:
+            f["format"] = {"applied": False, "why": f"{e}; run pdx-format on the file after --apply"}
+        return
+    for f in todo:
+        ours_fmt, merged_fmt = done.get("ours/" + f["file"]), done.get("merged/" + f["file"])
+        if ours_fmt != f["ours"]:
+            f["format"] = {"applied": False, "why": "the mod file is not in pdx-format layout, so the merge "
+                           "keeps its layout"}
+        elif merged_fmt is None or not same_content(f["merged"], merged_fmt):
+            f["format"] = {"applied": False, "failed": True,
+                           "why": "pdx-format refused the merged text or changed its content"}
+        else:
+            f["merged"] = merged_fmt
+            f["format"] = {"applied": True}
 
 
 def _distinct_skips(skipped):
@@ -464,6 +544,9 @@ def _print(p):
         print(f"- {taken} vanilla changes taken, {kept} kept by a rule or an entry, {f['open']} open decisions")
         rc = f["removed_check"]
         print(f"- Removed-line check: {'passed' if rc['passed'] else 'FAILED'}")
+        fm = f.get("format", {})
+        print("- Layout: pdx-format" if fm.get("applied") else
+              f"- Layout: {'FAILED, ' if fm.get('failed') else ''}not formatted ({fm.get('why')})")
         for u in rc["unexplained"]:
             print(f"  - line {u['line']} removed without a vanilla change: `{u['text'].strip()}`")
         for e in f["stale_entries"]:
@@ -535,6 +618,8 @@ def _apply(mod_root, plan_path):
             why.append(f"{f['open']} open decisions")
         if f["stale_entries"]:
             why.append("it uses stale entries")
+        if f.get("format", {}).get("failed"):
+            why.append("pdx-format refused the merged text")
         if f["merged"] == text:
             continue
         if why:
@@ -546,6 +631,9 @@ def _apply(mod_root, plan_path):
         print(f"Wrote {rel}")
     for rel, why in refused:
         print(f"Refused {rel}: {'; '.join(why)}", file=sys.stderr)
-    if written:
-        print("Run pdx-format on the written files.")
+    unformatted = [f["file"] for f in p["files"] if f["file"] in written
+                   and PurePosixPath(f["file"]).suffix.lower() in FORMAT_EXTS
+                   and not f.get("format", {}).get("applied")]
+    if unformatted:
+        print("These files keep the mod's own layout: " + ", ".join(unformatted))
     return 1 if refused else 0

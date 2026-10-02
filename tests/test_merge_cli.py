@@ -247,3 +247,54 @@ def test_a_file_type_the_tracker_did_not_record_at_old_is_skipped_with_the_reaso
     assert not p["files"]
     assert [(s["file"], s["copies"] >= 1) for s in p["skipped"]] == [(dm, True)]
     assert "the tracker holds no .map files at 1.0" in p["skipped"][0]["why"]
+
+
+def _plan(tmp_path, mod, tr, *extra):
+    plan = tmp_path / "plan.json"
+    assert main(["--mod-root", str(mod), "--vanilla-repo", tr.repo, "--old", "1.0", "--new", "1.1",
+                 "--dry-run", "--plan-out", str(plan), *extra]) == 0
+    return json.loads(plan.read_text(encoding="utf-8"))
+
+
+def test_the_merged_text_gets_the_layout_of_pdx_format(tmp_path, monkeypatch):
+    """Vanilla adds a definition in its own layout (`B={\\nv=1\\n}`). The mod file is
+    in pdx-format layout, so the plan formats the merged file with pdx-format: the
+    file needs no format pass after --apply. A file that is not in pdx-format layout
+    keeps its own layout."""
+    import shutil
+    import pytest
+    from pdxaudit import merge_cli
+    if not shutil.which("pdx-format"):
+        pytest.skip("pdx-format is not installed")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    other = "in_game/common/x/other.txt"
+    tr = build_tracker(tmp_path, [("1.0", {DEFS: "A={\nv=1\n}\n", other: "C={\nv=1\n}\n"}),
+                                  ("1.1", {DEFS: "A={\nv=1\n}\nB={\nv=1 # vanilla note\n}\n",
+                                           other: "C={\nv=1\n}\nD={\nv=1\n}\n"})])
+    mod = tmp_path / "mod"
+    clean = merge_cli.pdx_format({"x.txt": "A = {\n\tv = 1\n\tw = 2\n}\n"})["x.txt"]
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}', DEFS: clean,
+                      other: "C = {  v = 1 }\n"})
+    p = _plan(tmp_path, mod, tr)
+    files = {f["file"]: f for f in p["files"]}
+    f = files[DEFS]
+    assert f["format"] == {"applied": True}
+    assert f["merged"] == merge_cli.pdx_format({"m.txt": f["merged"]})["m.txt"]
+    assert "B = {" in f["merged"] and "# vanilla note" in f["merged"]
+    assert f["removed_check"]["passed"]
+    g = files[other]
+    assert not g["format"]["applied"] and "not in pdx-format layout" in g["format"]["why"]
+    assert "C = {  v = 1 }" in g["merged"] and "D={" in g["merged"]
+
+
+def test_apply_refuses_a_file_that_pdx_format_refused(tmp_path, monkeypatch, capsys):
+    from pdxaudit import merge_cli
+    monkeypatch.setattr(merge_cli, "FORMATTER",
+                        lambda texts: {k: (v if k.startswith("ours/") else None) for k, v in texts.items()})
+    mod, common = _setup(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.json"
+    main(common + ["--dry-run", "--plan-out", str(plan)])
+    p = json.loads(plan.read_text())
+    assert p["files"][0]["format"]["failed"]
+    assert main(common + ["--apply", str(plan)]) == 1
+    assert "pdx-format refused the merged text" in capsys.readouterr().err
