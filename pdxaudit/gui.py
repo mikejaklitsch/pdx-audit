@@ -318,6 +318,8 @@ def run_gui_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
     dismissed = getattr(ctx, "dismissed", frozenset())
     same_path = {rel for rel, _ in files if any(rel in fi for _d, fi, _b in indexes)}
 
+    from .registry import Generated
+    generated = Generated(mod_root, ctx)
     shadowed, new_coll, van_removed = [], [], []
     current = mod_only = 0
     for d in mdefs:
@@ -325,6 +327,10 @@ def run_gui_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
             continue
         key = (d["module"], d["kind"], d["name"])
         entries = [di.get(key) for di, _f, _b in indexes]
+        is_gen, tool = generated.check(d["file"])
+        if is_gen:
+            generated.add(d["file"], tool, [e and e[1] for e in entries], tags)
+            continue
         if not any(entries):
             mod_only += 1
             continue
@@ -349,6 +355,10 @@ def run_gui_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
     replaced, file_review = [], []
     for rel, text in files_audited:
         versions = [fi.get(rel) for _d, fi, _b in indexes]
+        is_gen, tool = generated.check(rel)
+        if is_gen:
+            generated.add(rel, tool, versions, tags)
+            continue
         present = [v is not None for v in versions]
         if not any(present):
             continue
@@ -475,4 +485,5 @@ def run_gui_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
                                 "", {"vanilla_file": vfile} if want else None,
                                 {"target": gui_def_target((d["module"], d["kind"], d["name"]))},
                                 since))
-    return findings
+    generated.print()
+    return findings + generated.findings("gui_generated")

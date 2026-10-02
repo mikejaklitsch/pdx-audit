@@ -227,6 +227,15 @@ KIND.update({
         SEV_REVIEW, "deps", "GUI types, templates and blocks the mod uses that vanilla no longer defines",
         "find what vanilla uses now and update the widget, `type` parent, `using` or `blockoverride`, "
         "or confirm another mod defines it"),
+    "override_generated": (
+        SEV_REVIEW, "override", "generated REPLACE and INJECT files whose vanilla source changed",
+        "run the generator that the finding names after the patch; do not edit the file"),
+    "file_generated": (
+        SEV_REVIEW, "files", "generated same-path files whose vanilla source changed",
+        "run the generator that the finding names after the patch; do not edit the file"),
+    "gui_generated": (
+        SEV_REVIEW, "gui", "generated GUI files whose vanilla source changed",
+        "run the generator that the finding names after the patch; do not edit the file"),
     "deps_binding_removed": (
         SEV_BROKEN, "deps", "data-binding names the mod's GUI uses that vanilla dropped and the engine data "
         "does not list",

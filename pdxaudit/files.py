@@ -403,6 +403,8 @@ def run_file_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, c
           f"against {len(window)} vanilla versions...", file=sys.stderr)
     blobs = base.blobs({i for _r, _p, ids in tracked for i in ids if i})
 
+    from .registry import Generated
+    generated = Generated(mod_root, ctx)
     copies, file_review, added, removed, binary = [], [], [], [], []
     counts = Counter()
     for rel, points, ids in tracked:
@@ -419,6 +421,10 @@ def run_file_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, c
         text = decode(data)
         versions = [decode(blobs[i]) if i else None for i in ids]
         vtags = [tags[k] for k in points]
+        is_gen, tool = generated.check(rel)
+        if is_gen:
+            generated.add(rel, tool, versions, vtags)
+            continue
         if versions[-1] is None:
             if not block:
                 last = max(k for k, v in enumerate(versions) if v is not None)
@@ -461,7 +467,9 @@ def run_file_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, c
 
     _print_report(tags, window, new_msg, len(tracked) - len(binary), copies, added, removed,
                   file_review, untracked_rows, counts, args, dismissed)
-    return _findings(copies, added, removed, file_review, untracked_rows)
+    generated.print()
+    return (_findings(copies, added, removed, file_review, untracked_rows)
+            + generated.findings("file_generated"))
 
 
 # A definition this large is audited entry by entry (`locations > stockholm`), up to

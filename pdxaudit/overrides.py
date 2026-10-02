@@ -806,10 +806,16 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
     history = block_history(base, window, categories,
                             {(o["category"], o["block"]) for o in replaces}) if replaces else {}
 
+    from .registry import Generated
+    generated = Generated(mod_root, ctx)
     removed, changed_replace, unchanged, not_found, unreadable = [], [], [], [], []
     for ov in replaces:
         key = (ov["category"], ov["block"])
         texts = history[key]
+        is_gen, tool = generated.check(ov["file"])
+        if is_gen:
+            generated.add(ov["file"], tool, texts, tags)
+            continue
         if texts[-1] is None:
             present = [i for i, t in enumerate(texts) if t is not None]
             if not present:
@@ -852,6 +858,10 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
         for ov in injects:
             key = (ov["category"], ov["block"])
             new_e, old_e = new_idx.get(key), old_idx.get(key)
+            is_gen, tool = generated.check(ov["file"])
+            if is_gen:
+                generated.add(ov["file"], tool, [old_e and old_e[1], new_e and new_e[1]], [old_tag, new_tag])
+                continue
             start, base_tag = old_pos, old_tag
             target_tag = None if fixed_window else bases.get(override_target(ov))
             if target_tag in all_tags:
@@ -1092,4 +1102,5 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
               f"{overlaps_found} INJECT collisions, {len(removed) + len(shadowed)} orphaned.")
         if not args.diff and (changed_replace or changed_inject):
             print("Run with `--diff` for vanilla's changes since each copy's version.")
-    return findings
+    generated.print()
+    return findings + generated.findings("override_generated")
