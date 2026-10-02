@@ -114,6 +114,17 @@ A difference that no rule and no recorded entry explains is a finding when it is
 
 A proposal is a JSON file in the per-user data folder. The proposer fills a reason only from a pdx-maint note, and gives the note id as the source. It shows commits and comments as evidence only. Write the reason, the system and the disposition of each candidate in the file, then accept it.
 
+## Merge a patch into your copies
+
+```bash
+pdx-audit merge --old 1.3.11 --new 1.4.0 [--file PATH | --block NAME] --dry-run
+pdx-audit merge --old 1.3.11 --new 1.4.0 --apply <plan.json>
+```
+
+The merge takes the changes of vanilla into your REPLACE blocks, your same-path files and your GUI copies, node by node, and keeps your own edits. The intent store decides where both changed: a rule or an entry with `keep_mod` keeps yours, `take_vanilla` takes vanilla's. Each other conflict is an open decision, with the commit that wrote your line. For an INJECT, a key that you inject and that vanilla changed is a decision.
+
+The dry run writes nothing in the mod. It prints the full diff and the decisions, checks that every line it removes is explained by a change of vanilla, and saves a plan. `--apply` writes the plan: it refuses a file that changed after the dry run, a file whose removed-line check failed, a file with an open decision, and a file that a stale entry decided. A file that a tool generates is never merged: the report names the tool to run. Run pdx-format on the files that `--apply` wrote.
+
 ## From a clone
 
 Clone [pdx-utilities](https://github.com/mikejaklitsch/pdx-utilities) next to this repo: pdx-audit's shared helpers live there. Then run `./pdx-audit`, or install with `pipx install --editable .` followed by `pipx inject pdx-audit --editable ../pdx-utilities`, so edits to the shared helpers reach pdx-audit immediately. The tests run with `python -m pytest`.

@@ -1,0 +1,533 @@
+"""Node-level three-way merge of vanilla patch changes into the mod's copies.
+
+For each copy the merge takes three texts:
+
+  base     vanilla at the copy's baseline, not later than --old
+  ours     the mod's copy
+  theirs   vanilla at --new
+
+It parses all three with the shared parser (diff3.nodes) and aligns base with ours
+and base with theirs (diff3.align), level by level. Each base node is decided on its
+own, so two adjacent edits never fuse into one conflict:
+
+  ours        theirs      result
+  same        same        ours
+  changed     same        ours
+  same        changed     theirs, unless a rule or an entry says keep_mod
+  changed     changed     ours when both agree; blocks with one head recurse;
+                          otherwise the disposition, or an open decision
+
+A node that only theirs has goes after the ours counterpart of its nearest earlier
+sibling; a node that both added is kept once. The merge splices into the ours text at
+node offsets, so the mod's layout, order and comments stay.
+
+A rule or an entry without a disposition (a grouping), a banned rule and a stale
+entry never apply: each node goes to the user as an open decision.
+
+The removed-line check compares the merged text with ours line by line. Every line
+that the merge removes must lie inside an operation that a vanilla change explains.
+Any other removal fails the file, and `--apply` does not write it."""
+import difflib
+import re
+from dataclasses import dataclass, field
+
+from . import diff3, intent
+
+TAKE, KEEP, OPEN = "take", "keep", "open"
+
+
+@dataclass
+class Op:
+    start: int
+    end: int
+    text: str
+    why: str                     # what explains it: "vanilla changed", "rule:x", ...
+    removes: bool = True         # True when the op removes ours text
+
+
+@dataclass
+class Decision:
+    path: list
+    kind: str                    # vanilla_changed, vanilla_added, vanilla_removed, both_changed, ...
+    action: str                  # take, keep, open
+    by: str = None               # rule or entry that decided it
+    reason: str = ""
+    base: str = None
+    ours: str = None
+    theirs: str = None
+    line: int = None
+    commit: str = None
+
+    def to_json(self):
+        return {k: v for k, v in self.__dict__.items() if v not in (None, "")}
+
+
+@dataclass
+class Result:
+    text: str
+    ops: list = field(default_factory=list)
+    decisions: list = field(default_factory=list)
+    unexplained: list = field(default_factory=list)
+    stale: list = field(default_factory=list)
+
+    @property
+    def open(self):
+        return [d for d in self.decisions if d.action == OPEN]
+
+    @property
+    def check_passed(self):
+        return not self.unexplained
+
+
+def _line_start(text, pos):
+    return text.rfind("\n", 0, pos) + 1
+
+
+def _line_end(text, pos):
+    e = text.find("\n", pos)
+    return len(text) if e < 0 else e
+
+
+def _indent(text, pos):
+    s = _line_start(text, pos)
+    return text[s:len(text[s:]) - len(text[s:].lstrip(" \t")) + s]
+
+
+def _code_after(text, pos):
+    """The code between `pos` and the end of its line, without a comment."""
+    rest = text[pos:_line_end(text, pos)]
+    in_str = False
+    for i, c in enumerate(rest):
+        if c == '"':
+            in_str = not in_str
+        elif c == "#" and not in_str:
+            return rest[:i]
+    return rest
+
+
+def _lead(text, node):
+    """The start of the comment lines directly above `node`, with no blank line
+    between: they describe the node and move with it. The node's own start when there
+    are none, or when the node shares its line with other code."""
+    s = _line_start(text, node.start)
+    if text[s:node.start].strip():
+        return node.start
+    start = s
+    while start > 0:
+        prev = _line_start(text, start - 1)
+        line = text[prev:start - 1].strip()
+        if not line.startswith("#"):
+            break
+        start = prev
+    return start if start < s else node.start
+
+
+def _reindent(src, node, indent, comments=False):
+    """The text of `node` in `src`, its later lines moved from the node's own indent
+    to `indent`. With `comments`, the comment lines above the node come with it."""
+    first = _lead(src, node) if comments else node.start
+    if first < node.start:
+        head = src[first:_line_start(src, node.start)]
+        lines = [ln.strip() for ln in head.rstrip("\n").split("\n")]
+        return "\n".join(lines[:1] + [indent + ln for ln in lines[1:]]) + "\n" + indent \
+            + _reindent(src, node, indent)
+    body = src[node.start:node.end]
+    old = _indent(src, node.start)
+    lines = body.split("\n")
+    out = [lines[0]]
+    for line in lines[1:]:
+        out.append(indent + line[len(old):] if line.startswith(old) else line)
+    return "\n".join(out)
+
+
+def _delete_span(text, node):
+    """(start, end) to delete `node`: its whole line when nothing else of code is on
+    it, else the node with the space before it."""
+    s, e = _line_start(text, node.start), _line_end(text, node.end)
+    before = text[s:node.start]
+    if not before.strip() and not _code_after(text, node.end).strip():
+        return _line_start(text, _lead(text, node)), min(e + 1, len(text))
+    start = node.start
+    while start > s and text[start - 1] in " \t":
+        start -= 1
+    return start, node.end
+
+
+def _leaves(node, out=None):
+    """The signatures of the statements under a node."""
+    out = set() if out is None else out
+    for c in node.children or ():
+        if c.children is None:
+            out.add(c.sig)
+        else:
+            _leaves(c, out)
+    return out
+
+
+def _similarity(x, y):
+    a, b = _leaves(x), _leaves(y)
+    return len(a & b) / len(a | b) if a or b else 0.0
+
+
+def _score(m, n, dialect, hint=None):
+    """How well two siblings pair, or 0 when they cannot: a named block or a block
+    with a selector pairs only with its own name or selector; other blocks of one key
+    pair better the more statements they share."""
+    if m.kind != n.kind or m.key != n.key:
+        return 0
+    if m.label != m.key or n.label != n.key:
+        return 4 if m.label == n.label else 0
+    if m.children is None:
+        return 1.5 if m.value == n.value else 1
+    sm, sn = diff3.selector(m, dialect), diff3.selector(n, dialect)
+    if sm is not None and sm == sn:
+        return 3
+    # `hint`: vanilla's new version of m. Ours can hold vanilla's new text already, so
+    # the closeness to it counts as much as the closeness to the base.
+    extra = _similarity(hint, n) if hint is not None and hint.children is not None else 0
+    return 1 + _similarity(m, n) + extra
+
+
+def _gap(a, b, ia, ib, dialect, hints=None):
+    """Order-preserving pairs between two runs of unmatched siblings, with the most
+    total score (a weighted longest common subsequence)."""
+    ia, ib = list(ia), list(ib)
+    if not ia or not ib:
+        return []
+    if len(ia) * len(ib) > 250000:                 # a huge run: diff3's own pairing
+        pairs = diff3.align([a[i] for i in ia], [b[j] for j in ib], dialect)
+        return [(ia[x], ib[y]) for x, y in pairs]
+    n, m = len(ia), len(ib)
+    best = [[0.0] * (m + 1) for _ in range(n + 1)]
+    for x in range(n - 1, -1, -1):
+        for y in range(m - 1, -1, -1):
+            s = _score(a[ia[x]], b[ib[y]], dialect, (hints or {}).get(ia[x]))
+            take = best[x + 1][y + 1] + s if s else 0.0
+            best[x][y] = max(best[x + 1][y], best[x][y + 1], take)
+    pairs, x, y = [], 0, 0
+    while x < n and y < m:
+        s = _score(a[ia[x]], b[ib[y]], dialect, (hints or {}).get(ia[x]))
+        if s and best[x][y] == best[x + 1][y + 1] + s:
+            pairs.append((ia[x], ib[y]))
+            x, y = x + 1, y + 1
+        elif best[x][y] == best[x + 1][y]:
+            x += 1
+        else:
+            y += 1
+    return pairs
+
+
+def merge_align(a, b, dialect, hints=None):
+    """Pairs between sibling nodes for the merge. Identical nodes pair first, in
+    order. Between them, the runs pair by _score in order, so a block that vanilla
+    inserted before a changed sibling of the same key does not take its partner.
+    Last, a named block or a block with a selector that moved pairs out of order.
+    `hints`: {index in a: vanilla's new version of that node}, for the base-to-ours
+    pairing."""
+    import difflib as _dl
+    pairs, pa, pb = [], 0, 0
+    sm = _dl.SequenceMatcher(None, [n.sig for n in a], [n.sig for n in b], autojunk=False)
+    for x, y, size in sm.get_matching_blocks():
+        pairs += _gap(a, b, range(pa, x), range(pb, y), dialect, hints)
+        pairs += [(x + k, y + k) for k in range(size)]
+        pa, pb = x + size, y + size
+    taken_a, taken_b = {i for i, _j in pairs}, {j for _i, j in pairs}
+    for ident in (lambda n: n.sig,                     # the same node, moved
+                  lambda n: n.label if n.label != n.key else None,
+                  lambda n: diff3.selector(n, dialect)):
+        free_b = {}
+        for j, n in enumerate(b):
+            if j not in taken_b and ident(n) is not None:
+                free_b.setdefault(ident(n), []).append(j)
+        for i, n in enumerate(a):
+            if i not in taken_a and ident(n) is not None and free_b.get(ident(n)):
+                j = free_b[ident(n)].pop(0)
+                pairs.append((i, j))
+                taken_a.add(i)
+                taken_b.add(j)
+    # A key that only one unpaired node holds on each side: the same node, moved and
+    # changed.
+    free_a = [i for i in range(len(a)) if i not in taken_a]
+    free_b = [j for j in range(len(b)) if j not in taken_b]
+    for i in free_a:
+        same_a = [k for k in free_a if a[k].key == a[i].key]
+        same_b = [j for j in free_b if b[j].key == a[i].key and j not in taken_b]
+        if len(same_a) == 1 and len(same_b) == 1 and _score(a[i], b[same_b[0]], dialect):
+            pairs.append((i, same_b[0]))
+            taken_b.add(same_b[0])
+    return sorted(pairs)
+
+
+class _Merge:
+    def __init__(self, base, ours, theirs, dialect, unwrap, decide, ours_offset=0):
+        self.b_text, self.o_text, self.t_text = base, ours, theirs
+        self.dialect, self.unwrap, self.decide = dialect, unwrap, decide
+        self.ops, self.decisions = [], []
+
+    def view(self, text):
+        top = diff3.nodes(text)
+        return diff3.body(top) if self.unwrap else top
+
+    def run(self):
+        b, o, t = self.view(self.b_text), self.view(self.o_text), self.view(self.t_text)
+        outer = next((n for n in diff3.nodes(self.o_text) if n.kind == "block"), None) if self.unwrap else None
+        self.level(b, o, t, [], outer)
+        return self.apply()
+
+    # --- one level --------------------------------------------------------------
+    def level(self, B, O, T, path, o_parent):
+        bt = dict(merge_align(B, T, self.dialect))
+        bo = dict(merge_align(B, O, self.dialect, {i: T[j] for i, j in bt.items()}))
+        tb = {j: i for i, j in bt.items()}
+        ob = {j: i for i, j in bo.items()}
+        for i, b in enumerate(B):
+            o = O[bo[i]] if i in bo else None
+            t = T[bt[i]] if i in bt else None
+            seg_node, seg_level = (t, T) if t is not None else ((o, O) if o is not None else (b, B))
+            here = path + [intent.segment(seg_node, seg_level, self.dialect)]
+            o_same = o is not None and o.sig == b.sig
+            t_same = t is not None and t.sig == b.sig
+            if t_same or (o is None and t is None):
+                continue
+            if o is not None and t is not None and o.sig == t.sig:
+                continue
+            if o_same and t is not None and o.children is not None and t.children is not None \
+                    and o.key == t.key:
+                self.recurse(here, b, o, t)          # take vanilla's change inside, keep ours' layout
+            elif o_same:
+                kind = "vanilla_changed" if t is not None else "vanilla_removed"
+                self.vanilla_change(kind, here, b, o, t)
+            elif o is None:
+                self.decide_conflict("removed_changed", here, b, None, t,
+                                     (self.anchor(T, bt[i], tb, bo, O), o_parent))
+            elif t is None:
+                self.decide_conflict("both_changed", here, b, o, None, None)
+            elif (o.children is not None and t.children is not None and o.key == t.key == b.key):
+                self.recurse(here, b, o, t)
+            else:
+                self.decide_conflict("both_changed", here, b, o, t, None)
+        # Nodes that only theirs has.
+        added_by_ours = [O[j] for j in range(len(O)) if j not in ob]
+        for j, t in enumerate(T):
+            if j in tb:
+                continue
+            if any(x.sig == t.sig for x in added_by_ours) or any(x.sig == t.sig for x in O):
+                continue
+            here = path + [intent.segment(t, T, self.dialect)]
+            anchor = self.anchor(T, j, tb, bo, O)
+            d = self.decide(here, "vanilla_added", None, t, self.t_text, None)
+            action, by = d
+            dec = Decision(here, "vanilla_added", action, by, theirs=intent.canon(t))
+            self.decisions.append(dec)
+            if action == TAKE:
+                self.insert(anchor, t, o_parent, by or "vanilla added")
+
+    def recurse(self, here, b, o, t):
+        if o.value != t.value:
+            if o.value == b.value:
+                d = self.decide(here, "vanilla_changed", o, t, self.t_text, "head")
+                if d[0] == TAKE:
+                    self.ops.append(Op(o.start, o.open_end, self.t_text[t.start:t.open_end],
+                                       d[1] or "vanilla changed the head"))
+                self.decisions.append(Decision(here, "vanilla_changed", d[0], d[1],
+                                               ours=self.o_text[o.start:o.open_end],
+                                               theirs=self.t_text[t.start:t.open_end]))
+            elif t.value != b.value:
+                self.decisions.append(Decision(here, "both_changed", OPEN, None,
+                                               ours=self.o_text[o.start:o.open_end],
+                                               theirs=self.t_text[t.start:t.open_end]))
+        self.level(b.children, o.children, t.children, here, o)
+
+    def anchor(self, T, j, tb, bo, O):
+        """('after', ours node) for the nearest earlier theirs sibling with an ours
+        counterpart, else ('before', ours node) for the nearest later one, else
+        ('end', None)."""
+        for k in range(j - 1, -1, -1):
+            if k in tb and tb[k] in bo:
+                return ("after", O[bo[tb[k]]])
+        for k in range(j + 1, len(T)):
+            if k in tb and tb[k] in bo:
+                return ("before", O[bo[tb[k]]])
+        return ("end", None)
+
+    # --- decisions --------------------------------------------------------------
+    def vanilla_change(self, kind, here, b, o, t):
+        action, by = self.decide(here, kind, o, t, self.t_text, None)
+        self.decisions.append(Decision(here, kind, action, by, base=intent.canon(b), ours=intent.canon(o),
+                                       theirs=intent.canon(t),
+                                       line=self.o_text.count("\n", 0, o.start) + 1))
+        if action != TAKE:
+            return
+        if t is None:
+            s, e = _delete_span(self.o_text, o)
+            self.ops.append(Op(s, e, "", by or "vanilla removed"))
+        else:
+            self.ops.append(Op(o.start, o.end, _reindent(self.t_text, t, _indent(self.o_text, o.start)),
+                               by or "vanilla changed"))
+
+    def decide_conflict(self, kind, here, b, o, t, place):
+        action, by = self.decide(here, kind, o, t, self.t_text, "conflict")
+        line = self.o_text.count("\n", 0, o.start) + 1 if o is not None else None
+        self.decisions.append(Decision(here, kind, action, by, base=intent.canon(b), ours=intent.canon(o),
+                                       theirs=intent.canon(t), line=line))
+        if action == TAKE and o is not None:
+            if t is None:
+                s, e = _delete_span(self.o_text, o)
+                self.ops.append(Op(s, e, "", by))
+            else:
+                self.ops.append(Op(o.start, o.end, _reindent(self.t_text, t, _indent(self.o_text, o.start)), by))
+        elif action == TAKE and o is None and t is not None:
+            if place is None:
+                self.decisions[-1].action = OPEN
+            else:                                # put vanilla's node back where ours dropped it
+                self.insert(place[0], t, place[1], by)
+
+    def insert(self, anchor, t, o_parent, why):
+        where, node = anchor
+        if where == "after":
+            if _code_after(self.o_text, node.end).strip():
+                pos, text = node.end, " " + _reindent(self.t_text, t, _indent(self.o_text, node.start))
+            else:
+                pos = _line_end(self.o_text, node.end)
+                ind = _indent(self.o_text, node.start)
+                text = "\n" + ind + _reindent(self.t_text, t, ind, comments=True)
+        elif where == "before":
+            if self.o_text[_line_start(self.o_text, node.start):node.start].strip():
+                pos, text = node.start, _reindent(self.t_text, t, _indent(self.o_text, node.start)) + " "
+            else:
+                pos = _line_start(self.o_text, _lead(self.o_text, node))   # above its comments
+                ind = _indent(self.o_text, node.start)
+                text = ind + _reindent(self.t_text, t, ind, comments=True) + "\n"
+        else:
+            if o_parent is not None and o_parent.children is not None:
+                close = o_parent.end - 1                 # the closing brace
+                ls = _line_start(self.o_text, close)
+                if self.o_text[ls:close].strip():
+                    pos, text = close, _reindent(self.t_text, t, "") + " "
+                else:
+                    ind = _indent(self.o_text, o_parent.start) + "\t"
+                    pos, text = ls, ind + _reindent(self.t_text, t, ind, comments=True) + "\n"
+            else:
+                pos = len(self.o_text)
+                sep = "" if self.o_text.endswith("\n") or not self.o_text else "\n"
+                text = sep + _reindent(self.t_text, t, "", comments=True) + "\n"
+        self.ops.append(Op(pos, pos, text, why, removes=False))
+
+    # --- output -----------------------------------------------------------------
+    def apply(self):
+        ops = sorted(self.ops, key=lambda op: (op.start, op.end))
+        out, pos, clean = [], 0, []
+        for op in ops:
+            if op.start < pos:                       # overlapping ops: keep the first
+                continue
+            out.append(self.o_text[pos:op.start])
+            out.append(op.text)
+            pos = op.end
+            clean.append(op)
+        out.append(self.o_text[pos:])
+        return "".join(out), clean
+
+
+def removed_lines(ours, merged, ops):
+    """Lines of ours that the merged text lacks and that no removing op covers."""
+    covered = set()
+    for op in ops:
+        if not op.removes:
+            if op.start != _line_start(ours, op.start):   # an insertion inside a line
+                covered.add(ours.count("\n", 0, op.start))
+            continue
+        first = ours.count("\n", 0, op.start)
+        last = ours.count("\n", 0, max(op.end - 1, op.start))
+        covered.update(range(first, last + 1))
+    from collections import Counter
+    a, b = ours.split("\n"), merged.split("\n")
+    norm = lambda s: " ".join(s.split())                    # noqa: E731
+    # A line counts as removed only when the merged text holds fewer copies of it than
+    # ours holds outside the ops, not counting the lines the ops wrote. So a line that
+    # the diff shows as moved is not a removal.
+    kept = Counter(norm(a[i]) for i in range(len(a)) if i not in covered and norm(a[i]))
+    # Rebuild the merged text from the ops and mark each character an op wrote.
+    chars, marks, pos = [], [], 0
+    for op in sorted(ops, key=lambda o: (o.start, o.end)):
+        chars.append(ours[pos:op.start])
+        marks.append("0" * (op.start - pos))
+        chars.append(op.text)
+        marks.append("1" * len(op.text))
+        pos = op.end
+    chars.append(ours[pos:])
+    marks.append("0" * (len(ours) - pos))
+    text, mask = "".join(chars), "".join(marks)
+    written, start = Counter(), 0
+    for line in text.split("\n"):
+        if "1" in mask[start:start + len(line)] and norm(line):
+            written[norm(line)] += 1
+        start += len(line) + 1
+    # The merged text as it is, less the lines an op wrote or touched: so a bug that
+    # drops a line of ours from the output still shows.
+    have = Counter(norm(x) for x in b if norm(x))
+    have.subtract(written)
+    short = {t: n - have[t] for t, n in kept.items() if n > have[t]}
+    out = []
+    sm = difflib.SequenceMatcher(None, [norm(x) for x in a], [norm(x) for x in b], autojunk=False)
+    for tag, i1, i2, _j1, _j2 in sm.get_opcodes():
+        if tag in ("delete", "replace"):
+            for i in range(i1, i2):
+                t = norm(a[i])
+                if i not in covered and t and short.get(t, 0) > 0:
+                    short[t] -= 1
+                    out.append((i + 1, a[i]))
+    return out
+
+
+def merge_texts(base, ours, theirs, dialect=diff3.SCRIPT, unwrap=False, decide=None):
+    """Result of a three-way merge of one copy. `decide(path, kind, ours node, theirs
+    node, theirs text, what)` returns (action, by); by default a vanilla change where
+    ours equals base is taken and every conflict is open."""
+    decide = decide or (lambda path, kind, o, t, tt, what: (OPEN, None) if what == "conflict" else (TAKE, None))
+    m = _Merge(base, ours, theirs, dialect, unwrap, decide)
+    text, ops = m.run()
+    res = Result(text, ops, m.decisions)
+    res.unexplained = removed_lines(ours, text, ops)
+    return res
+
+
+def merge_inject(base, ours, theirs, decide=None):
+    """Result for an INJECT. The INJECT sets children of vanilla's block; vanilla's
+    other changes reach the game without a merge. A child that the INJECT sets and
+    that vanilla changed between base and theirs is a decision: keep_mod keeps the
+    child, take_vanilla deletes it from the INJECT so vanilla's child applies, and
+    anything else stays open."""
+    decide = decide or (lambda path, kind, o, t, tt, what: (OPEN, None))
+    mine = diff3.body(diff3.nodes(ours))
+    b_kids = diff3.body(diff3.nodes(base)) if base else []
+    t_kids = diff3.body(diff3.nodes(theirs)) if theirs else []
+    ops, decisions = [], []
+    for m in mine:
+        was = sorted(intent.canon(n) for n in b_kids if n.key == m.key)
+        now = sorted(intent.canon(n) for n in t_kids if n.key == m.key)
+        if was == now:
+            continue
+        t = next((n for n in t_kids if n.key == m.key), None)
+        path = [intent.segment(t, t_kids, diff3.SCRIPT)] if t is not None else [{"key": m.key}]
+        action, by = decide(path, "both_changed", m, t, theirs, "conflict")
+        decisions.append(Decision(path, "inject_overlap", action, by, base=" | ".join(was) or None,
+                                  ours=intent.canon(m), theirs=" | ".join(now) or None,
+                                  line=ours.count("\n", 0, m.start) + 1))
+        if action == TAKE:
+            s, e = _delete_span(ours, m)
+            ops.append(Op(s, e, "", by or "vanilla changed the injected key"))
+    text, pos = [], 0
+    for op in sorted(ops, key=lambda o: o.start):
+        text.append(ours[pos:op.start])
+        pos = op.end
+    text.append(ours[pos:])
+    merged = "".join(text)
+    return Result(merged, ops, decisions, removed_lines(ours, merged, ops))
+
+
+def unified(path, before, after):
+    return "".join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
+                                        f"a/{path}", f"b/{path}"))
+
+
+_WORD = re.compile(r"\w+")

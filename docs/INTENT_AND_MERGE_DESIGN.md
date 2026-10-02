@@ -534,3 +534,16 @@ Changes that follow from these decisions:
 - A `banned` rule does not rewrite. The merge lists each use as an open decision, and the lint gate reports it.
 - A proposal is a JSON file, not TOML, so that pdx-audit needs no TOML writer. A disposition of `""` in a proposal means "not chosen yet", and `accept` refuses it. `null` makes a grouping rule.
 - A seed from the keep file or a dismissal carries the text that the user wrote, with the source kind `user`.
+
+## 15. As built (phase 4)
+
+Changes against sections 7 and 10 that the acceptance tests asked for:
+
+- **Pairing.** The merge does not use `diff3.align` alone. Identical nodes pair first, in order. Between them, nodes pair by an order-keeping weighted match: a named block or a block with a selector pairs only with its own; other blocks of one key score by the statements they share, and the base-to-ours score also counts the closeness to vanilla's new node. Moved nodes pair by signature, name, selector, or a key that only one unpaired node holds on each side.
+- **Granularity.** A block that ours left as the base and vanilla changed is merged inside, so ours keeps its layout and comments.
+- **Comments.** The comment lines directly above a node move with it when the merge deletes or inserts it. An insertion before a sibling goes above the sibling's comments.
+- **take_vanilla on a node ours dropped** puts vanilla's node back at its anchor.
+- **INJECT.** A key that the INJECT sets and vanilla changed in the window is an `inject_overlap` decision. `keep_mod` keeps it; `take_vanilla` deletes the key from the INJECT, so vanilla's value applies.
+- **Removed-line check.** It compares the merged text with ours, less the lines an op wrote or touched, as a multiset of statements. So a moved line is not a removal, and a line that the output lost still shows.
+- **Plan.** The dry run saves a plan in the per-user data folder. `--apply` takes the plan and writes exactly its text.
+- **Generated files.** The override, files and GUI audits report a generated file as one finding per file when vanilla changed its source in the window. The merge lists it to regenerate. Detection reads the first line, or in a localization file the line after the language key (as the mod's `is_generated`), and names the tool from `pdx-maint.toml`.

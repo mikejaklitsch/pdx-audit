@@ -229,6 +229,9 @@ def main():
     if sys.argv[1:2] == ["intent"]:
         from .intent_cli import main as intent_main
         sys.exit(intent_main(sys.argv[2:]))
+    if sys.argv[1:2] == ["merge"]:
+        from .merge_cli import main as merge_main
+        sys.exit(merge_main(sys.argv[2:]))
     with session.run():
         return _main()
 

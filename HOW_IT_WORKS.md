@@ -93,6 +93,12 @@ The **baseline** records the deviations that nothing explains at one moment. The
 
 A file that a tool generates (an `AUTO-GENERATED` header, or an output of a tool in `pdx-maint.toml`) is never proposed or merged. Its tool reads vanilla again: `pdx-maint run <id>` regenerates it.
 
+## The merge
+
+The merge reads three texts of each copy: vanilla at the copy's baseline (not later than `--old`), your copy, and vanilla at `--new`. It parses them and pairs the nodes of each level. Identical nodes pair first, in order. Between them, nodes of one key pair in order by how many statements they share, and the pairing of the base with your copy also counts how close your node is to vanilla's new node. So a block that vanilla inserted before a changed sibling of the same key does not take that sibling's place. A named block, a block with a selector, an identical node and a key that only one node holds pair also when they moved.
+
+Each base node is decided alone: vanilla's change is taken where your node is the base's, your node stays where vanilla did not change it, and a block that both changed is merged inside. Where both changed one statement, the intent store decides, or the node is an open decision. A node that only vanilla has goes after the counterpart of its nearest earlier sibling, with the comment lines above it. The merge writes into your text at the offsets of the nodes, so your layout, your order and your comments stay.
+
 ## The version window
 
 | Invocation | Versions for copies | Window for the other audits |

@@ -294,6 +294,8 @@ class Deviation:
 def copy_type(copy):
     if copy.audit == "override":
         return "replace"
+    if copy.audit == "inject":
+        return "inject"
     if copy.audit == "file":
         return "file"
     return "gui_file" if copy.target.startswith("guifile:") else "gui_def"
@@ -302,7 +304,7 @@ def copy_type(copy):
 def identity_of(copy):
     """Vanilla identity: the content folder and block name for script, the GUI
     target for GUI."""
-    if copy.audit == "override":
+    if copy.audit in ("override", "inject"):
         return copy.target.split(":", 1)[1]
     if copy.audit == "file":
         rel, _sep, name = copy.target.split(":", 1)[1].partition("#")
@@ -456,10 +458,12 @@ def inject_deviations(mod_root, base, window, overrides, reg=None):
     return out
 
 
-def collect(mod_root, base, commits, new_hash, new_msg, only=None):
+def collect(mod_root, base, commits, new_hash, new_msg, only=None, generated=None):
     """(copies, deviations) of the whole mod against vanilla at `new_hash`, measured
     across every tracked version up to it. The copy audits run with their output
-    discarded. `only`: a set of mod paths; the other files are not read."""
+    discarded. `only`: a set of mod paths; the other files are not read. `generated`
+    ({}): receives {mod path: tool id} for the generated files whose vanilla source
+    changed; the audits skip their copies."""
     from .files import run_file_audit
     from .gui import run_gui_audit, version_window
     from .overrides import find_overrides, run_override_audit
@@ -468,7 +472,8 @@ def collect(mod_root, base, commits, new_hash, new_msg, only=None):
     args = types.SimpleNamespace(diff=False, block=None, category=None, full=False, old=None, new=None,
                                  results_file=None)
     ctx = types.SimpleNamespace(commits=commits, new_tag=tag_of(new_msg), base=base, fixed_window=False,
-                                bases={}, scanned={}, dismissed=set(), only_files=only)
+                                bases={}, scanned={}, dismissed=set(), only_files=only,
+                                generated=generated if generated is not None else {})
     path = _cache_path(base, new_hash)
     cache = _read_cache(path)
     with changes.collect(cache) as copies, redirect_stdout(io.StringIO()):
