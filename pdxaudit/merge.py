@@ -755,16 +755,23 @@ class _Merge:
 
     def insert(self, anchor, t, o_parent, why):
         where, node = anchor
+        notes = _lead(self.t_text, t) < t.start or _trail(self.t_text, t) is not None
         if where == "after":
             if _code_after(self.o_text, node.end).strip():
-                pos, text = node.end, " " + _reindent(self.t_text, t, _indent(self.o_text, node.start))
+                # Inside a one-line block. Vanilla's comments come on lines of their own;
+                # the line break makes expand_one_line_blocks lay the block out.
+                ind = _indent(self.o_text, node.start)
+                pos, text = node.end, ("\n" + ind + _reindent(self.t_text, t, ind, comments=True) + "\n" + ind if notes
+                                       else " " + _reindent(self.t_text, t, ind))
             else:
                 pos = _line_end(self.o_text, node.end)
                 ind = _indent(self.o_text, node.start)
                 text = "\n" + ind + _reindent(self.t_text, t, ind, comments=True)
         elif where == "before":
             if self.o_text[_line_start(self.o_text, node.start):node.start].strip():
-                pos, text = node.start, _reindent(self.t_text, t, _indent(self.o_text, node.start)) + " "
+                ind = _indent(self.o_text, node.start)
+                pos, text = node.start, ("\n" + ind + _reindent(self.t_text, t, ind, comments=True) + "\n" + ind if notes
+                                         else _reindent(self.t_text, t, ind) + " ")
             else:
                 pos = _line_start(self.o_text, _lead(self.o_text, node))   # above its comments
                 ind = _indent(self.o_text, node.start)
@@ -774,7 +781,8 @@ class _Merge:
                 close = o_parent.end - 1                 # the closing brace
                 ls = _line_start(self.o_text, close)
                 if self.o_text[ls:close].strip():
-                    pos, text = close, _reindent(self.t_text, t, "") + " "
+                    pos, text = close, ("\n" + _reindent(self.t_text, t, "", comments=True) + "\n" if notes
+                                        else _reindent(self.t_text, t, "") + " ")
                 else:
                     ind = _indent(self.o_text, o_parent.start) + "\t"
                     pos, text = ls, ind + _reindent(self.t_text, t, ind, comments=True) + "\n"
@@ -864,21 +872,37 @@ def _shift(text, indent):
 def _expand(text, indent):
     """The block that `text` holds, with each child on its own line at `indent` and a
     tab, and the closing brace on its own line at `indent`. A child block that opens
-    on its first child's line and holds a line break is laid out the same way. None
-    when anything but white space lies between the children, or when the layout
-    changes more than white space."""
+    on its first child's line and holds a line break is laid out the same way. A
+    comment between the children stays: after its child on the child's line, or on
+    its own line. None when anything else lies between the children, or when the
+    layout changes more than white space."""
     top = diff3.nodes(text)
     if len(top) != 1 or top[0].kind != "block" or top[0].start != 0 or text[top[0].end:].strip():
         return None
+
+    def notes(gap):
+        """(comment after the previous child on its line, comment lines of the gap),
+        or None when the gap holds anything but white space and comments."""
+        lines = gap.split("\n")
+        if any(ln.strip() and not ln.strip().startswith("#") for ln in lines):
+            return None
+        first = lines[0].strip() if len(lines) > 1 else ""
+        rest = [ln.strip() for ln in (lines[1:] if len(lines) > 1 else lines) if ln.strip()]
+        return first, rest
 
     def lay(node, ind):
         inner = ind + "\t"
         kids = node.children
         edges = [node.open_end] + [x for c in kids for x in (c.start, c.end)] + [node.end - 1]
-        if any(text[edges[k]:edges[k + 1]].strip() for k in range(0, len(edges), 2)):
+        gaps = [notes(text[edges[k]:edges[k + 1]]) for k in range(0, len(edges), 2)]
+        if any(g is None for g in gaps):
             return None
         parts = [text[node.start:node.open_end]]
-        for c in kids:
+        for k, c in enumerate(kids):
+            after, lines = gaps[k]
+            if after:
+                parts.append(" " + after)
+            parts += ["\n" + inner + ln for ln in lines]
             body = text[c.start:c.end]
             if "\n" in body and c.kind == "block" and "\n" not in text[c.open_end:(c.children[0].start
                                                                          if c.children else c.end)]:
@@ -888,6 +912,10 @@ def _expand(text, indent):
             elif "\n" in body:
                 body = _shift(body, inner)
             parts.append("\n" + inner + body)
+        after, lines = gaps[-1]
+        if after:
+            parts.append(" " + after)
+        parts += ["\n" + inner + ln for ln in lines]
         parts.append("\n" + ind + "}")
         return "".join(parts)
 

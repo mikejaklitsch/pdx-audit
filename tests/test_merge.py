@@ -354,3 +354,15 @@ def test_a_vanilla_block_the_mod_moved_into_its_own_block_follows_vanilla():
     moved = [(d.kind, d.action) for d in r.decisions if "moved" in d.reason]
     assert sorted(moved) == [("vanilla_changed", TAKE), ("vanilla_removed", TAKE)]
     assert r.check_passed
+
+
+def test_comments_of_a_node_inserted_into_a_one_line_block_stay():
+    """1.4 bribe_vote.txt adds `monthly_income_total <= {...}` with four comment lines
+    above it to `enabled`, which the mod holds on one line. The merge lays the block
+    out on more lines and keeps the comments above the new node."""
+    base = "a = {\n\tenabled = { x = 1 }\n}\n"
+    ours = "a = {\n\tenabled = { x = 2 }\n}\n"
+    theirs = "a = {\n\tenabled = {\n\t\tx = 1\n\t\t# why y\n\t\t# more\n\t\ty = 1 # note\n\t}\n}\n"
+    r = merge_texts(base, ours, theirs, unwrap=True)
+    assert r.text == "a = {\n\tenabled = {\n\t\tx = 2\n\t\t# why y\n\t\t# more\n\t\ty = 1 # note\n\t}\n}\n"
+    assert r.check_passed
