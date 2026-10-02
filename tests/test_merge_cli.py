@@ -349,3 +349,18 @@ def test_text_the_merge_cannot_compare_node_by_node_is_listed(tmp_path, monkeypa
     _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}', csv: "a;9\nb;2\nc;3\n"})
     p = _plan(tmp_path, mod, tr)
     assert [(s["file"], "not script" in s["why"]) for s in p["skipped"]] == [(csv, True)]
+
+
+def test_a_generated_file_is_listed_to_regenerate_and_never_skipped(tmp_path, monkeypatch):
+    """A tool's manifest lists default.map. The tracker has no .map file at --old, but
+    the file goes to the regenerate list only: the tool reads vanilla again."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    dm = "in_game/map_data/default.map"
+    tr = build_tracker(tmp_path, [("1.0", {DEFS: _block("Z")}),
+                                  ("1.1", {DEFS: _block("Z"), dm: "lakes = { 1 2 }\n"})])
+    mod = tmp_path / "mod"
+    reg = '[tool.rivers]\npath = "tools/rivers/"\nstatus = "active"\noutputs = ["manifest:tools/rivers/m.json"]\n'
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}', "pdx-maint.toml": reg,
+                      "tools/rivers/m.json": json.dumps([dm]), dm: "lakes = { 1 }\n"})
+    p = _plan(tmp_path, mod, tr)
+    assert not p["skipped"] and [r["file"] for r in p["regenerate"]] == [dm]

@@ -284,12 +284,18 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
                       "removed_check": {"passed": not unexplained,
                                         "unexplained": [{"line": ln, "text": s} for ln, s in unexplained]},
                       "stale_entries": sorted(stale)})
+    # A tool's output that the merge met but cannot compare goes to the regenerate
+    # list, never to the skipped list: the tool reads vanilla again.
+    for f, _w in skipped:
+        generated, tool = reg.generated_by(f)
+        if generated:
+            regenerate.setdefault(f, tool)
     lay_out(files)
     for f in files:
         f["diff"] = merge.unified(f["file"], f.pop("ours"), f["merged"])
     return {"old": old_tag, "new": tag_of(new_msg), "files": files,
             "regenerate": [{"file": f, "tool": t, "hint": reg.regenerate_hint(t)} for f, t in sorted(regenerate.items())],
-            "skipped": _distinct_skips(skipped)}
+            "skipped": _distinct_skips([(f, w) for f, w in skipped if f not in regenerate])}
 
 
 FORMAT_EXTS = (".txt", ".gui")
