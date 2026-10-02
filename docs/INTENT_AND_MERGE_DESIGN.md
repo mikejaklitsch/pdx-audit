@@ -337,6 +337,8 @@ pdx-audit merge --old 1.3.11 --new 1.4.0-beta [--file PATH | --block NAME] (--dr
 
 An INJECT merge touches only the children that the INJECT sets. A vanilla change to another child reaches the game without a merge.
 
+A same-path script file also gets the top-level definitions that vanilla added after `--old` and that the mod lacks. Each goes after the nearest earlier vanilla definition that the mod holds, else before the nearest later one, else at the end. A definition that `--old` held and the mod lacks is a mod deletion: it stays deleted. When vanilla changed it, it is an open decision. A definition that the mod keeps in another file of its folder is not missing.
+
 Excluded: files whose first line holds `AUTO-GENERATED`, and outputs that `pdx-maint.toml` lists for an active tool. Their generators read vanilla again. The merge lists them as "regenerate", with the tool name.
 
 ### 7.3 Algorithm

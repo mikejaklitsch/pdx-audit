@@ -145,8 +145,10 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
             continue
         by_file[c.file].append((c, base_i, base_text, theirs))
     _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, by_file, regenerate)
+    added = _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, reg, regenerate)
     files = []
-    for rel, items in sorted(by_file.items()):
+    for rel in sorted(set(by_file) | set(added)):
+        items = by_file.get(rel, [])
         path = Path(mod_root) / rel
         text, bom, crlf = read_mod_file(path)
         edits, decisions, unexplained, stale = [], [], [], set()
@@ -176,6 +178,13 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
             # The merge splices each op, not the whole copy. A copy of a repeated key
             # spans the definitions between its blocks, and they must stay.
             edits += [(start + op.start, start + op.end, op.text) for op in res.ops]
+        inserts, new_decisions = added.get(rel, ([], []))
+        for pos, ins, label in inserts:
+            if any(s < pos < e for s, e, _t in edits):
+                skipped.append((rel, f"the new definition {label} falls inside a merged node"))
+                continue
+            edits.append((pos, pos, ins))
+        decisions += [(d, d.path[0]["key"], old_tag) for d in new_decisions]
         wanted = {d.line for d, _n, _b in decisions if d.action == merge.OPEN and d.line}
         blamed = proposer.blame(mod_root, rel, wanted) if wanted else {}
         decisions = [dict(d.to_json(), copy=name, base=btag,
@@ -228,6 +237,104 @@ def _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, b
                  [old_text, new_text], [tags[old_i], tags[-1]], ov["file"], ov["line"], True,
                  diff3.SCRIPT, None, None, {})
         by_file[ov["file"]].append((c, 0, old_text, new_text))
+
+
+def _comment_start(text, start):
+    """`start`, moved up over the comment lines directly above it."""
+    while start > 0:
+        prev = text.rfind("\n", 0, start - 1) + 1
+        if not text[prev:start - 1].strip().startswith("#"):
+            break
+        start = prev
+    return start
+
+
+def _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, reg, regenerate):
+    """{mod path: (inserts, decisions)} for the mod's script files at a vanilla file's
+    path. An insert is (offset, text, label): a top-level definition that vanilla
+    added to the file after --old and that the mod lacks. It goes after the nearest
+    earlier definition of vanilla that the mod holds, else before the nearest later
+    one, else at the end. A definition that --old held and the mod lacks is the
+    mod's deletion. It stays deleted. It is an open decision when vanilla changed it.
+    A definition the mod keeps in another file of its folder is not missing. A
+    generated file goes to `regenerate`."""
+    from pathlib import PurePosixPath
+    from .files import SCRIPT_EXTS, TOP_LEVEL, _names, _split, decode, definitions, mod_files, scope_of
+    from .gui import version_window
+    from .tracker import tag_of
+    window = version_window(commits, new_hash)
+    old = next((h for h, m in window if tag_of(m) == old_tag), None)
+    if old is None:
+        return {}
+    old_files, new_files = base.files(old), base.files(window[-1][0])
+    scripts = [r for r in mod_files(mod_root) if PurePosixPath(r).suffix.lower() in SCRIPT_EXTS]
+    pairs = [(r, old_files[r], new_files[r]) for r in scripts if (not file or r == file)
+             and old_files.get(r) and new_files.get(r) and old_files[r] != new_files[r]]
+    blobs = base.blobs({i for _r, a, b in pairs for i in (a, b)})
+    out = {}
+    for rel, a, b in pairs:
+        if a not in blobs or b not in blobs:
+            continue
+        old_text = decode(blobs[a]).replace("\r\n", "\n")
+        new_text = decode(blobs[b]).replace("\r\n", "\n")
+        was, now = definitions(old_text), definitions(new_text)
+        wanted = (lambda label: label == block or label.split(" ", 1)[0] == block) if block else (lambda label: True)
+        fresh = {lb for lb in now if lb not in was and lb != TOP_LEVEL and wanted(lb)}
+        changed = {lb for lb in was if lb in now and lb != TOP_LEVEL and was[lb].sig != now[lb].sig
+                   and wanted(lb)}
+        if not fresh and not changed:
+            continue
+        text = read_mod_file(Path(mod_root) / rel)[0]
+        mine = definitions(text)
+        fresh -= set(mine)
+        gone = {lb for lb in changed if lb not in mine}
+        if not fresh and not gone:
+            continue
+        generated, tool = reg.generated_by(rel)
+        if generated:
+            if fresh:
+                regenerate[rel] = tool
+            continue
+        elsewhere = set()
+        for other in scripts:
+            if other != rel and scope_of(other) == scope_of(rel):
+                elsewhere |= _names(Path(mod_root) / other)
+        held = lambda lb: lb in elsewhere or lb.split(" ", 1)[0] in elsewhere   # noqa: E731
+        fresh = {lb for lb in fresh if not held(lb)}
+        decisions = [merge.Decision([{"key": lb}], "removed_changed", merge.OPEN,
+                                    reason="the mod deleted this definition and vanilla changed it",
+                                    base=" ".join(was[lb].sig.split()), theirs=" ".join(now[lb].sig.split()))
+                     for lb in sorted(gone) if not held(lb)]
+        mine_items = {}
+        for it in _split(text):
+            mine_items.setdefault(it[0], []).append(it)
+        inserts, pending, anchor, count = [], [], None, defaultdict(int)
+        for label, start, end, *_rest in _split(new_text):
+            k, count[label] = count[label], count[label] + 1
+            if label in fresh:
+                body = new_text[_comment_start(new_text, start):end].rstrip("\n") + "\n"
+                if anchor is None:
+                    pending.append((label, body))
+                else:
+                    sep = "\n" if text[:anchor].endswith("\n") else "\n\n"
+                    inserts.append((anchor, sep + body, label))
+                decisions.append(merge.Decision([{"key": label}], "vanilla_added", merge.TAKE,
+                                                reason="vanilla added this definition after --old",
+                                                theirs=body.split("\n", 1)[0].strip()))
+            elif label != TOP_LEVEL and label in mine_items:
+                members = mine_items[label]
+                m = members[min(k, len(members) - 1)]
+                if pending:
+                    at = _comment_start(text, m[1])
+                    inserts += [(at, body + "\n", lb) for lb, body in pending]
+                    pending = []
+                anchor = m[2]
+        if pending:
+            sep = "" if not text else "\n" if text.endswith("\n") else "\n\n"
+            inserts += [(len(text), sep + body, lb) for lb, body in pending]
+        if inserts or decisions:
+            out[rel] = (inserts, decisions)
+    return out
 
 
 def _reads_as(text, at, mod_text):

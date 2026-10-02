@@ -147,7 +147,16 @@ def _delete_span(text, node):
     s, e = _line_start(text, node.start), _line_end(text, node.end)
     before = text[s:node.start]
     if not before.strip() and not _code_after(text, node.end).strip():
-        return _line_start(text, _lead(text, node)), min(e + 1, len(text))
+        start, end = _line_start(text, _lead(text, node)), min(e + 1, len(text))
+        # An empty line above and an empty line or the end of the text below: delete
+        # one more empty line, so that no two empty lines stay. A blanked line of
+        # another definition holds spaces, so it never counts as empty.
+        if start > 0 and text[_line_start(text, start - 1):start - 1] == "":
+            if end < len(text) and text[end] == "\n":
+                end += 1
+            elif end == len(text):
+                start = _line_start(text, start - 1)
+        return start, end
     start = node.start
     while start > s and text[start - 1] in " \t":
         start -= 1
