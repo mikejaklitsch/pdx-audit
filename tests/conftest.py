@@ -138,6 +138,13 @@ def audit_args(**kw):
     return types.SimpleNamespace(**base)
 
 
+@pytest.fixture(autouse=True)
+def _no_engine_data(monkeypatch):
+    """Tests never read the engine data that the user's config names."""
+    import pdxaudit.gui_names
+    monkeypatch.setattr(pdxaudit.gui_names, "setting", lambda key, flag=None: (None, "a test"))
+
+
 @pytest.fixture
 def world(tmp_path):
     repo = tmp_path / "vanilla-tracker" / "repo.git"

@@ -74,6 +74,8 @@ def _mod(tmp_path, gui=MOD_GUI):
 
 
 def _run(tr, mod, fn=run_gui_names_audit, **kw):
+    if fn is run_gui_names_audit:
+        kw.setdefault("engine", False)
     buf = io.StringIO()
     with redirect_stdout(buf):
         findings = fn(mod, tr.repo, tr.hashes["1.0"], "1.0 Test", tr.hashes["1.1"], "1.1 Test",
@@ -100,7 +102,8 @@ def test_removed_template_in_another_module_is_found(tmp_path):
 def test_removed_data_type_is_a_binding_finding(tmp_path):
     findings, out = _run(_tracker(tmp_path), _mod(tmp_path))
     f = [f for f in findings if f.kind == "deps_binding_dropped"]
-    assert [(x.name, x.detail, x.since) for x in f] == [("ImportExportMarker", "unused since 1.1", "1.1")]
+    assert [(x.name, x.since) for x in f] == [("ImportExportMarker", "1.1")]
+    assert f[0].detail.startswith("unused since 1.1")
     assert f[0].key == {"target": "deps:binding/ImportExportMarker", "use": "binding"}
     assert "used nowhere since 1.1" in out
 
@@ -124,8 +127,7 @@ def test_mod_definition_of_a_removed_type_hides_the_finding(tmp_path):
 
 
 def test_whole_audit_reports_a_template_once(tmp_path):
-    """run_deps_audit reports a `using` template in the mod's modules. The GUI name
-    check does not report it again."""
+    """run_deps reports a `using` template one time."""
     gui = 'window = {\n\twidget = { using = plot_gone }\n}\n'
     lib_old = "template plot_gone {\n\tx = 1\n}\n"
     tr = build_tracker(tmp_path / "t2", [
@@ -155,5 +157,57 @@ def test_file_names_reads_definitions_and_uses_by_structure():
     found = file_names(text)
     assert found["defs"] == {("type", "a"), ("template", "lt")}
     assert set(found["uses"]) == {("type", "b", 2), ("template", "lt", 8), ("type", "w", 7),
-                                  ("type", "c", 10)}
+                                  ("type", "c", 10), ("block", "x", 9)}
     assert sorted(found["bindings"]) == [("X", 13), ("Y", 13)]
+
+
+def test_rename_candidate_is_measured_from_vanilla_sites(tmp_path):
+    """Vanilla 1.1 writes PortMarker on the line where 1.0 had ImportExportMarker.
+    The finding names the candidate and keeps it out of the id."""
+    findings, out = _run(_tracker(tmp_path), _mod(tmp_path))
+    f = next(f for f in findings if f.name == "ImportExportMarker")
+    assert "vanilla uses PortMarker in its place at 1 of 1 sites" in f.detail
+    assert f.data == {"rename_candidate": "PortMarker"}
+    assert f.key == {"target": "deps:binding/ImportExportMarker", "use": "binding"}
+    assert "Rename candidate" in out
+    # header_action_button_left had no line that vanilla replaced with another type
+    h = next(f for f in findings if f.name == "header_action_button_left")
+    assert "in its place" not in h.detail
+
+
+def test_engine_data_drops_known_names_and_confirms_the_rest(tmp_path):
+    tr = _tracker(tmp_path)
+    findings, out = _run(tr, _mod(tmp_path), engine={"ImportExportMarker", "GetLocation"})
+    assert not [f for f in findings if f.kind.startswith("deps_binding")]
+    assert "1 more that the engine still knows" in out
+    findings, _out = _run(tr, _mod(tmp_path), engine={"GetLocation"})
+    f = [f for f in findings if f.kind.startswith("deps_binding")]
+    assert [(x.kind, x.name) for x in f] == [("deps_binding_removed", "ImportExportMarker")]
+
+
+def test_engine_data_is_read_from_the_pdx_syntax_table(tmp_path):
+    import sqlite3
+    from pdxaudit.gui_names import engine_names
+    db = tmp_path / "eu5_syntax.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE data_types (name TEXT)")
+    con.executemany("INSERT INTO data_types VALUES (?)", [("EconomyView.GetEstimatedBalance",),
+                                                         ("GetGlobalVariable",)])
+    con.commit()
+    con.close()
+    assert engine_names(str(db)) == {"EconomyView", "GetEstimatedBalance", "GetGlobalVariable"}
+    assert engine_names(str(tmp_path / "missing.db")) is None
+
+
+def test_removed_block_is_found_and_mod_blocks_are_own(tmp_path):
+    lib_old = 'types L {\n\ttype panel = widget {\n\t\tblock "caption" {}\n\t\tblock "kept" {}\n\t}\n}\n'
+    lib_new = 'types L {\n\ttype panel = widget {\n\t\tblock "kept" {}\n\t}\n}\n'
+    tr = build_tracker(tmp_path / "t3", [
+        ("1.0", {**SCRIPT, "in_game/gui/lib.gui": lib_old}),
+        ("1.1", {**SCRIPT, "in_game/gui/lib.gui": lib_new}),
+    ])
+    gui = ('window = {\n\tpanel = {\n\t\tblockoverride "caption" {}\n\t\tblockoverride "kept" {}\n'
+           '\t\tblockoverride "mine" {}\n\t}\n\twidget = { block "mine" {} }\n}\n')
+    findings, _out = _run(tr, _mod(tmp_path, gui))
+    assert [(f.name, f.detail, f.location) for f in findings] == [
+        ("caption", "block dropped in 1.1", "in_game/gui/mine.gui:3")]

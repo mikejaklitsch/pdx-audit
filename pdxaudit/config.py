@@ -15,6 +15,8 @@ Recognized keys:
     skip_files     filename globs excluded from every scan
     merge_types    common/ folders the engine merges across files, beyond the
                    ones worked out from vanilla
+    engine_data    the pdx-syntax database; the dependency audit reads its
+                   data_types table to confirm or drop data-binding findings
 
 Unknown keys are ignored. See config.sample.json for an example.
 """
@@ -47,6 +49,9 @@ SETTINGS = {
     "skip_files": {"kind": "list", "help": "filename globs excluded from every scan"},
     "merge_types": {"kind": "list",
                     "help": "common/ folders the engine merges across files, beyond vanilla's"},
+    "engine_data": {"kind": "path", "env": "PDX_ENGINE_DATA",
+                    "help": "the pdx-syntax database (eu5_syntax.db) whose data_types table lists "
+                            "the data-binding names the engine knows"},
 }
 
 #: The keys --set writes and the app's Settings page edits, in the order shown.

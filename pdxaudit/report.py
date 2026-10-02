@@ -227,6 +227,10 @@ KIND.update({
         SEV_REVIEW, "deps", "GUI types, templates and blocks the mod uses that vanilla no longer defines",
         "find what vanilla uses now and update the widget, `type` parent, `using` or `blockoverride`, "
         "or confirm another mod defines it"),
+    "deps_binding_removed": (
+        SEV_BROKEN, "deps", "data-binding names the mod's GUI uses that vanilla dropped and the engine data "
+        "does not list",
+        "find what vanilla uses now and update the expression"),
     "deps_binding_dropped": (
         SEV_REVIEW, "deps", "data-binding names the mod's GUI uses that vanilla no longer uses",
         "find what vanilla uses now and update the expression, or confirm the engine still knows the name"),

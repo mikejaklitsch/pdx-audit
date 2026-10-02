@@ -82,7 +82,7 @@ pdx-audit --show-dismissed
 pdx-audit --undismiss cc01a5e3
 ```
 
-`pdx-audit --set` writes the settings that the Settings page writes: `vanilla_repo`, `game_root` and `patch_name`. Edit `skip_dirs`, `skip_files` and `merge_types` in the config file. `pdx-audit --config` shows each setting, where it comes from, and where the file is.
+`pdx-audit --set` writes the settings that the Settings page writes: `vanilla_repo`, `game_root` and `patch_name`. Edit `skip_dirs`, `skip_files`, `merge_types` and `engine_data` in the config file. `engine_data` is the path of the pdx-syntax database (`eu5_syntax.db`); the dependency audit reads it to confirm or drop its data-binding findings. `pdx-audit --config` shows each setting, where it comes from, and where the file is.
 
 ## From a clone
 

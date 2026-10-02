@@ -9,7 +9,7 @@ import hashlib
 from pathlib import Path
 from collections import defaultdict
 
-from . import changes, diff3, ledger, session
+from . import changes, diff3, ledger, renames, session
 from .gui import audit_window, commits_up_to
 from .report import diff_lines, diff_summary, Finding
 from .tracker import MODULE_ROOTS, _git_archive, cache_path, full_hash, tag_of
@@ -399,56 +399,6 @@ def mod_top_level_names(mod_root):
             depth = max(0, depth + code.count("{") - code.count("}"))
     return names
 
-GUI_USING = re.compile(r'(?<![\w.])using\s*=\s*"?([A-Za-z_][\w.]*)"?')
-GUI_BLOCKOVERRIDE = re.compile(r'(?<![\w.])blockoverride\s+"([^"]+)"')
-GUI_BLOCK = re.compile(r'(?<![\w.])block\s+"([^"]+)"')
-
-
-def _gui_code_keeping_strings(line):
-    """A .gui line without its comment; a # inside a string is not a comment."""
-    in_str = False
-    for i, c in enumerate(line):
-        if c == '"':
-            in_str = not in_str
-        elif c == "#" and not in_str:
-            return line[:i]
-    return line
-
-
-def mod_gui_references(mod_root):
-    """({('template' | 'block', name): ['file:line', ...]}, modules) for the GUI
-    templates the mod's .gui files use (`using = name`) and the blocks they override
-    (`blockoverride "name"`), leaving out the templates and blocks the mod defines
-    itself. modules: the module roots holding the mod's .gui files."""
-    from .gui import mod_gui_files, parse_gui_defs
-    uses, own, modules = defaultdict(list), set(), set()
-    for rel, text in mod_gui_files(mod_root):
-        modules.add(rel.split("/", 1)[0])
-        own |= {("template", d["name"]) for d in parse_gui_defs(text)[0]
-                if d["kind"] in ("template", "local_template")}
-        for ln, raw in enumerate(text.split("\n"), 1):
-            code = _gui_code_keeping_strings(raw)
-            own |= {("block", n) for n in GUI_BLOCK.findall(code)}
-            for n in GUI_USING.findall(code):
-                uses[("template", n)].append(f"{rel}:{ln}")
-            for n in GUI_BLOCKOVERRIDE.findall(code):
-                uses[("block", n)].append(f"{rel}:{ln}")
-    return {k: v for k, v in uses.items() if k not in own}, sorted(modules)
-
-
-def gui_vocab(base, point, modules, label=""):
-    """{('template' | 'block', name)} that vanilla's .gui files define at `point`."""
-    def build():
-        defs, files, _bad = base.gui_index(point, modules, label)
-        out = {("template", name) for (_m, kind, name) in defs if kind == "template"}
-        for text in files.values():
-            for raw in text.split("\n"):
-                if "block" in raw:
-                    out |= {("block", n) for n in GUI_BLOCK.findall(_gui_code_keeping_strings(raw))}
-        return out
-    return session.memo(("gui_vocab", id(base), point, tuple(modules)), build)
-
-
 def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=None):
     """Names the mod uses that the base used at some tracked version up to the new
     version but no longer uses at it, each with the patch that dropped it. The
@@ -461,9 +411,8 @@ def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=Non
     keys = mod_referenced_tokens(mod_root)
     refs = mod_referenced_values(mod_root)
     own = mod_top_level_names(mod_root)
-    gui_uses, gui_modules = mod_gui_references(mod_root)
     if ctx is not None:
-        ctx.scanned["deps"] = len(keys) + len(refs) + len(gui_uses)
+        ctx.scanned["deps"] = ctx.scanned.get("deps", 0) + len(keys) + len(refs)
     print(f"Scanning {len(keys)} keys and {len(refs)} references in {mod_root.name}...",
           file=sys.stderr)
 
@@ -479,7 +428,7 @@ def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=Non
     for i, (h, msg) in enumerate(old_first):
         v = base.vocab(h, f"vocabulary {i + 1}/{len(old_first)} ({h[:7]})")
         if v:
-            vocabs.append((_tag(msg), v))
+            vocabs.append((_tag(msg), v, h))
     if not vocabs or not old_first or vocabs[-1][0] != _tag(old_first[-1][1]):
         print("Could not read vanilla vocabulary (archive failed).", file=sys.stderr)
         sys.exit(1)
@@ -494,7 +443,7 @@ def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=Non
             for i in range(len(earlier) - 1, -1, -1):
                 count = earlier[i][1].get(name, 0)
                 if count > 0:
-                    out.append((name, earlier[i][0], vocabs[i + 1][0], count, sites))
+                    out.append((name, earlier[i][0], vocabs[i + 1][0], count, sites, i))
                     break
         out.sort(key=lambda x: (x[2], x[0]))
         return out
@@ -502,20 +451,14 @@ def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=Non
     dropped_keys = dropped(keys)
     dropped_refs = dropped(refs, skip=set(keys))   # a name the mod also writes is a key
 
-    # GUI templates and blocks, measured against vanilla's .gui files at each version.
-    dropped_gui = []
-    if gui_uses:
-        gui_vocabs = [(_tag(msg), gui_vocab(base, h, gui_modules, f"gui names {i + 1}/{len(old_first)} ({h[:7]})"))
-                      for i, (h, msg) in enumerate(old_first)]
-        if gui_vocabs[-1][1]:
-            for (kind, name), sites in gui_uses.items():
-                if (kind, name) in gui_vocabs[-1][1]:
-                    continue
-                for i in range(len(gui_vocabs) - 2, -1, -1):
-                    if (kind, name) in gui_vocabs[i][1]:
-                        dropped_gui.append((kind, name, gui_vocabs[i][0], gui_vocabs[i + 1][0], sites))
-                        break
-        dropped_gui.sort(key=lambda x: (x[3], x[0], x[1]))
+    # Measured rename candidates, one comparison for each patch that dropped names.
+    found = {}
+    by_patch = defaultdict(set)
+    for kind, items in (("key", dropped_keys), ("ref", dropped_refs)):
+        for item in items:
+            by_patch[item[5]].add((kind, item[0]))
+    for i, targets in by_patch.items():
+        found.update(script_rename_candidates(base, vocabs[i][2], vocabs[i + 1][2], targets))
 
     summary = [f"# Dependency Audit: {vocabs[0][0]} → {vocabs[-1][0]}"]
     if old_msg or new_msg:
@@ -527,51 +470,73 @@ def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=Non
         f"against vanilla's vocabulary at {len(vocabs)} tracked versions.",
         f"- **{len(dropped_keys)}** keys the mod writes that vanilla no longer uses",
         f"- **{len(dropped_refs)}** names the mod references that vanilla no longer uses",
-        f"- **{len(dropped_gui)}** GUI templates and blocks the mod uses that vanilla no longer defines "
-        f"(of {len(gui_uses)} it uses)",
         "",
     ]
     print("\n".join(summary))
 
-    if not dropped_keys and not dropped_refs and not dropped_gui:
+    if not dropped_keys and not dropped_refs:
         print("**No keys or references the mod uses were dropped by vanilla.**")
         return []
 
-    def section(title, items, verb):
+    def section(title, items, verb, kind):
         if not items:
             return
         print(f"## {title}")
         print()
-        for name, last, gone, count, sites in items:
+        for name, last, gone, count, sites, _i in items:
             more = f" (+{len(sites) - 1} more)" if len(sites) > 1 else ""
             print(f"### {name}")
             print(f"- **Vanilla:** used {count} times at {last}, gone since {gone}")
+            if (kind, name) in found:
+                print(f"- **Rename candidate:** {renames.describe(found[(kind, name)])}")
             print(f"- **Mod {verb} it at:** `{sites[0]}`{more}")
             print()
 
-    section("Keys the mod writes that vanilla no longer uses", dropped_keys, "writes")
-    section("Names the mod references that vanilla no longer uses", dropped_refs, "references")
-    if dropped_gui:
-        print("## GUI templates and blocks the mod uses that vanilla no longer defines")
-        print()
-        for kind, name, last, gone, sites in dropped_gui:
-            more = f" (+{len(sites) - 1} more)" if len(sites) > 1 else ""
-            how = "`using`" if kind == "template" else "`blockoverride`"
-            print(f"### {name}")
-            print(f"- **Vanilla:** {kind} defined at {last}, gone since {gone}")
-            print(f"- **Mod uses it with {how} at:** `{sites[0]}`{more}")
-            print()
-
+    section("Keys the mod writes that vanilla no longer uses", dropped_keys, "writes", "key")
+    section("Names the mod references that vanilla no longer uses", dropped_refs, "references", "ref")
     findings = []
-    for kind, use, items in (("deps_key_dropped", "key", dropped_keys),
-                             ("deps_ref_dropped", "reference", dropped_refs)):
-        for name, _last, gone, _count, sites in items:
-            findings.append(Finding(kind, name, sites[0], f"dropped in {gone}", None,
+    for kind, use, short, items in (("deps_key_dropped", "key", "key", dropped_keys),
+                                    ("deps_ref_dropped", "reference", "ref", dropped_refs)):
+        for name, _last, gone, _count, sites, _i in items:
+            cand = found.get((short, name))
+            tail = f"; {renames.describe(cand)}" if cand else ""
+            findings.append(Finding(kind, name, sites[0], f"dropped in {gone}{tail}",
+                                    {"rename_candidate": cand[0]} if cand else None,
                                     {"target": f"deps:{name}", "use": use}, gone))
-    for kind, name, _last, gone, sites in dropped_gui:
-        findings.append(Finding("deps_gui_dropped", name, sites[0], f"{kind} dropped in {gone}", None,
-                                {"target": f"deps:gui/{kind}/{name}", "use": kind}, gone))
     return findings
+
+
+def _script_sites(text):
+    """{line: {('key' | 'ref', name)}} for the assignments and the single-name values
+    of a script text, read as the dependency audit reads the mod."""
+    out = {}
+    for ln, raw in enumerate(text.split("\n"), 1):
+        code = raw.split("#")[0]
+        found = set()
+        m = IDENT_ASSIGN.match(code)
+        if m:
+            found.add(("key", m.group(1)))
+        m = RHS_IDENT.match(code)
+        if m and m.group(1) not in RHS_SKIP:
+            found.add(("ref", m.group(1)))
+        if found:
+            out[ln] = found
+    return out
+
+
+def script_rename_candidates(base, old_point, new_point, targets):
+    """renames.candidates for script names, over vanilla's .txt files that hold a
+    target at `old_point`."""
+    needles = [name.encode() for _kind, name in targets]
+    old_ids = {p: b for p, b in base.files(old_point).items() if p.endswith(".txt")}
+    old_blobs = base.blobs(list(old_ids.values()))
+    paths = [p for p, b in old_ids.items() if any(n in old_blobs.get(b, b"") for n in needles)]
+    new_ids = base.files(new_point)
+    new_blobs = base.blobs([new_ids[p] for p in paths if p in new_ids])
+    dec = lambda raw: raw.decode("utf-8-sig", errors="replace")   # noqa: E731
+    old_files = {p: dec(old_blobs[old_ids[p]]) for p in paths}
+    new_files = {p: dec(new_blobs[new_ids[p]]) for p in paths if p in new_ids and new_ids[p] in new_blobs}
+    return renames.candidates(old_files, new_files, targets, _script_sites)
 
 def names_defined_in_vanilla(vanilla_repo, commit, categories, names):
     """Subset of `names` that appear as an assignment target ('name =') anywhere

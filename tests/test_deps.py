@@ -5,6 +5,7 @@ import io
 from contextlib import redirect_stdout
 
 from conftest import build_tracker, make_ctx, _write_tree
+from pdxaudit.gui_names import run_deps
 from pdxaudit.overrides import run_deps_audit
 
 F = "in_game/common/buildings/b.txt"
@@ -104,9 +105,28 @@ def test_gui_templates_and_blocks_vanilla_dropped_are_found(tmp_path):
                                  '\twidget = { block "mine" {} }  # using = commented_out\n}\n'),
     })
     with redirect_stdout(io.StringIO()) as buf:
-        found = run_deps_audit(mod, tr.repo, tr.hashes["1.0"], "1.0 Test", tr.hashes["1.1"], "1.1 Test",
-                               make_ctx(tr.repo, "1.1"))
+        found = run_deps(mod, tr.repo, tr.hashes["1.0"], "1.0 Test", tr.hashes["1.1"], "1.1 Test",
+                         make_ctx(tr.repo, "1.1"))
     gui = sorted((f.name, f.detail, f.location) for f in found if f.kind == "deps_gui_dropped")
     assert gui == [("caption", "block dropped in 1.1", "in_game/gui/mine.gui:7"),
                    ("vanilla_button", "template dropped in 1.1", "in_game/gui/mine.gui:5")]
-    assert "GUI templates and blocks the mod uses that vanilla no longer defines" in buf.getvalue()
+    assert "GUI types, templates and blocks the mod uses that vanilla no longer defines" in buf.getvalue()
+
+
+def test_measured_rename_candidate_for_a_script_key(tmp_path):
+    """Vanilla wrote a new key on the line of the old one. The finding names it as
+    review evidence, and the id does not change."""
+    law = "in_game/common/laws/l.txt"
+    tr = build_tracker(tmp_path, [
+        ("1.0", {law: "law_a = {\n\tlocal_food_decay_modifier = 0.1\n\tcost = 1\n}\n"}),
+        ("1.1", {law: "law_a = {\n\tlocal_food_preservation_efficiency_modifier = 0.1\n\tcost = 1\n}\n"}),
+    ])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}',
+                      "in_game/common/laws/m.txt": "INJECT:law_a = {\n\tlocal_food_decay_modifier = 0.2\n}\n"})
+    findings, out, _ = _run(tr, mod, "1.0", "1.1")
+    f = next(f for f in findings if f.name == "local_food_decay_modifier")
+    assert f.detail == ("dropped in 1.1; vanilla uses local_food_preservation_efficiency_modifier "
+                        "in its place at 1 of 1 sites")
+    assert f.key == {"target": "deps:local_food_decay_modifier", "use": "key"}
+    assert "Rename candidate" in out
