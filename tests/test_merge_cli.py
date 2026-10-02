@@ -54,6 +54,9 @@ def test_apply_refuses_open_decisions_and_failed_checks(tmp_path, monkeypatch, c
     main(common + ["--dry-run", "--plan-out", str(plan)])
     p = json.loads(plan.read_text())
     assert p["files"][0]["open"] == 1
+    [d] = [d for d in p["files"][0]["decisions"] if d["action"] == "open"]
+    # The plan holds the three texts of the decision, and the base version apart.
+    assert (d["base"], d["ours"], d["theirs"], d["base_version"]) == ("cost = 1", "cost = 3", "cost = 2", "1.0")
     assert main(common + ["--apply", str(plan)]) == 1
     assert "open decisions" in capsys.readouterr().err
     p["files"][0]["open"] = 0

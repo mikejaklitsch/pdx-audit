@@ -187,7 +187,7 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
         decisions += [(d, d.path[0]["key"], old_tag) for d in new_decisions]
         wanted = {d.line for d, _n, _b in decisions if d.action == merge.OPEN and d.line}
         blamed = proposer.blame(mod_root, rel, wanted) if wanted else {}
-        decisions = [dict(d.to_json(), copy=name, base=btag,
+        decisions = [dict(d.to_json(), copy=name, base_version=btag,
                           **({"commit": (blamed.get(d.line) or (None,))[0]} if d.line in blamed else {}))
                      for d, name, btag in decisions]
         merged = text
