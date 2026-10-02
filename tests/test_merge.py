@@ -251,3 +251,26 @@ def test_a_key_both_sides_added_is_written_once():
     r = merge_texts(base, ours, theirs, unwrap=True)
     assert r.text.count("rate =") == 1 and "if = { limit = { b = 1 } }" in r.text
     assert [(d.kind, d.action) for d in r.decisions if d.path[-1]["key"] == "rate"] == [("both_added", OPEN)]
+
+
+def test_a_comment_that_replaces_a_removed_statement_takes_its_place():
+    """Vanilla 1.4 messagetypes.txt turns `sound=yes` into `#sound=yes - TODO in
+    ud010`. The merge removes the statement and writes vanilla's comment there."""
+    base = "X={\nlog=no\npausepopup=no\nsound=yes\nmessage_category = government\n}\n"
+    theirs = "X={\nlog=no\npausepopup=no\n#sound=yes - TODO in ud010\nmessage_category = government\n}\n"
+    ours = "X = {\n\tlog = yes\n\tpausepopup = no\n\tsound = yes\n\tmessage_category = government\n}\n"
+    r = merge_texts(base, ours, theirs)
+    assert r.text == ("X = {\n\tlog = yes\n\tpausepopup = no\n\t#sound=yes - TODO in ud010\n"
+                      "\tmessage_category = government\n}\n")
+    assert r.check_passed
+
+
+def test_comments_go_with_a_changed_or_inserted_vanilla_node():
+    base = "a = {\n\t# about x\n\tx = 1 # old\n\ty = 1 # mine stays\n\t# keep me\n\tz = 1\n}\n"
+    ours = "a = {\n\t# about x\n\tx = 1 # old\n\ty = 1 # my note\n\t# keep me\n\tz = 1\n\tm = 1\n}\n"
+    theirs = ("a = {\n\t# about x, changed\n\tx = 2 # new\n\ty = 2 # vanilla note\n\t# keep me\n"
+              "\t# why w\n\tw = 1 # w note\n}\n")
+    r = merge_texts(base, ours, theirs, unwrap=True)
+    assert r.text == ("a = {\n\t# about x, changed\n\tx = 2 # new\n\ty = 2 # my note\n\t# keep me\n"
+                      "\t# why w\n\tw = 1 # w note\n\tm = 1\n}\n")
+    assert r.check_passed

@@ -123,22 +123,56 @@ def _lead(text, node):
     return start if start < s else node.start
 
 
+def _trail(text, node):
+    """(offset, comment) for the comment after `node` on its last line, when nothing
+    else of code follows it there; else None."""
+    rest = text[node.end:_line_end(text, node.end)]
+    if _code_after(text, node.end).strip():
+        return None
+    cut = rest.find("#")
+    return None if cut < 0 else (node.end + cut, rest[cut:].rstrip())
+
+
+def _lead_lines(text, node):
+    """The comment lines directly above `node` (see _lead), stripped."""
+    first = _lead(text, node)
+    if first >= node.start:
+        return []
+    return [ln.strip() for ln in text[first:_line_start(text, node.start)].rstrip("\n").split("\n")]
+
+
+def _own_line(text, node):
+    """True when no other code shares the node's first line before it."""
+    return not text[_line_start(text, node.start):node.start].strip()
+
+
 def _reindent(src, node, indent, comments=False):
     """The text of `node` in `src`, its later lines moved from the node's own indent
-    to `indent`. With `comments`, the comment lines above the node come with it."""
-    first = _lead(src, node) if comments else node.start
-    if first < node.start:
-        head = src[first:_line_start(src, node.start)]
-        lines = [ln.strip() for ln in head.rstrip("\n").split("\n")]
-        return "\n".join(lines[:1] + [indent + ln for ln in lines[1:]]) + "\n" + indent \
-            + _reindent(src, node, indent)
+    to `indent`, with no space at the end of a line. With `comments`, the comment
+    lines above the node and the comment after it on its last line come with it."""
+    head = ""
+    if comments and _lead(src, node) < node.start:
+        lines = _lead_lines(src, node)
+        head = "\n".join(lines[:1] + [indent + ln for ln in lines[1:]]) + "\n" + indent
     body = src[node.start:node.end]
     old = _indent(src, node.start)
     lines = body.split("\n")
-    out = [lines[0]]
+    out = [lines[0].rstrip()]
     for line in lines[1:]:
-        out.append(indent + line[len(old):] if line.startswith(old) else line)
-    return "\n".join(out)
+        out.append((indent + line[len(old):] if line.startswith(old) else line).rstrip())
+    tail = _trail(src, node) if comments else None
+    return head + "\n".join(out) + (" " + tail[1] if tail else "")
+
+
+def _comment_lines(text, a, z, skip=()):
+    """The comment lines of text[a:z], stripped, outside the (start, end) spans in
+    `skip`."""
+    out, pos = [], a
+    for line in text[a:z].split("\n"):
+        if line.strip().startswith("#") and not any(s <= pos < e for s, e in skip):
+            out.append(line.strip())
+        pos += len(line) + 1
+    return out
 
 
 def _delete_span(text, node):
@@ -280,12 +314,14 @@ class _Merge:
 
     def run(self):
         b, o, t = self.view(self.b_text), self.view(self.o_text), self.view(self.t_text)
-        outer = next((n for n in diff3.nodes(self.o_text) if n.kind == "block"), None) if self.unwrap else None
-        self.level(b, o, t, [], outer)
+        first = lambda text: next((n for n in diff3.nodes(text) if n.kind == "block"), None)   # noqa: E731
+        outer = first(self.o_text) if self.unwrap else None
+        parents = (first(self.b_text), first(self.t_text)) if self.unwrap else (None, None)
+        self.level(b, o, t, [], outer, parents)
         return self.apply()
 
     # --- one level --------------------------------------------------------------
-    def level(self, B, O, T, path, o_parent):
+    def level(self, B, O, T, path, o_parent, parents=(None, None)):
         bt = dict(merge_align(B, T, self.dialect))
         bo = dict(merge_align(B, O, self.dialect, {i: T[j] for i, j in bt.items()}))
         tb = {j: i for i, j in bt.items()}
@@ -306,7 +342,8 @@ class _Merge:
                 self.recurse(here, b, o, t)          # take vanilla's change inside, keep ours' layout
             elif o_same:
                 kind = "vanilla_changed" if t is not None else "vanilla_removed"
-                self.vanilla_change(kind, here, b, o, t)
+                gap = self.gap_comments(i, B, T, bt, parents) if t is None else None
+                self.vanilla_change(kind, here, b, o, t, gap)
             elif o is None:
                 self.decide_conflict("removed_changed", here, b, None, t,
                                      (self.anchor(T, bt[i], tb, bo, O), o_parent))
@@ -375,7 +412,7 @@ class _Merge:
                 self.decisions.append(Decision(here, "both_changed", OPEN, None,
                                                ours=self.o_text[o.start:o.open_end],
                                                theirs=self.t_text[t.start:t.open_end]))
-        self.level(b.children, o.children, t.children, here, o)
+        self.level(b.children, o.children, t.children, here, o, (b, t))
 
     def anchor(self, T, j, tb, bo, O, twins=None):
         """('after', ours node) for the nearest earlier theirs sibling with an ours
@@ -397,7 +434,58 @@ class _Merge:
         return ("end", None)
 
     # --- decisions --------------------------------------------------------------
-    def vanilla_change(self, kind, here, b, o, t):
+    def gap_comments(self, i, B, T, bt, parents):
+        """(base, theirs) comment lines in the place of base node B[i]: between the
+        nodes that hold the base neighbours of B[i] on each side, or the edge of the
+        block. Theirs leaves out the comments of the nodes vanilla put there, since
+        those move with their nodes."""
+        prev = next((k for k in range(i - 1, -1, -1) if k in bt), None)
+        nxt = next((k for k in range(i + 1, len(B)) if k in bt), None)
+
+        def bounds(text, a_node, z_node, parent):
+            if a_node is not None:
+                a = _line_end(text, a_node.end) + 1
+            else:
+                a = _line_end(text, parent.open_end) + 1 if parent is not None else 0
+            if z_node is not None:
+                z = _line_start(text, z_node.start)
+            else:
+                z = _line_start(text, parent.end - 1) if parent is not None else len(text)
+            return a, max(a, z)
+        b_parent, t_parent = parents
+        ba, bz = bounds(self.b_text, B[prev] if prev is not None else None,
+                        B[nxt] if nxt is not None else None, b_parent)
+        ta, tz = bounds(self.t_text, T[bt[prev]] if prev is not None else None,
+                        T[bt[nxt]] if nxt is not None else None, t_parent)
+        b_skip = [(n.start, n.end) for n in B if ba <= n.start < bz]
+        t_skip = [(_line_start(self.t_text, _lead(self.t_text, n)), n.end) for n in T if ta <= n.start < tz]
+        return _comment_lines(self.b_text, ba, bz, b_skip), _comment_lines(self.t_text, ta, tz, t_skip)
+
+    def near_comments(self, o):
+        """The comment lines of ours around `o`, up to the code line above it and the
+        code line below it."""
+        text, out = self.o_text, []
+        pos = _line_start(text, o.start)
+        while pos > 0:
+            prev = _line_start(text, pos - 1)
+            line = text[prev:pos - 1].strip()
+            if line and not line.startswith("#"):
+                break
+            if line:
+                out.append(line)
+            pos = prev
+        pos = _line_end(text, o.end) + 1
+        while pos < len(text):
+            end = _line_end(text, pos)
+            line = text[pos:end].strip()
+            if line and not line.startswith("#"):
+                break
+            if line:
+                out.append(line)
+            pos = end + 1
+        return out
+
+    def vanilla_change(self, kind, here, b, o, t, gap=None):
         action, by = self.decide(here, kind, o, t, self.t_text, None)
         self.decisions.append(Decision(here, kind, action, by, base=intent.canon(b), ours=intent.canon(o),
                                        theirs=intent.canon(t),
@@ -405,11 +493,51 @@ class _Merge:
         if action != TAKE:
             return
         if t is None:
-            s, e = _delete_span(self.o_text, o)
-            self.ops.append(Op(s, e, "", by or "vanilla removed"))
+            self.remove(o, by or "vanilla removed", gap)
         else:
-            self.ops.append(Op(o.start, o.end, _reindent(self.t_text, t, _indent(self.o_text, o.start)),
-                               by or "vanilla changed"))
+            self.replace(b, o, t, by or "vanilla changed")
+
+    def remove(self, o, why, gap=None):
+        """Delete ours node `o`. A comment that vanilla wrote in the node's place, such
+        as `#sound=yes - TODO` for a removed `sound=yes`, takes its place, and so does
+        a comment above it that vanilla kept."""
+        s, e = _delete_span(self.o_text, o)
+        text = ""
+        if gap is not None and _own_line(self.o_text, o) and not _code_after(self.o_text, o.end).strip():
+            base_c, theirs_c = gap
+            lead = _lead_lines(self.o_text, o)
+            near = self.near_comments(o)
+            stay = list(near)
+            for c in lead:
+                if c in stay:
+                    stay.remove(c)
+            keep = [c for c in theirs_c if (c not in base_c or c in lead) and c not in stay]
+            if keep:
+                ind = _indent(self.o_text, o.start)
+                s = _line_start(self.o_text, _lead(self.o_text, o))
+                e = min(_line_end(self.o_text, o.end) + 1, len(self.o_text))
+                text = "".join(ind + c + "\n" for c in keep)
+        self.ops.append(Op(s, e, text, why))
+
+    def replace(self, b, o, t, why):
+        """Put vanilla's node `t` in the place of ours node `o`. A comment above the
+        node or after it on its line goes with vanilla's change, unless the mod
+        changed that comment."""
+        ind = _indent(self.o_text, o.start)
+        start, end = o.start, o.end
+        text = _reindent(self.t_text, t, ind)
+        if _own_line(self.o_text, o) and _own_line(self.t_text, t):
+            above = _lead_lines(self.b_text, b)
+            if _lead_lines(self.o_text, o) == above and _lead_lines(self.t_text, t) != above:
+                start = _line_start(self.o_text, _lead(self.o_text, o))
+                text = ind + "".join(ln + "\n" + ind for ln in _lead_lines(self.t_text, t)) + text
+        ot, bt, tt = _trail(self.o_text, o), _trail(self.b_text, b), _trail(self.t_text, t)
+        if ot is not None or not _code_after(self.o_text, o.end).strip():
+            same = (ot and ot[1]) == (bt and bt[1])
+            if same and (tt and tt[1]) != (bt and bt[1]):
+                end = _line_end(self.o_text, o.end) if ot is not None else o.end
+                text += " " + tt[1] if tt else ""
+        self.ops.append(Op(start, end, text, why))
 
     def decide_conflict(self, kind, here, b, o, t, place):
         action, by = self.decide(here, kind, o, t, self.t_text, "conflict")
