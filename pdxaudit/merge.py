@@ -316,21 +316,50 @@ class _Merge:
                 self.recurse(here, b, o, t)
             else:
                 self.decide_conflict("both_changed", here, b, o, t, None)
-        # Nodes that only theirs has.
-        added_by_ours = [O[j] for j in range(len(O)) if j not in ob]
+        # Nodes that only theirs has. A node that ours holds as it is stays once. A
+        # node that ours added in another form is a both_added decision, so the
+        # merge never writes one key two times.
+        twins = self.twins(O, T, [j for j in range(len(O)) if j not in ob], [j for j in range(len(T)) if j not in tb])
         for j, t in enumerate(T):
             if j in tb:
                 continue
-            if any(x.sig == t.sig for x in added_by_ours) or any(x.sig == t.sig for x in O):
+            if any(x.sig == t.sig for x in O):
                 continue
             here = path + [intent.segment(t, T, self.dialect)]
-            anchor = self.anchor(T, j, tb, bo, O)
+            if j in twins:
+                self.decide_conflict("both_added", here, None, O[twins[j]], t, None)
+                continue
+            anchor = self.anchor(T, j, tb, bo, O, twins)
             d = self.decide(here, "vanilla_added", None, t, self.t_text, None)
             action, by = d
             dec = Decision(here, "vanilla_added", action, by, theirs=intent.canon(t))
             self.decisions.append(dec)
             if action == TAKE:
                 self.insert(anchor, t, o_parent, by or "vanilla added")
+
+    def twins(self, O, T, free_o, free_t):
+        """{theirs index: ours index} for a node that both sides added in different
+        forms: the same name, the same selector, or a key that one added node holds
+        on each side. Nodes that read the same on both sides are not twins."""
+        o_sigs, t_sigs = {n.sig for n in O}, {n.sig for n in T}
+        cand_o = [k for k in free_o if O[k].sig not in t_sigs]
+        cand_t = [j for j in free_t if T[j].sig not in o_sigs]
+        plain = lambda n: n.label == n.key and diff3.selector(n, self.dialect) is None   # noqa: E731
+        out, used = {}, set()
+        for j in cand_t:
+            t = T[j]
+            same = [k for k in cand_o if k not in used and O[k].kind == t.kind and O[k].key == t.key]
+            if t.label != t.key:
+                hit = [k for k in same if O[k].label == t.label]
+            elif diff3.selector(t, self.dialect) is not None:
+                hit = [k for k in same if diff3.selector(O[k], self.dialect) == diff3.selector(t, self.dialect)]
+            else:
+                rivals = [i for i in cand_t if T[i].kind == t.kind and T[i].key == t.key]
+                hit = same if len(same) == 1 and len(rivals) == 1 and plain(O[same[0]]) else []
+            if hit:
+                out[j] = hit[0]
+                used.add(hit[0])
+        return out
 
     def recurse(self, here, b, o, t):
         if o.value != t.value:
@@ -348,16 +377,23 @@ class _Merge:
                                                theirs=self.t_text[t.start:t.open_end]))
         self.level(b.children, o.children, t.children, here, o)
 
-    def anchor(self, T, j, tb, bo, O):
+    def anchor(self, T, j, tb, bo, O, twins=None):
         """('after', ours node) for the nearest earlier theirs sibling with an ours
         counterpart, else ('before', ours node) for the nearest later one, else
-        ('end', None)."""
+        ('end', None). The counterpart goes through the base, or, for a node the base
+        lacks, is its twin (see `twins`) or the ours node that reads the same."""
+        def mate(k):
+            if k in tb:
+                return O[bo[tb[k]]] if tb[k] in bo else None
+            if twins and k in twins:
+                return O[twins[k]]
+            return next((o for o in O if o.sig == T[k].sig), None)
         for k in range(j - 1, -1, -1):
-            if k in tb and tb[k] in bo:
-                return ("after", O[bo[tb[k]]])
+            if mate(k) is not None:
+                return ("after", mate(k))
         for k in range(j + 1, len(T)):
-            if k in tb and tb[k] in bo:
-                return ("before", O[bo[tb[k]]])
+            if mate(k) is not None:
+                return ("before", mate(k))
         return ("end", None)
 
     # --- decisions --------------------------------------------------------------

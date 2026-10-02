@@ -12,10 +12,14 @@ import json
 import os
 import sys
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import diff3, intent, merge, proposer, session
 from .registry import registry
+
+
+# The base version of a text that vanilla did not hold at --old.
+NO_BASE = "(none)"
 
 
 def _sha(text):
@@ -185,26 +189,30 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
             regenerate[c.file] = tool
             continue
         if old_tag not in c.tags:
-            skipped.append((c.file, f"{old_tag} is not in the history of this copy"))
+            skipped.append((c.file, untracked_reason(c.file, old_tag)))
             continue
         old_i = c.tags.index(old_tag)
         base_i = diff3.baseline(c.mod_text, c.versions[:old_i + 1], c.unwrap, c.dialect)
+        theirs = c.versions[-1]
         if base_i is None:
-            continue
-        base_text, theirs = c.versions[base_i], c.versions[-1]
+            # Vanilla held no version of this text at --old or before: vanilla added it
+            # later. The base is empty, so each node vanilla holds is its addition.
+            base_text, base_tag = "", NO_BASE
+        else:
+            base_text, base_tag = c.versions[base_i], c.tags[base_i]
         if base_text == theirs:
             continue
-        by_file[c.file].append((c, base_i, base_text, theirs))
+        by_file[c.file].append((c, base_tag, base_text, theirs))
     _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, by_file, regenerate)
     added = _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, reg, regenerate, it,
-                             states)
+                             states, skipped)
     files = []
     for rel in sorted(set(by_file) | set(added)):
         items = by_file.get(rel, [])
         path = Path(mod_root) / rel
         text, bom, crlf = read_mod_file(path)
         edits, decisions, unexplained, stale = [], [], [], set()
-        for c, base_i, base_text, theirs in items:
+        for c, base_tag, base_text, theirs in items:
             start = _locate(text, c)
             if start is None:
                 skipped.append((rel, f"the copy {c.name} at line {c.line} does not read as the audit read it"))
@@ -225,7 +233,7 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
             for d in res.decisions:
                 if d.line is not None:
                     d.line += first_line
-                decisions.append((d, c.name, c.tags[base_i]))
+                decisions.append((d, c.name, base_tag))
             unexplained += [(ln + first_line, s) for ln, s in res.unexplained]
             # The merge splices each op, not the whole copy. A copy of a repeated key
             # spans the definitions between its blocks, and they must stay.
@@ -255,7 +263,27 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
                       "stale_entries": sorted(stale)})
     return {"old": old_tag, "new": tag_of(new_msg), "files": files,
             "regenerate": [{"file": f, "tool": t, "hint": reg.regenerate_hint(t)} for f, t in sorted(regenerate.items())],
-            "skipped": [{"file": f, "why": w} for f, w in skipped]}
+            "skipped": _distinct_skips(skipped)}
+
+
+def _distinct_skips(skipped):
+    """[{file, why, copies}]: one row per file and reason, with the number of copies."""
+    rows = {}
+    for f, w in skipped:
+        rows.setdefault((f, w), 0)
+        rows[(f, w)] += 1
+    return [{"file": f, "why": w, "copies": n} for (f, w), n in rows.items()]
+
+
+def untracked_reason(rel, old_tag):
+    """Why the merge skips a file whose type the tracker did not record at --old. The
+    tracker began to record some file types (.map and .csv from 1.4.0) after older
+    versions; vanilla held the file then, but no version of it is known. Without a
+    base the merge cannot tell the mod's edits from vanilla's changes. An empty base
+    would call every vanilla line an addition, so the file is merged by hand."""
+    ext = PurePosixPath(rel).suffix.lower() or "(no extension)"
+    return (f"the tracker holds no {ext} files at {old_tag}, so no base version of this file is known; "
+            "compare it with vanilla by hand")
 
 
 def _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, by_file, regenerate):
@@ -289,7 +317,7 @@ def _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, b
         c = Copy("inject", ov["block"], f"inject:{ov['category']}/{ov['block']}", text,
                  [old_text, new_text], [tags[old_i], tags[-1]], ov["file"], ov["line"], True,
                  diff3.SCRIPT, None, None, {})
-        by_file[ov["file"]].append((c, 0, old_text, new_text))
+        by_file[ov["file"]].append((c, tags[old_i] if old_text is not None else NO_BASE, old_text or "", new_text))
 
 
 def _comment_start(text, start):
@@ -302,7 +330,8 @@ def _comment_start(text, start):
     return start
 
 
-def _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, reg, regenerate, it, states):
+def _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, reg, regenerate, it, states,
+                     skipped):
     """{mod path: (inserts, decisions, stale entries)} for the mod's script files at a vanilla file's
     path. An insert is (offset, text, label): a top-level definition that vanilla
     added to the file after --old and that the mod lacks. It goes after the nearest
@@ -322,14 +351,24 @@ def _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, re
         raise ValueError(f"--old {old_tag} is not a tracked version before the new one")
     old_files, new_files = base.files(old), base.files(window[-1][0])
     scripts = [r for r in mod_files(mod_root) if PurePosixPath(r).suffix.lower() in SCRIPT_EXTS]
-    pairs = [(r, old_files[r], new_files[r]) for r in scripts if (not file or r == file)
-             and old_files.get(r) and new_files.get(r) and old_files[r] != new_files[r]]
-    blobs = base.blobs({i for _r, a, b in pairs for i in (a, b)})
+    old_exts = {PurePosixPath(p).suffix.lower() for p in old_files}
+    pairs = []
+    for r in scripts:
+        if (file and r != file) or not new_files.get(r) or old_files.get(r) == new_files[r]:
+            continue
+        if old_files.get(r):
+            pairs.append((r, old_files[r], new_files[r]))
+        elif PurePosixPath(r).suffix.lower() in old_exts:
+            pairs.append((r, None, new_files[r]))          # vanilla added the file after --old
+        else:
+            skipped.append((r, untracked_reason(r, old_tag)))
+    blobs = base.blobs({i for _r, a, b in pairs for i in (a, b) if i})
     out = {}
     for rel, a, b in pairs:
-        if a not in blobs or b not in blobs:
+        if (a and a not in blobs) or b not in blobs:
+            skipped.append((rel, "git could not read vanilla's version of the file"))
             continue
-        old_text = decode(blobs[a]).replace("\r\n", "\n")
+        old_text = decode(blobs[a]).replace("\r\n", "\n") if a else ""
         new_text = decode(blobs[b]).replace("\r\n", "\n")
         was, now = definitions(old_text), definitions(new_text)
         wanted = (lambda label: label == block or label.split(" ", 1)[0] == block) if block else (lambda label: True)

@@ -204,3 +204,46 @@ def test_new_definitions_pass_through_the_intent_store(tmp_path, monkeypatch):
     assert "order_knight" not in files[UNITS]["merged"]
     assert files[UNITS]["merged"] == _block("knight", 5) + "\n" + _block("old_knight", 2)
     assert files[MSG]["merged"] == _block("A", 5) + "\n" + _block("B")
+
+
+def test_a_file_vanilla_added_after_old_merges_with_an_empty_base(tmp_path, monkeypatch):
+    """The mod holds its own file at a path where vanilla adds a file after --old.
+    Vanilla held .txt files at --old, so it did not hold this one: the base is empty.
+    A definition alike on both sides stays once, vanilla's new definition goes in, and
+    a definition both sides hold in different forms is an open both_added decision."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    late = "in_game/common/x/late.txt"
+    tr = build_tracker(tmp_path, [("1.0", {DEFS: _block("Z")}),
+                                  ("1.1", {DEFS: _block("Z"), late: "\n".join(_block(n) for n in "ABC")})])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}',
+                      late: _block("A") + "\n" + _block("B", 7) + "\n" + _block("M")})
+    plan = tmp_path / "plan.json"
+    assert main(["--mod-root", str(mod), "--vanilla-repo", tr.repo, "--old", "1.0", "--new", "1.1",
+                 "--dry-run", "--plan-out", str(plan)]) == 0
+    p = json.loads(plan.read_text(encoding="utf-8"))
+    assert not p["skipped"]
+    [f] = p["files"]
+    assert f["merged"] == "\n".join([_block("A"), _block("B", 7), _block("C"), _block("M")])
+    got = sorted((d["kind"], d["action"], d["copy"], d["base_version"]) for d in f["decisions"])
+    assert got == [("both_added", "open", "B", "(none)"), ("vanilla_added", "take", "C", "1.0")]
+    assert f["removed_check"]["passed"]
+
+
+def test_a_file_type_the_tracker_did_not_record_at_old_is_skipped_with_the_reason(tmp_path, monkeypatch):
+    """The tracker recorded .map files only from 1.1. Vanilla held default.map at 1.0,
+    but no version of it is known, so the merge has no base: it lists the file once,
+    with the reason, and merges nothing in it."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    dm = "in_game/map_data/default.map"
+    tr = build_tracker(tmp_path, [("1.0", {DEFS: _block("Z")}),
+                                  ("1.1", {DEFS: _block("Z"), dm: "lakes = { 1 2 }\nseas = { 3 }\n"})])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}', dm: "lakes = { 1 }\nseas = { 3 4 }\n"})
+    plan = tmp_path / "plan.json"
+    assert main(["--mod-root", str(mod), "--vanilla-repo", tr.repo, "--old", "1.0", "--new", "1.1",
+                 "--dry-run", "--plan-out", str(plan)]) == 0
+    p = json.loads(plan.read_text(encoding="utf-8"))
+    assert not p["files"]
+    assert [(s["file"], s["copies"] >= 1) for s in p["skipped"]] == [(dm, True)]
+    assert "the tracker holds no .map files at 1.0" in p["skipped"][0]["why"]

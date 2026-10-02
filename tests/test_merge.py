@@ -223,3 +223,31 @@ def test_a_multi_line_child_in_place_of_a_statement_lays_out_its_block():
     r = merge_texts(base, ours, theirs, unwrap=True)
     assert r.text == "a = {\n\tx = {\n\t\ta = {\n\t\t\tc = 1\n\t\t}\n\t\tb = 2\n\t}\n}\n"
     assert r.check_passed
+
+
+def test_an_empty_base_takes_vanilla_only_nodes_and_opens_differing_twins():
+    """Vanilla held no version at --old, so the base is empty. A node both sides hold
+    alike stays once, a node only vanilla holds goes in, a node only the mod holds
+    stays, and a node both added in different forms is a both_added decision."""
+    ours = "a = { x = 1 }\nb = { y = 1 }\nmine = { z = 1 }\n"
+    theirs = "a = { x = 1 }\nb = { y = 2 }\nc = { w = 1 }\n"
+    r = merge_texts("", ours, theirs)
+    assert r.text == "a = { x = 1 }\nb = { y = 1 }\nc = { w = 1 }\nmine = { z = 1 }\n"
+    assert [(d.kind, d.action, d.path[-1]["key"]) for d in r.decisions] == [
+        ("both_added", OPEN, "b"), ("vanilla_added", TAKE, "c")]
+    assert r.check_passed
+    take = lambda path, kind, o, t, tt, what: (TAKE, "rule:r")   # noqa: E731
+    assert merge_texts("", ours, theirs, decide=take).text == \
+        "a = { x = 1 }\nb = { y = 2 }\nc = { w = 1 }\nmine = { z = 1 }\n"
+
+
+def test_a_key_both_sides_added_is_written_once():
+    """SUL added `rate = 9999 # [FU]`; vanilla added `rate = 4` at the same level. The
+    merge does not write both: it is a both_added decision. Two new blocks that
+    differ by selector are not twins: both stay."""
+    base = "w = {\n\tname = \"m\"\n}\n"
+    ours = "w = {\n\tname = \"m\"\n\trate = 9999 # [FU]\n\tif = { limit = { a = 1 } }\n}\n"
+    theirs = "w = {\n\tname = \"m\"\n\trate = 4\n\tif = { limit = { b = 1 } }\n}\n"
+    r = merge_texts(base, ours, theirs, unwrap=True)
+    assert r.text.count("rate =") == 1 and "if = { limit = { b = 1 } }" in r.text
+    assert [(d.kind, d.action) for d in r.decisions if d.path[-1]["key"] == "rate"] == [("both_added", OPEN)]
