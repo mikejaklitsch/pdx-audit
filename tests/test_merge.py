@@ -299,3 +299,19 @@ def test_overlapping_edits_fail_the_check():
     a, b, c = Op(0, 5, "x", "one"), Op(3, 8, "y", "two"), Op(8, 8, "z", "three", removes=False)
     dropped = []
     assert _splice_ops([b, a, c], dropped) == [a, c] and dropped == [b]
+
+
+def test_a_node_the_mod_took_from_a_later_vanilla_version_follows_vanilla():
+    """The copy matches 1.2 best, but SUL took two buttons that vanilla added in 1.3.
+    Vanilla 1.4 removes one and changes the other. Both are vanilla changes, not the
+    mod's nodes: the merge removes the first and takes the change of the second."""
+    base = "card = {\n\tsize = 1\n}\n"
+    v13 = "card = {\n\tsize = 1\n\tbutton = { name = \"a\" x = 1 }\n\tbutton = { name = \"b\" x = 1 }\n}\n"
+    ours = "card = {\n\tsize = 5\n\tbutton = { name = \"a\" x = 1 }\n\tbutton = { name = \"b\" x = 1 }\n\tmine = 1\n}\n"
+    theirs = "card = {\n\tsize = 1\n\tbutton = { name = \"b\" x = 2 }\n}\n"
+    r = merge_texts(base, ours, theirs, dialect=diff3.GUI, history=[v13])
+    assert r.text == "card = {\n\tsize = 5\n\tbutton = { name = \"b\" x = 2 }\n\tmine = 1\n}\n"
+    assert sorted((d.kind, d.action) for d in r.decisions) == [("vanilla_changed", TAKE), ("vanilla_removed", TAKE)]
+    assert r.check_passed
+    # Without the history the two buttons read as the mod's own and stay.
+    assert "name = \"a\"" in merge_texts(base, ours, theirs, dialect=diff3.GUI).text

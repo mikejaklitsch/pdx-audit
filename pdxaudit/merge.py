@@ -303,10 +303,11 @@ def merge_align(a, b, dialect, hints=None):
 
 
 class _Merge:
-    def __init__(self, base, ours, theirs, dialect, unwrap, decide, ours_offset=0):
+    def __init__(self, base, ours, theirs, dialect, unwrap, decide, history=()):
         self.b_text, self.o_text, self.t_text = base, ours, theirs
         self.dialect, self.unwrap, self.decide = dialect, unwrap, decide
         self.ops, self.decisions, self.overlaps = [], [], []
+        self.history = [h for h in history if h is not None]
 
     def view(self, text):
         top = diff3.nodes(text)
@@ -353,12 +354,17 @@ class _Merge:
                 self.recurse(here, b, o, t)
             else:
                 self.decide_conflict("both_changed", here, b, o, t, None)
+        # A node that only ours has, but that a vanilla version after the base held as
+        # it is, is vanilla's text: the mod took it from that version. Vanilla's later
+        # change to it is a vanilla change, not the mod's.
+        used_t = self.later_vanilla(path, B, O, T, ob, tb)
         # Nodes that only theirs has. A node that ours holds as it is stays once. A
         # node that ours added in another form is a both_added decision, so the
         # merge never writes one key two times.
-        twins = self.twins(O, T, [j for j in range(len(O)) if j not in ob], [j for j in range(len(T)) if j not in tb])
+        twins = self.twins(O, T, [j for j in range(len(O)) if j not in ob and j not in self._taken_o],
+                           [j for j in range(len(T)) if j not in tb and j not in used_t])
         for j, t in enumerate(T):
-            if j in tb:
+            if j in tb or j in used_t:
                 continue
             if any(x.sig == t.sig for x in O):
                 continue
@@ -373,6 +379,58 @@ class _Merge:
             self.decisions.append(dec)
             if action == TAKE:
                 self.insert(anchor, t, o_parent, by or "vanilla added")
+
+    def history_level(self, path):
+        """The nodes at `path` in each vanilla version between the base and theirs."""
+        out = []
+        for text in self.history:
+            node, _loose = intent.resolve(self.view(text), path, self.dialect)
+            if node is not None and node.children is not None:
+                out.extend(node.children)
+        return out
+
+    def later_vanilla(self, path, B, O, T, ob, tb):
+        """Decide each node that only ours has and that a vanilla version after the base
+        holds as it is. Vanilla's node of the same name, selector or single key in
+        theirs is vanilla's change to it (vanilla_changed); with none, vanilla removed
+        it (vanilla_removed). Returns the theirs indexes it used."""
+        self._taken_o, used = set(), set()
+        if not self.history:
+            return used
+        free_o = [j for j in range(len(O)) if j not in ob]
+        t_sigs = {n.sig for n in T}
+        if not free_o:
+            return used
+        earlier = {}
+        for n in self.history_level(path):
+            earlier.setdefault(n.sig, n)
+        b_sigs = {n.sig for n in B}
+        cand = [j for j in free_o if O[j].sig in earlier and O[j].sig not in t_sigs and O[j].sig not in b_sigs]
+        if not cand:
+            return used
+        free_t = [j for j in range(len(T)) if j not in tb and T[j].sig not in {n.sig for n in O}]
+        pairs = self.twins(O, T, cand, free_t)
+        mate = {o: t for t, o in pairs.items()}
+        for j in cand:
+            o = O[j]
+            t = T[mate[j]] if j in mate else None
+            here = path + [intent.segment(t if t is not None else o, T if t is not None else O, self.dialect)]
+            kind = "vanilla_changed" if t is not None else "vanilla_removed"
+            action, by = self.decide(here, kind, o, t, self.t_text, None)
+            self.decisions.append(Decision(here, kind, action, by, base=intent.canon(earlier[o.sig]),
+                                           ours=intent.canon(o), theirs=intent.canon(t),
+                                           reason="the mod took this node from a later vanilla version",
+                                           line=self.o_text.count("\n", 0, o.start) + 1))
+            self._taken_o.add(j)
+            if t is not None:
+                used.add(mate[j])
+            if action != TAKE:
+                continue
+            if t is None:
+                self.remove(o, by or "vanilla removed")
+            else:
+                self.replace(None, o, t, by or "vanilla changed")
+        return used
 
     def twins(self, O, T, free_o, free_t):
         """{theirs index: ours index} for a node that both sides added in different
@@ -526,6 +584,9 @@ class _Merge:
         ind = _indent(self.o_text, o.start)
         start, end = o.start, o.end
         text = _reindent(self.t_text, t, ind)
+        if b is None:                    # no base node: the mod's comments stay
+            self.ops.append(Op(start, end, text, why))
+            return
         if _own_line(self.o_text, o) and _own_line(self.t_text, t):
             above = _lead_lines(self.b_text, b)
             if _lead_lines(self.o_text, o) == above and _lead_lines(self.t_text, t) != above:
@@ -798,12 +859,14 @@ def removed_lines(ours, merged, ops):
     return out
 
 
-def merge_texts(base, ours, theirs, dialect=diff3.SCRIPT, unwrap=False, decide=None):
+def merge_texts(base, ours, theirs, dialect=diff3.SCRIPT, unwrap=False, decide=None, history=()):
     """Result of a three-way merge of one copy. `decide(path, kind, ours node, theirs
     node, theirs text, what)` returns (action, by); by default a vanilla change where
-    ours equals base is taken and every conflict is open."""
+    ours equals base is taken and every conflict is open. `history`: vanilla's texts
+    between the base and theirs, oldest first; a node the mod took from one of them
+    counts as vanilla's (see _Merge.later_vanilla)."""
     decide = decide or (lambda path, kind, o, t, tt, what: (OPEN, None) if what == "conflict" else (TAKE, None))
-    m = _Merge(base, ours, theirs, dialect, unwrap, decide)
+    m = _Merge(base, ours, theirs, dialect, unwrap, decide, history)
     text, ops = m.run()
     res = Result(text, ops, m.decisions)
     res.unexplained = removed_lines(ours, text, ops) + [

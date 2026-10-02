@@ -209,7 +209,8 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
             base_text, base_tag = c.versions[base_i], c.tags[base_i]
         if base_text == theirs:
             continue
-        by_file[c.file].append((c, base_tag, base_text, theirs))
+        later = c.versions[(base_i + 1 if base_i is not None else 0):-1]
+        by_file[c.file].append((c, base_tag, base_text, theirs, later))
     _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, by_file, regenerate, skipped)
     added = _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, reg, regenerate, it,
                              states, skipped)
@@ -220,7 +221,7 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
         path = Path(mod_root) / rel
         text, bom, crlf = read_mod_file(path)
         edits, decisions, unexplained, stale = [], [], [], set()
-        for c, base_tag, base_text, theirs in items:
+        for c, base_tag, base_text, theirs, later in items:
             start = _locate(text, c)
             if start is None:
                 _not_merged(rel, c, base_tag, f"the copy {c.name} at line {c.line} does not read as the audit "
@@ -231,7 +232,7 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
                 res = merge.merge_inject(base_text, c.mod_text, theirs, _decider(tpl, it, states, mod_root))
             else:
                 res = merge.merge_texts(base_text, c.mod_text, theirs, c.dialect, c.unwrap,
-                                        _decider(tpl, it, states, mod_root))
+                                        _decider(tpl, it, states, mod_root), later)
             # An op must not touch a character that the copy holds blank for another
             # definition. Such an op would overwrite that definition.
             if any(text[start + op.start:start + op.end] != c.mod_text[op.start:op.end] for op in res.ops):
@@ -538,7 +539,8 @@ def _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, b
         c = Copy("inject", ov["block"], f"inject:{ov['category']}/{ov['block']}", text,
                  [old_text, new_text], [tags[old_i], tags[-1]], ov["file"], ov["line"], True,
                  diff3.SCRIPT, None, None, {})
-        by_file[ov["file"]].append((c, tags[old_i] if old_text is not None else NO_BASE, old_text or "", new_text))
+        by_file[ov["file"]].append((c, tags[old_i] if old_text is not None else NO_BASE, old_text or "", new_text,
+                                    []))
 
 
 def _comment_start(text, start):
