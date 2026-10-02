@@ -137,3 +137,70 @@ def test_new_vanilla_definitions_go_to_vanilla_positions(tmp_path, monkeypatch):
     assert [(d["kind"], d["path"][0]["key"]) for d in f["decisions"] if d["action"] == "open"] == \
         [("removed_changed", "E")]
     assert [r["file"] for r in p["regenerate"]] == [GEN]
+
+
+def _rules(tmp_path, mod, rules):
+    from pdxaudit.intent_cli import main as intent_main
+    f = tmp_path / "rules.json"
+    f.write_text(json.dumps(rules), encoding="utf-8")
+    assert intent_main(["--mod-root", str(mod), "add-rule", str(f)]) == 0
+
+
+CLIM = "in_game/common/climates/00_default.txt"
+UNITS = "in_game/common/unit_types/0_knights.txt"
+GOODS = "in_game/common/goods/00_raw.txt"
+MSG = "main_menu/gui/messagetypes.txt"
+
+
+def test_new_definitions_pass_through_the_intent_store(tmp_path, monkeypatch):
+    """Vanilla adds one definition to each of four same-path files, and changes one
+    that the mod deleted. A keep_mod rule keeps the new climate out; a rule without a
+    disposition makes the new unit an open decision; the goods file belongs to a
+    pdx-maint system, so with no rule its new good is open; the message file has no
+    owner, so its new message goes in. A take_vanilla rule puts back the deleted
+    unit that vanilla changed."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    v1 = {CLIM: _block("temperate"), UNITS: _block("knight") + "\n" + _block("old_knight"),
+          GOODS: _block("wheat"), MSG: _block("A")}
+    v2 = {CLIM: _block("temperate") + "\n" + _block("subpolar"),
+          UNITS: _block("knight") + "\n" + _block("old_knight", 2) + "\n" + _block("order_knight"),
+          GOODS: _block("wheat") + "\n" + _block("camels"), MSG: _block("A") + "\n" + _block("B")}
+    tr = build_tracker(tmp_path, [("1.0", v1), ("1.1", v2)])
+    mod = tmp_path / "mod"
+    reg = ('[system.climate]\nfiles = []\n[system.combat]\nfiles = []\n'
+           '[system.economy]\nfiles = ["in_game/common/goods/*.txt"]\n')
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}', "pdx-maint.toml": reg,
+                      CLIM: _block("temperate", 5), UNITS: _block("knight", 5), GOODS: _block("wheat", 5),
+                      MSG: _block("A", 5)})
+    common = {"source": {"kind": "user"}}
+    _rules(tmp_path, mod, [
+        dict(common, id="climate.no_vanilla_climates", system="climate", disposition="keep_mod",
+             reason="SUL uses only its own climate classes.",
+             match={"content": ["in_game/common/climates"], "change": ["vanilla_added"]}),
+        dict(common, id="combat.new_units", system="combat", disposition=None,
+             reason="SUL's unit files use rescaled stats.",
+             match={"content": ["in_game/common/unit_types"], "change": ["vanilla_added"]}),
+        dict(common, id="combat.restore_old_knight", system="combat", disposition="take_vanilla",
+             reason="Test: take vanilla's old_knight back.",
+             match={"block": ["old_knight"], "change": ["removed_changed"]})])
+    plan = tmp_path / "plan.json"
+    assert main(["--mod-root", str(mod), "--vanilla-repo", tr.repo, "--old", "1.0", "--new", "1.1",
+                 "--dry-run", "--plan-out", str(plan)]) == 0
+    p = json.loads(plan.read_text(encoding="utf-8"))
+    files = {f["file"]: f for f in p["files"]}
+    got = {(f, d["path"][0]["key"]): (d["kind"], d["action"], d.get("by")) for f, x in files.items()
+           for d in x["decisions"] if d["path"] and d["path"][0]["key"] in
+           ("subpolar", "order_knight", "old_knight", "camels", "B")}
+    assert got == {
+        (CLIM, "subpolar"): ("vanilla_added", "keep", "rule:climate.no_vanilla_climates"),
+        (UNITS, "order_knight"): ("vanilla_added", "open", "rule:combat.new_units"),
+        (UNITS, "old_knight"): ("removed_changed", "take", "rule:combat.restore_old_knight"),
+        (GOODS, "camels"): ("vanilla_added", "open", None),
+        (MSG, "B"): ("vanilla_added", "take", None)}
+    assert "subpolar" not in files[CLIM]["merged"]
+    assert "camels" not in files[GOODS]["merged"]
+    assert "system economy owns the file" in next(d["reason"] for d in files[GOODS]["decisions"]
+                                                    if d["path"][0]["key"] == "camels")
+    assert "order_knight" not in files[UNITS]["merged"]
+    assert files[UNITS]["merged"] == _block("knight", 5) + "\n" + _block("old_knight", 2)
+    assert files[MSG]["merged"] == _block("A", 5) + "\n" + _block("B")

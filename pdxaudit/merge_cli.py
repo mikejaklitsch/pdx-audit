@@ -63,6 +63,28 @@ def main(argv):
         return _main(args)
 
 
+def _apply_intent(dev, it, states, what, stale):
+    """(action, by) for one deviation. `what` is "conflict" for a node both sides
+    changed. Without a rule or an entry, a vanilla change is taken and a conflict is
+    open. A stale entry, a grouping rule (no disposition), a banned rule and two rules
+    that disagree make the node an open decision; `stale` receives each stale entry."""
+    a = intent.attribute(dev, it)
+    if a is None:
+        return (merge.OPEN, None) if what == "conflict" else (merge.TAKE, None)
+    if a.conflict:
+        return merge.OPEN, "conflict:" + ",".join(a.conflict)
+    if a.by.startswith("entry:") and states.get(a.by[6:], ("recorded",))[0] != "recorded":
+        stale.add(a.by)
+        return merge.OPEN, a.by
+    if a.disposition == "keep_mod":
+        return merge.KEEP, a.by
+    if a.disposition == "take_vanilla":
+        return merge.TAKE, a.by
+    if a.disposition == "merge" and what != "conflict":
+        return merge.TAKE, a.by
+    return merge.OPEN, a.by           # merge on a statement, banned, or a grouping
+
+
 def _decider(dev_template, it, states, mod_root):
     """decide(path, kind, ours node, theirs node, theirs text, what) for one copy."""
     def decide(path, kind, o, t, _tt, what):
@@ -75,22 +97,51 @@ def _decider(dev_template, it, states, mod_root):
             mod_text=intent.canon(o), vanilla_text=intent.canon(t),
             comment=dev_template.comments.get(o.start, "") if o is not None else "",
             systems=dev_template.systems)
-        a = intent.attribute(dev, it)
-        if a is None:
-            return (merge.OPEN, None) if what == "conflict" else (merge.TAKE, None)
-        if a.conflict:
-            return merge.OPEN, "conflict:" + ",".join(a.conflict)
-        if a.by.startswith("entry:") and states.get(a.by[6:], ("recorded",))[0] != "recorded":
-            dev_template.stale.add(a.by)
-            return merge.OPEN, a.by
-        if a.disposition == "keep_mod":
-            return merge.KEEP, a.by
-        if a.disposition == "take_vanilla":
-            return merge.TAKE, a.by
-        if a.disposition == "merge" and what != "conflict":
-            return merge.TAKE, a.by
-        return merge.OPEN, a.by           # merge on a statement, banned, or a grouping
+        return _apply_intent(dev, it, states, what, dev_template.stale)
     return decide
+
+
+def owner(rel, it, reg):
+    """What owns the mod file `rel`, or None: a pdx-maint system that lists the file,
+    or a rule whose `content` or `file` field selects it. A system rewrote such a file
+    for its own design, so a definition that vanilla adds to it waits for the user."""
+    systems = reg.systems_of(rel)
+    if systems:
+        return "system " + ", ".join(systems)
+    content = rel.rsplit("/", 1)[0]
+    for r in sorted(it["rules"].values(), key=lambda r: r["id"]):
+        m = r.get("match") or {}
+        if any(intent._pat(p, content) for p in m.get("content", ())) or \
+                any(intent._pat(p, rel) for p in m.get("file", ())):
+            return f"rule {r['id']}"
+    return None
+
+
+def decide_definition(rel, label, kind, theirs_text, it, states, reg, stale):
+    """(action, by, reason) for a top-level definition of a same-path script file that
+    vanilla added after --old (kind vanilla_added) or changed after the mod deleted it
+    (kind removed_changed). The deviation has the definition as its identity and an
+    empty node path, so a rule matches it by `change`, `content`, `file`, `block`
+    (the definition name) and `vanilla_key`, and an entry by its address. Without a
+    rule or an entry, a new definition is taken unless a system owns the file (see
+    `owner`); a deleted definition that vanilla changed is always open."""
+    content = rel.rsplit("/", 1)[0]
+    dev = intent.Deviation(
+        copy="file", identity=f"{content}/{label}", block=label, content=content, file=rel,
+        vanilla_file=rel, line=0, change=kind, priority=diff3.MID, path=[], keys=(),
+        vanilla_key=label.split(" ", 1)[0], vanilla_text=theirs_text, systems=reg.systems_of(rel))
+    a = intent.attribute(dev, it)
+    if a is None:
+        if kind == "removed_changed":
+            return merge.OPEN, None, "the mod deleted this definition and vanilla changed it"
+        who = owner(rel, it, reg)
+        if who:
+            return merge.OPEN, None, f"vanilla added this definition after --old; no rule decides it, and {who} owns the file"
+        return merge.TAKE, None, "vanilla added this definition after --old"
+    action, by = _apply_intent(dev, it, states, "insert", stale)
+    why = {merge.TAKE: "vanilla's definition goes in", merge.KEEP: "the mod's file stays without it",
+           merge.OPEN: "the rule or entry leaves it to the user"}[action]
+    return action, by, f"{kind.replace('_', ' ')}: {why}"
 
 
 class _Template:
@@ -145,7 +196,8 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
             continue
         by_file[c.file].append((c, base_i, base_text, theirs))
     _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, by_file, regenerate)
-    added = _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, reg, regenerate)
+    added = _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, reg, regenerate, it,
+                             states)
     files = []
     for rel in sorted(set(by_file) | set(added)):
         items = by_file.get(rel, [])
@@ -178,7 +230,8 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
             # The merge splices each op, not the whole copy. A copy of a repeated key
             # spans the definitions between its blocks, and they must stay.
             edits += [(start + op.start, start + op.end, op.text) for op in res.ops]
-        inserts, new_decisions = added.get(rel, ([], []))
+        inserts, new_decisions, new_stale = added.get(rel, ([], [], set()))
+        stale |= new_stale
         for pos, ins, label in inserts:
             if any(s < pos < e for s, e, _t in edits):
                 skipped.append((rel, f"the new definition {label} falls inside a merged node"))
@@ -249,15 +302,16 @@ def _comment_start(text, start):
     return start
 
 
-def _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, reg, regenerate):
-    """{mod path: (inserts, decisions)} for the mod's script files at a vanilla file's
+def _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, reg, regenerate, it, states):
+    """{mod path: (inserts, decisions, stale entries)} for the mod's script files at a vanilla file's
     path. An insert is (offset, text, label): a top-level definition that vanilla
     added to the file after --old and that the mod lacks. It goes after the nearest
     earlier definition of vanilla that the mod holds, else before the nearest later
     one, else at the end. A definition that --old held and the mod lacks is the
-    mod's deletion. It stays deleted. It is an open decision when vanilla changed it.
-    A definition the mod keeps in another file of its folder is not missing. A
-    generated file goes to `regenerate`."""
+    mod's deletion. It stays deleted, and it is a decision when vanilla changed it.
+    The intent store decides each one (decide_definition). A definition the mod
+    keeps in another file of its folder is not missing. A generated file goes to
+    `regenerate`."""
     from pathlib import PurePosixPath
     from .files import SCRIPT_EXTS, TOP_LEVEL, _names, _split, decode, definitions, mod_files, scope_of
     from .gui import version_window
@@ -265,7 +319,7 @@ def _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, re
     window = version_window(commits, new_hash)
     old = next((h for h, m in window if tag_of(m) == old_tag), None)
     if old is None:
-        return {}
+        raise ValueError(f"--old {old_tag} is not a tracked version before the new one")
     old_files, new_files = base.files(old), base.files(window[-1][0])
     scripts = [r for r in mod_files(mod_root) if PurePosixPath(r).suffix.lower() in SCRIPT_EXTS]
     pairs = [(r, old_files[r], new_files[r]) for r in scripts if (not file or r == file)
@@ -292,35 +346,38 @@ def _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, re
             continue
         generated, tool = reg.generated_by(rel)
         if generated:
-            if fresh:
-                regenerate[rel] = tool
+            regenerate[rel] = tool
             continue
         elsewhere = set()
         for other in scripts:
             if other != rel and scope_of(other) == scope_of(rel):
                 elsewhere |= _names(Path(mod_root) / other)
         held = lambda lb: lb in elsewhere or lb.split(" ", 1)[0] in elsewhere   # noqa: E731
-        fresh = {lb for lb in fresh if not held(lb)}
-        decisions = [merge.Decision([{"key": lb}], "removed_changed", merge.OPEN,
-                                    reason="the mod deleted this definition and vanilla changed it",
-                                    base=" ".join(was[lb].sig.split()), theirs=" ".join(now[lb].sig.split()))
-                     for lb in sorted(gone) if not held(lb)]
+        decisions, put, stale = [], set(), set()
+        for lb in sorted(fresh | gone):
+            if held(lb):
+                continue
+            kind = "vanilla_added" if lb in fresh else "removed_changed"
+            theirs = " ".join(now[lb].sig.split())
+            action, by, why = decide_definition(rel, lb, kind, theirs, it, states, reg, stale)
+            decisions.append(merge.Decision([{"key": lb}], kind, action, by, reason=why,
+                                            base=" ".join(was[lb].sig.split()) if lb in was else None,
+                                            theirs=theirs))
+            if action == merge.TAKE:
+                put.add(lb)
         mine_items = {}
-        for it in _split(text):
-            mine_items.setdefault(it[0], []).append(it)
+        for item in _split(text):
+            mine_items.setdefault(item[0], []).append(item)
         inserts, pending, anchor, count = [], [], None, defaultdict(int)
         for label, start, end, *_rest in _split(new_text):
             k, count[label] = count[label], count[label] + 1
-            if label in fresh:
+            if label in put:
                 body = new_text[_comment_start(new_text, start):end].rstrip("\n") + "\n"
                 if anchor is None:
                     pending.append((label, body))
                 else:
                     sep = "\n" if text[:anchor].endswith("\n") else "\n\n"
                     inserts.append((anchor, sep + body, label))
-                decisions.append(merge.Decision([{"key": label}], "vanilla_added", merge.TAKE,
-                                                reason="vanilla added this definition after --old",
-                                                theirs=body.split("\n", 1)[0].strip()))
             elif label != TOP_LEVEL and label in mine_items:
                 members = mine_items[label]
                 m = members[min(k, len(members) - 1)]
@@ -333,7 +390,7 @@ def _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, re
             sep = "" if not text else "\n" if text.endswith("\n") else "\n\n"
             inserts += [(len(text), sep + body, lb) for lb, body in pending]
         if inserts or decisions:
-            out[rel] = (inserts, decisions)
+            out[rel] = (inserts, decisions, stale)
     return out
 
 
