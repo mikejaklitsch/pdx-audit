@@ -71,3 +71,26 @@ def test_generated_files_are_listed_to_regenerate(tmp_path, monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "not merged; regenerate with `pdx-maint run gen`" in out
     assert "```diff" not in out
+
+
+def test_a_repeated_key_merges_and_keeps_the_definitions_between(tmp_path, monkeypatch, capsys):
+    """Vanilla 1.3.11 messagetypes.txt holds INDEPENDANCE two times, and 1.4 removes
+    the second. The file audit reads both blocks as one copy, with the definitions
+    between them blank. The merge must find that copy and keep those definitions."""
+    path = "main_menu/gui/messagetypes.txt"
+    v1 = "A={\nlog=yes\n}\n\nB={\nlog=yes\n}\n\nA={\nlog=no\n}\n\nC={\nlog=yes\n}\n"
+    v2 = "A={\nlog=yes\n}\n\nB={\nlog=yes\n}\n\nC={\nlog=yes\n}\n"
+    mod_text = ("﻿A = {\n\tlog = yes\n}\n\nB = {\n\tlog = yes\n\tmine = 1\n}\n\n"
+                "A = {\n\tlog = no\n}\n\nC = {\n\tlog = yes\n}\n")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    tr = build_tracker(tmp_path, [("1.0", {path: v1}), ("1.1", {path: v2})])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}', path: mod_text})
+    plan = tmp_path / "plan.json"
+    assert main(["--mod-root", str(mod), "--vanilla-repo", tr.repo, "--old", "1.0", "--new", "1.1",
+                 "--dry-run", "--plan-out", str(plan)]) == 0
+    p = json.loads(plan.read_text(encoding="utf-8"))
+    assert not p["skipped"]
+    [f] = p["files"]
+    assert f["removed_check"]["passed"] and not f["open"]
+    assert f["merged"] == "A = {\n\tlog = yes\n}\n\nB = {\n\tlog = yes\n\tmine = 1\n}\n\n\nC = {\n\tlog = yes\n}\n"

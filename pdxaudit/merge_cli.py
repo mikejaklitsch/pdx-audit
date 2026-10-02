@@ -161,6 +161,11 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
             else:
                 res = merge.merge_texts(base_text, c.mod_text, theirs, c.dialect, c.unwrap,
                                         _decider(tpl, it, states, mod_root))
+            # An op must not touch a character that the copy holds blank for another
+            # definition. Such an op would overwrite that definition.
+            if any(text[start + op.start:start + op.end] != c.mod_text[op.start:op.end] for op in res.ops):
+                skipped.append((rel, f"the merge of {c.name} at line {c.line} touches another definition"))
+                continue
             stale |= tpl.stale
             first_line = text.count("\n", 0, start)
             for d in res.decisions:
@@ -168,14 +173,17 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
                     d.line += first_line
                 decisions.append((d, c.name, c.tags[base_i]))
             unexplained += [(ln + first_line, s) for ln, s in res.unexplained]
-            edits.append((start, start + len(c.mod_text), res.text))
+            # The merge splices each op, not the whole copy. A copy of a repeated key
+            # spans the definitions between its blocks, and they must stay.
+            edits += [(start + op.start, start + op.end, op.text) for op in res.ops]
         wanted = {d.line for d, _n, _b in decisions if d.action == merge.OPEN and d.line}
         blamed = proposer.blame(mod_root, rel, wanted) if wanted else {}
         decisions = [dict(d.to_json(), copy=name, base=btag,
                           **({"commit": (blamed.get(d.line) or (None,))[0]} if d.line in blamed else {}))
                      for d, name, btag in decisions]
         merged = text
-        for s, e, new in sorted(edits, reverse=True):
+        # Apply from the end of the file. Two insertions at one offset keep their order.
+        for _k, (s, e, new) in sorted(enumerate(edits), key=lambda x: (x[1][0], x[1][1], x[0]), reverse=True):
             merged = merged[:s] + new + merged[e:]
         files.append({"file": rel, "before_sha": _sha(text), "merged": merged, "bom": bom, "crlf": crlf,
                       "diff": merge.unified(rel, text, merged), "decisions": decisions,
@@ -222,16 +230,29 @@ def _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, b
         by_file[ov["file"]].append((c, 0, old_text, new_text))
 
 
+def _reads_as(text, at, mod_text):
+    """True when the file holds the copy's text at `at`. A key that occurs in more
+    than one top-level block is one definition (files.definitions). Its text keeps
+    the newlines of the definitions between the blocks and makes their other
+    characters spaces."""
+    if text.startswith(mod_text, at):
+        return True
+    seg = text[at:at + len(mod_text)]
+    if len(seg) != len(mod_text) or seg.count("\n") != mod_text.count("\n"):
+        return False
+    return all(a == b or (b == " " and a != "\n") for a, b in zip(seg, mod_text))
+
+
 def _locate(text, copy):
     """The offset of the copy's text in its file, near its first line."""
     lines = text.split("\n")
     if not 1 <= copy.line <= len(lines) + 1:
         return None
     offset = sum(len(x) + 1 for x in lines[:copy.line - 1])
-    for at in (offset, text.find(copy.mod_text, max(0, offset - 2000))):
-        if at is not None and at >= 0 and text.startswith(copy.mod_text, at):
-            return at
-    return None
+    if _reads_as(text, offset, copy.mod_text):
+        return offset
+    at = text.find(copy.mod_text, max(0, offset - 2000))
+    return at if at >= 0 else None
 
 
 def _print(p):
