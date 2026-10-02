@@ -207,6 +207,18 @@ def _delete_span(text, node):
     return start, node.end
 
 
+# A moved block must hold at least this many statements, so that a short block such
+# as `size = { 90 28 }` never counts as moved vanilla text.
+MOVE_MIN_SIZE = 3
+
+
+def _walk(nodes):
+    for n in nodes:
+        yield n
+        if n.children:
+            yield from _walk(n.children)
+
+
 def _leaves(node, out=None):
     """The signatures of the statements under a node."""
     out = set() if out is None else out
@@ -318,6 +330,9 @@ class _Merge:
         self.dialect, self.unwrap, self.decide = dialect, unwrap, decide
         self.ops, self.decisions, self.overlaps = [], [], []
         self.history = [h for h in history if h is not None]
+        self.ours_only = []              # nodes only ours has, for moved()
+        self.deferred = []               # decisions that wait for moved()
+        self.ours_sigs = {n.sig for n in _walk(self.view(ours))}
 
     def view(self, text):
         top = diff3.nodes(text)
@@ -329,6 +344,7 @@ class _Merge:
         outer = first(self.o_text) if self.unwrap else None
         parents = (first(self.b_text), first(self.t_text)) if self.unwrap else (None, None)
         self.level(b, o, t, [], outer, parents)
+        self.moved()
         return self.apply()
 
     # --- one level --------------------------------------------------------------
@@ -364,8 +380,11 @@ class _Merge:
                 gap = self.gap_comments(i, B, T, bt, parents) if t is None else None
                 self.vanilla_change(kind, here, b, o, t, gap)
             elif o is None:
-                self.decide_conflict("removed_changed", here, b, None, t,
-                                     (self.anchor(T, bt[i], tb, bo, O), o_parent))
+                place = (self.anchor(T, bt[i], tb, bo, O), o_parent)
+                if self.movable(b):
+                    self.deferred.append(("removed_changed", here, b, t, place))
+                else:
+                    self.decide_conflict("removed_changed", here, b, None, t, place)
             elif t is None:
                 self.decide_conflict("both_changed", here, b, o, None, None)
             elif (o.children is not None and t.children is not None and o.key == t.key == b.key):
@@ -391,12 +410,86 @@ class _Merge:
                 self.decide_conflict("both_added", here, None, O[twins[j]], t, None)
                 continue
             anchor = self.anchor(T, j, tb, bo, O, twins)
-            d = self.decide(here, "vanilla_added", None, t, self.t_text, None)
-            action, by = d
-            dec = Decision(here, "vanilla_added", action, by, theirs=intent.canon(t))
-            self.decisions.append(dec)
-            if action == TAKE:
-                self.insert(anchor, t, o_parent, by or "vanilla added")
+            if self.movable(t):
+                self.deferred.append(("vanilla_added", here, None, t, (anchor, o_parent)))
+            else:
+                self.vanilla_added(here, t, (anchor, o_parent))
+        twin_o = set(twins.values())
+        t_sigs = {n.sig for n in T}
+        self.ours_only += [O[j] for j in range(len(O)) if j not in ob and j not in self._taken_o
+                           and j not in twin_o and O[j].sig not in t_sigs]
+
+    def movable(self, node):
+        """True when a block that the base or theirs holds at this place may sit as it
+        is in another place of ours: then moved() decides it after the whole pass."""
+        return node.children is not None and node.size >= MOVE_MIN_SIZE and node.sig in self.ours_sigs
+
+    def vanilla_added(self, here, t, place):
+        action, by = self.decide(here, "vanilla_added", None, t, self.t_text, None)
+        self.decisions.append(Decision(here, "vanilla_added", action, by, theirs=intent.canon(t)))
+        if action == TAKE:
+            self.insert(place[0], t, place[1], by or "vanilla added")
+
+    def moved(self):
+        """Decide each vanilla block that the mod moved into a block of its own. A block
+        of the mod's own text (one that ours added) can hold a copy of a vanilla block
+        from the base or a later version, moved there as it is. When vanilla no longer
+        holds that text anywhere, vanilla changed or removed the original: the copy
+        follows (vanilla_changed takes vanilla's new block, vanilla_removed deletes
+        the copy), unless a rule or an entry decides otherwise. Vanilla's new block is
+        its block of the same key at the original's place that shares at least half of
+        the copy's statements; with none, vanilla removed it."""
+        inside = {x.sig for root in self.ours_only for x in _walk([root])}
+        for kind, here, b, t, place in self.deferred:
+            node = b if b is not None else t
+            if node.sig in inside:
+                continue                 # the mod moved it: decided below
+            if kind == "removed_changed":
+                self.decide_conflict(kind, here, b, None, t, place)
+            else:
+                self.vanilla_added(here, t, place)
+        if not self.ours_only:
+            return
+        origins = {}
+        for text in [self.b_text] + self.history:
+            top = self.view(text)
+            for n in _walk(top):
+                if n.children is not None and n.size >= MOVE_MIN_SIZE:
+                    origins.setdefault(n.sig, (n, top))
+        if not origins:
+            return
+        theirs_top = self.view(self.t_text)
+        theirs_sigs = {n.sig for n in _walk(theirs_top)}
+        ours_top = self.view(self.o_text)
+        ours_sigs = {n.sig for n in _walk(ours_top)}
+        stack = list(self.ours_only)
+        while stack:
+            n = stack.pop()
+            if n.children is None:
+                continue
+            if n.size < MOVE_MIN_SIZE or n.sig not in origins or n.sig in theirs_sigs:
+                stack.extend(n.children)
+                continue
+            origin, otop = origins[n.sig]
+            parent_path = (intent.path_of(otop, origin, self.dialect) or [])[:-1]
+            level, _loose = intent.resolve(theirs_top, parent_path, self.dialect)
+            mates = [c for c in (level.children or []) if c.key == n.key and c.children is not None
+                     and c.sig not in ours_sigs] if level is not None else []
+            best = max(mates, key=lambda c: _similarity(n, c), default=None)
+            t = best if best is not None and _similarity(n, best) >= 0.5 else None
+            here = intent.path_of(ours_top, n, self.dialect) or [{"key": n.key}]
+            kind = "vanilla_changed" if t is not None else "vanilla_removed"
+            action, by = self.decide(here, kind, n, t, self.t_text, None)
+            self.decisions.append(Decision(here, kind, action, by, base=intent.canon(origin), ours=intent.canon(n),
+                                           theirs=intent.canon(t),
+                                           reason="the mod moved this vanilla block into a block of its own",
+                                           line=self.o_text.count("\n", 0, n.start) + 1))
+            if action != TAKE:
+                continue
+            if t is None:
+                self.remove(n, by or "vanilla removed the block the mod moved")
+            else:
+                self.replace(None, n, t, by or "vanilla changed the block the mod moved")
 
     def history_level(self, path):
         """The nodes at `path` in each vanilla version between the base and theirs."""

@@ -332,3 +332,25 @@ def test_vanilla_comment_changes_on_unchanged_nodes_are_taken():
     assert r.text == ('a = {\n\tcursor = "unit_movement"\n\tother = 1 # my note\n'
                       '\t#"Do we like the actor?"\n\tif = {\n\t\tlimit = { x = 1 }\n\t\tv = 2\n\t}\n}\n')
     assert r.check_passed
+
+
+def test_a_vanilla_block_the_mod_moved_into_its_own_block_follows_vanilla():
+    """1.4 location_card: SUL moved a button that vanilla added in 1.3 into its own
+    block "location_card_extra_stats". Vanilla 1.4 removes the original, so the
+    moved copy goes. A moved block that vanilla changed takes vanilla's change, and
+    a moved block that vanilla still holds as it is stays."""
+    base = "card = {\n\thbox = {\n\t\tsize = 1\n\t\tbutton_regular = { a = 1 b = 1 c = 1 }\n\t}\n}\n"
+    v13 = ("card = {\n\thbox = {\n\t\tsize = 1\n\t\tbutton_regular = { a = 1 b = 1 c = 1 }\n"
+           "\t\tbutton_regular = { d = 1 e = 1 f = 1 }\n\t\tkeep_me = { g = 1 h = 1 i = 1 }\n\t}\n}\n")
+    ours = ("card = {\n\thbox = {\n\t\tsize = 1\n\t}\n\tblock \"extra_stats\" = {\n"
+            "\t\tbutton_regular = { a = 1 b = 1 c = 1 }\n\t\tbutton_regular = { d = 1 e = 1 f = 1 }\n"
+            "\t\tkeep_me = { g = 1 h = 1 i = 1 }\n\t\tmine = 1\n\t}\n}\n")
+    theirs = ("card = {\n\thbox = {\n\t\tsize = 1\n\t\tbutton_regular = { a = 1 b = 1 c = 2 }\n"
+              "\t\tkeep_me = { g = 1 h = 1 i = 1 }\n\t}\n}\n")
+    r = merge_texts(base, ours, theirs, dialect=diff3.GUI, history=[v13])
+    assert r.text == ("card = {\n\thbox = {\n\t\tsize = 1\n\t}\n\tblock \"extra_stats\" = {\n"
+                      "\t\tbutton_regular = { a = 1 b = 1 c = 2 }\n"
+                      "\t\tkeep_me = { g = 1 h = 1 i = 1 }\n\t\tmine = 1\n\t}\n}\n")
+    moved = [(d.kind, d.action) for d in r.decisions if "moved" in d.reason]
+    assert sorted(moved) == [("vanilla_changed", TAKE), ("vanilla_removed", TAKE)]
+    assert r.check_passed
