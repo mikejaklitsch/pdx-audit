@@ -179,7 +179,7 @@ def test_new_definitions_pass_through_the_intent_store(tmp_path, monkeypatch):
              match={"content": ["in_game/common/climates"], "change": ["vanilla_added"]}),
         dict(common, id="combat.new_units", system="combat", disposition=None,
              reason="SUL's unit files use rescaled stats.",
-             match={"content": ["in_game/common/unit_types"], "change": ["vanilla_added"]}),
+             match={"content": ["in_game/common/unit_types"], "change": ["vanilla_added"], "path": [""]}),
         dict(common, id="combat.restore_old_knight", system="combat", disposition="take_vanilla",
              reason="Test: take vanilla's old_knight back.",
              match={"block": ["old_knight"], "change": ["removed_changed"]})])

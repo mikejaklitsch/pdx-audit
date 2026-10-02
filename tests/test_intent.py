@@ -126,6 +126,11 @@ def test_matcher_fields(tmp_path):
     assert m(vanilla_key=["re:^(local_|global_)?monthly_food_modifier$"])
     assert m(content=["in_game/common/laws"], audit=["replace"], block=["law_*"])
     assert m(path=["modifier.*"]) and m(path=["**"]) and not m(path=["*"])
+    assert not m(path=[""])              # "" selects only a deviation of a whole copy
+    whole = intent.Deviation(copy="file", identity="in_game/common/x/A", block="A", content="in_game/common/x",
+                             file="in_game/common/x/d.txt", vanilla_file=None, line=0, change="vanilla_added",
+                             priority=None, path=[], keys=())
+    assert intent.rule_matches({"id": "r", "match": {"path": [""], "block": ["A"]}}, whole)
     assert m(file=["in_game/common/laws/fe_*.txt"])
     assert m(change=["mod_changed"]) and not m(change=["mod_added"])
     assert m(vanilla_absent=False) and not m(vanilla_absent=True)

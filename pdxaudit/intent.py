@@ -547,6 +547,11 @@ def _pat(pattern, text):
 
 
 def _path_match(pattern, keys):
+    """True when the node path `keys` matches `pattern`: `*` is one segment, `**` is
+    any number. The empty pattern matches only the empty path: a deviation of a
+    whole copy, such as a definition that vanilla added to a same-path file."""
+    if pattern == "":
+        return not keys
     parts = pattern.split(".")
 
     def go(i, j):
