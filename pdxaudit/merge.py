@@ -25,6 +25,12 @@ merged node gives a line break gets one child per line, so the text stays readab
 A rule or an entry without a disposition (a grouping), a banned rule and a stale
 entry never apply: each node goes to the user as an open decision.
 
+The base can be older than --old, when the copy matches an older vanilla version
+best. Then vanilla's changes between the base and --old are changes that an earlier
+port did not take. The mod may have left them out on purpose, or missed them. So
+the merge never takes such a change without a rule or an entry: it is an open
+decision with the reason "older than --old" (see _Merge.gate).
+
 The removed-line check compares the merged text with ours line by line. Every line
 that the merge removes must lie inside an operation that a vanilla change explains.
 Any other removal fails the file, and `--apply` does not write it."""
@@ -325,8 +331,12 @@ def merge_align(a, b, dialect, hints=None):
 
 
 class _Merge:
-    def __init__(self, base, ours, theirs, dialect, unwrap, decide, history=()):
+    def __init__(self, base, ours, theirs, dialect, unwrap, decide, history=(), old=None):
         self.b_text, self.o_text, self.t_text = base, ours, theirs
+        # (vanilla's text at --old, its tag) when the base is older than --old.
+        self.old_text, self.old_tag = old if old is not None else (None, None)
+        self._old_view = None
+        self._views = {}                 # parsed views by text, for gate()
         self.dialect, self.unwrap, self.decide = dialect, unwrap, decide
         self.ops, self.decisions, self.overlaps = [], [], []
         self.history = [h for h in history if h is not None]
@@ -419,6 +429,47 @@ class _Merge:
         self.ours_only += [O[j] for j in range(len(O)) if j not in ob and j not in self._taken_o
                            and j not in twin_o and O[j].sig not in t_sigs]
 
+    def gate(self, action, by, here, kind, ref, t, src=None):
+        """(action, reason) for a change that the merge would take with no rule or
+        entry. When vanilla made the change before --old, the action is open: an
+        earlier port did not take the change, and the mod may have left it out on
+        purpose. `ref` is the vanilla node that ours holds (None for an addition),
+        `t` vanilla's node at --new, `src` (text, node) the tree that addresses the
+        node best: the base for a base node. The test reads the node's level at
+        --old: a change is older when that level no longer holds `ref`, or holds `t`
+        already. A level that --old does not hold at either address makes the
+        change older too: vanilla rebuilt that place before --old."""
+        if action != TAKE or by is not None or self.old_text is None:
+            return action, ""
+        if self._old_view is None:
+            self._old_view = self.view(self.old_text)
+        paths = [here[:-1]]
+        if src is not None:
+            if src[0] not in self._views:
+                self._views[src[0]] = self.view(src[0])
+            found = intent.path_of(self._views[src[0]], src[1], self.dialect)
+            if found is not None:
+                paths.insert(0, found[:-1])
+        level = None
+        for parent_path in paths:
+            if not parent_path:
+                level = self._old_view
+                break
+            parent, _loose = intent.resolve(self._old_view, parent_path, self.dialect)
+            if parent is not None and parent.children is not None:
+                level = parent.children
+                break
+        sigs = {n.sig for n in level or []}
+        if ref is not None:
+            older = ref.sig not in sigs
+        else:
+            older = t is not None and t.sig in sigs
+        if not older:
+            return action, ""
+        return OPEN, (f"vanilla made this change before --old {self.old_tag}; the mod never took it. "
+                      "Take it if an earlier port missed it, keep the mod's text if the mod left it out "
+                      "on purpose")
+
     def movable(self, node):
         """True when a block that the base or theirs holds at this place may sit as it
         is in another place of ours: then moved() decides it after the whole pass."""
@@ -426,7 +477,8 @@ class _Merge:
 
     def vanilla_added(self, here, t, place):
         action, by = self.decide(here, "vanilla_added", None, t, self.t_text, None)
-        self.decisions.append(Decision(here, "vanilla_added", action, by, theirs=intent.canon(t)))
+        action, why = self.gate(action, by, here, "vanilla_added", None, t)
+        self.decisions.append(Decision(here, "vanilla_added", action, by, theirs=intent.canon(t), reason=why))
         if action == TAKE:
             self.insert(place[0], t, place[1], by or "vanilla added")
 
@@ -491,9 +543,16 @@ class _Merge:
             here = intent.path_of(ours_top, n, self.dialect) or [{"key": n.key}]
             kind = "vanilla_changed" if t is not None else "vanilla_removed"
             action, by = self.decide(here, kind, n, t, self.t_text, None)
+            why = ""
+            if action == TAKE and by is None and self.old_text is not None:
+                # Ours holds the block at its own place, so look for it anywhere at --old.
+                if self._old_view is None:
+                    self._old_view = self.view(self.old_text)
+                if n.sig not in {x.sig for x in _walk(self._old_view)}:
+                    action, why = OPEN, f"; vanilla changed it before --old {self.old_tag}; the mod never took it"
             self.decisions.append(Decision(here, kind, action, by, base=intent.canon(origin), ours=intent.canon(n),
                                            theirs=intent.canon(t),
-                                           reason="the mod moved this vanilla block into a block of its own",
+                                           reason="the mod moved this vanilla block into a block of its own" + why,
                                            line=self.o_text.count("\n", 0, n.start) + 1))
             if action != TAKE:
                 continue
@@ -539,9 +598,11 @@ class _Merge:
             here = path + [intent.segment(t if t is not None else o, T if t is not None else O, self.dialect)]
             kind = "vanilla_changed" if t is not None else "vanilla_removed"
             action, by = self.decide(here, kind, o, t, self.t_text, None)
+            action, why = self.gate(action, by, here, kind, o, t)
             self.decisions.append(Decision(here, kind, action, by, base=intent.canon(earlier[o.sig]),
                                            ours=intent.canon(o), theirs=intent.canon(t),
-                                           reason="the mod took this node from a later vanilla version",
+                                           reason="the mod took this node from a later vanilla version"
+                                           + (f"; {why}" if why else ""),
                                            line=self.o_text.count("\n", 0, o.start) + 1))
             self._taken_o.add(j)
             if t is not None:
@@ -690,8 +751,9 @@ class _Merge:
 
     def vanilla_change(self, kind, here, b, o, t, gap=None):
         action, by = self.decide(here, kind, o, t, self.t_text, None)
+        action, why = self.gate(action, by, here, kind, b, t, (self.b_text, b))
         self.decisions.append(Decision(here, kind, action, by, base=intent.canon(b), ours=intent.canon(o),
-                                       theirs=intent.canon(t),
+                                       theirs=intent.canon(t), reason=why,
                                        line=self.o_text.count("\n", 0, o.start) + 1))
         if action != TAKE:
             return
@@ -1034,14 +1096,15 @@ def removed_lines(ours, merged, ops):
     return out
 
 
-def merge_texts(base, ours, theirs, dialect=diff3.SCRIPT, unwrap=False, decide=None, history=()):
+def merge_texts(base, ours, theirs, dialect=diff3.SCRIPT, unwrap=False, decide=None, history=(), old=None):
     """Result of a three-way merge of one copy. `decide(path, kind, ours node, theirs
     node, theirs text, what)` returns (action, by); by default a vanilla change where
     ours equals base is taken and every conflict is open. `history`: vanilla's texts
     between the base and theirs, oldest first; a node the mod took from one of them
-    counts as vanilla's (see _Merge.later_vanilla)."""
+    counts as vanilla's (see _Merge.later_vanilla). `old`: (vanilla's text at --old,
+    its tag) when the base is older than --old (see _Merge.gate)."""
     decide = decide or (lambda path, kind, o, t, tt, what: (OPEN, None) if what == "conflict" else (TAKE, None))
-    m = _Merge(base, ours, theirs, dialect, unwrap, decide, history)
+    m = _Merge(base, ours, theirs, dialect, unwrap, decide, history, old)
     text, ops = m.run()
     res = Result(text, ops, m.decisions)
     res.unexplained = removed_lines(ours, text, ops) + [

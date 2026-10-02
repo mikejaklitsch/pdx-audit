@@ -231,8 +231,11 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
             if c.audit == "inject":
                 res = merge.merge_inject(base_text, c.mod_text, theirs, _decider(tpl, it, states, mod_root))
             else:
+                old = None
+                if base_tag not in (old_tag, NO_BASE) and old_tag in c.tags:
+                    old = (c.versions[c.tags.index(old_tag)] or "", old_tag)
                 res = merge.merge_texts(base_text, c.mod_text, theirs, c.dialect, c.unwrap,
-                                        _decider(tpl, it, states, mod_root), later)
+                                        _decider(tpl, it, states, mod_root), later, old)
             # An op must not touch a character that the copy holds blank for another
             # definition. Such an op would overwrite that definition.
             if any(text[start + op.start:start + op.end] != c.mod_text[op.start:op.end] for op in res.ops):

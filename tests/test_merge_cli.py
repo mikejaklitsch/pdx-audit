@@ -383,3 +383,26 @@ def test_a_file_with_no_tracker_history_is_skipped_with_the_reason(tmp_path, mon
     assert [(s["file"], "the tracker holds no version of this file" in s["why"]) for s in p["skipped"]] \
         == [(net, True)]
     assert "differs from the installed game" in p["skipped"][0]["why"]
+
+
+def test_a_copy_with_a_base_older_than_old_opens_the_older_changes(tmp_path, monkeypatch):
+    """The REPLACE matches vanilla 1.0. Vanilla changed cost in 1.1 (before --old)
+    and x in 1.2. The plan takes x and leaves cost open, so --apply refuses the file
+    until the user decides it."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    law = "in_game/common/laws/l.txt"
+    tr = build_tracker(tmp_path, [("1.0", {law: "law_a = {\n\tcost = 1\n\tx = 1\n}\n"}),
+                                  ("1.1", {law: "law_a = {\n\tcost = 2\n\tx = 1\n}\n"}),
+                                  ("1.2", {law: "law_a = {\n\tcost = 2\n\tx = 3\n}\n"})])
+    mod = tmp_path / "mod"
+    fe = "in_game/common/laws/fe.txt"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}',
+                      fe: "REPLACE:law_a = {\n\tcost = 1\n\tx = 1\n\tmine = yes\n}\n"})
+    plan = tmp_path / "plan.json"
+    assert main(["--mod-root", str(mod), "--vanilla-repo", tr.repo, "--old", "1.1", "--new", "1.2",
+                 "--dry-run", "--plan-out", str(plan)]) == 0
+    [f] = json.loads(plan.read_text(encoding="utf-8"))["files"]
+    got = {d["path"][0]["key"]: d for d in f["decisions"]}
+    assert (got["x"]["action"], got["cost"]["action"]) == ("take", "open")
+    assert got["cost"]["base_version"] == "1.0" and "before --old 1.1" in got["cost"]["reason"]
+    assert f["open"] == 1

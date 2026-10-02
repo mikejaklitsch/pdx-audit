@@ -380,3 +380,49 @@ def test_a_new_vanilla_block_holding_a_block_the_mod_moved_is_open():
     r = merge_texts(base, ours, theirs, dialect=diff3.GUI)
     assert r.text == ours
     assert [(d.kind, d.action) for d in r.decisions if "moved" in d.reason] == [("vanilla_added", OPEN)]
+
+
+def test_a_change_vanilla_made_before_old_is_open_never_taken():
+    """The mod copy matches 1.0, but --old is 1.1. Vanilla changed x, added z and
+    removed gone in 1.1: an earlier port did not take these, so each is an open
+    decision. Vanilla changed y and added w in 1.2: the merge takes these. A rule
+    still decides an older change."""
+    base = "a = {\n\tx = 1\n\ty = 1\n\tgone = 1\n}\n"
+    old = "a = {\n\tx = 2\n\ty = 1\n\tz = 1\n}\n"
+    new = "a = {\n\tx = 2\n\ty = 3\n\tz = 1\n\tw = 1\n}\n"
+    ours = "REPLACE:a = {\n\tx = 1\n\ty = 1\n\tgone = 1\n}\n"
+    r = merge_texts(base, ours, new, unwrap=True, old=(old, "1.1"))
+    assert r.text == "REPLACE:a = {\n\tx = 1\n\ty = 3\n\tw = 1\n\tgone = 1\n}\n"
+    got = {(d.kind, d.path[0]["key"]): d for d in r.decisions}
+    assert {k: d.action for k, d in got.items()} == {
+        ("vanilla_changed", "x"): OPEN, ("vanilla_changed", "y"): TAKE, ("vanilla_removed", "gone"): OPEN,
+        ("vanilla_added", "z"): OPEN, ("vanilla_added", "w"): TAKE}
+    assert all("before --old 1.1" in got[k].reason for k in
+               [("vanilla_changed", "x"), ("vanilla_removed", "gone"), ("vanilla_added", "z")])
+    assert r.check_passed
+
+    rule = lambda path, kind, o, t, tt, what: (TAKE, "rule:r") if path[-1]["key"] == "x" else (  # noqa: E731
+        (OPEN, None) if what == "conflict" else (TAKE, None))
+    r = merge_texts(base, ours, new, unwrap=True, decide=rule, old=(old, "1.1"))
+    assert "\tx = 2\n" in r.text
+
+
+def test_without_an_older_base_every_vanilla_change_is_taken_as_before():
+    base = "a = {\n\tx = 1\n}\n"
+    r = merge_texts(base, "REPLACE:" + base, "a = {\n\tx = 2\n}\n", unwrap=True)
+    assert [d.action for d in r.decisions] == [TAKE]
+
+
+def test_a_change_inside_a_block_that_vanilla_readdressed_after_old_is_taken():
+    """Vanilla changed the limit of the first `if` after --old, so its address at
+    --new does not resolve at --old (two `if` blocks share the key). The merge finds
+    the level at --old by the base address, and takes both changes of this window."""
+    two = "a = {{\n\tif = {{ limit = {{ {0} = yes }} v = {1} }}\n\tif = {{ limit = {{ y = yes }} v = 1 }}\n}}\n"
+    base = "a = {\n\tz = 1\n\tif = { limit = { x = yes } v = 1 }\n\tif = { limit = { y = yes } v = 1 }\n}\n"
+    old = "a = {\n\tz = 2\n\tif = { limit = { x = yes } v = 1 }\n\tif = { limit = { y = yes } v = 1 }\n}\n"
+    new = "a = {\n\tz = 2\n" + two.format("x2", 2).split("\n", 1)[1]
+    r = merge_texts(base, "REPLACE:" + base, new, unwrap=True, old=(old, "1.1"))
+    got = sorted((d.action, [s["key"] for s in d.path]) for d in r.decisions)
+    assert [a for a, p in got if p != ["z"]] and all(a == TAKE for a, p in got if p != ["z"])
+    assert [a for a, p in got if p == ["z"]] == [OPEN]
+    assert "limit = { x2 = yes } v = 2" in r.text
