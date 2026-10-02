@@ -164,6 +164,16 @@ def _reindent(src, node, indent, comments=False):
     return head + "\n".join(out) + (" " + tail[1] if tail else "")
 
 
+def _notes(text, node):
+    """The comments inside `node`, stripped, in order."""
+    out = []
+    for line in text[node.start:node.end].split("\n"):
+        c = intent._comment_of(line)
+        if c:
+            out.append(c)
+    return out
+
+
 def _comment_lines(text, a, z, skip=()):
     """The comment lines of text[a:z], stripped, outside the (start, end) spans in
     `skip`."""
@@ -334,6 +344,14 @@ class _Merge:
             here = path + [intent.segment(seg_node, seg_level, self.dialect)]
             o_same = o is not None and o.sig == b.sig
             t_same = t is not None and t.sig == b.sig
+            if t_same and o is not None:
+                # Vanilla changed no statement of the node; it may have changed a
+                # comment on it or inside it.
+                self.carry_comments(b, o, t)
+                if o_same and b.children and o.children is not None and t.children is not None \
+                        and _notes(self.b_text, b) != _notes(self.t_text, t):
+                    self.level(b.children, o.children, t.children, here, o, (b, t))
+                continue
             if t_same or (o is None and t is None):
                 continue
             if o is not None and t is not None and o.sig == t.sig:
@@ -456,7 +474,27 @@ class _Merge:
                 used.add(hit[0])
         return out
 
+    def carry_comments(self, b, o, t):
+        """Take vanilla's change to the comment lines above a node and to the comment
+        after it on its line, when the mod left that comment as the base had it."""
+        if not (_own_line(self.o_text, o) and _own_line(self.t_text, t) and _own_line(self.b_text, b)):
+            return
+        ind = _indent(self.o_text, o.start)
+        above = _lead_lines(self.b_text, b)
+        if _lead_lines(self.o_text, o) == above and _lead_lines(self.t_text, t) != above:
+            start = _line_start(self.o_text, _lead(self.o_text, o))
+            self.ops.append(Op(start, _line_start(self.o_text, o.start),
+                               "".join(ind + ln + "\n" for ln in _lead_lines(self.t_text, t)),
+                               "vanilla changed the comment above the node"))
+        ot, bt, tt = _trail(self.o_text, o), _trail(self.b_text, b), _trail(self.t_text, t)
+        if _code_after(self.o_text, o.end).strip():
+            return
+        if (ot and ot[1]) == (bt and bt[1]) and (tt and tt[1]) != (bt and bt[1]):
+            self.ops.append(Op(o.end, _line_end(self.o_text, o.end), " " + tt[1] if tt else "",
+                               "vanilla changed the comment after the node"))
+
     def recurse(self, here, b, o, t):
+        self.carry_comments(b, o, t)
         if o.value != t.value:
             if o.value == b.value:
                 d = self.decide(here, "vanilla_changed", o, t, self.t_text, "head")
@@ -495,8 +533,8 @@ class _Merge:
     def gap_comments(self, i, B, T, bt, parents):
         """(base, theirs) comment lines in the place of base node B[i]: between the
         nodes that hold the base neighbours of B[i] on each side, or the edge of the
-        block. Theirs leaves out the comments of the nodes vanilla put there, since
-        those move with their nodes."""
+        block. Theirs leaves out the comments of the nodes vanilla put there and the
+        comments directly above the next node, since those move with their nodes."""
         prev = next((k for k in range(i - 1, -1, -1) if k in bt), None)
         nxt = next((k for k in range(i + 1, len(B)) if k in bt), None)
 
@@ -517,6 +555,9 @@ class _Merge:
                         T[bt[nxt]] if nxt is not None else None, t_parent)
         b_skip = [(n.start, n.end) for n in B if ba <= n.start < bz]
         t_skip = [(_line_start(self.t_text, _lead(self.t_text, n)), n.end) for n in T if ta <= n.start < tz]
+        if nxt is not None:              # the next node's own comments go with it (carry_comments)
+            n = T[bt[nxt]]
+            t_skip.append((_line_start(self.t_text, _lead(self.t_text, n)), n.start))
         return _comment_lines(self.b_text, ba, bz, b_skip), _comment_lines(self.t_text, ta, tz, t_skip)
 
     def near_comments(self, o):
@@ -556,9 +597,11 @@ class _Merge:
             self.replace(b, o, t, by or "vanilla changed")
 
     def remove(self, o, why, gap=None):
-        """Delete ours node `o`. A comment that vanilla wrote in the node's place, such
-        as `#sound=yes - TODO` for a removed `sound=yes`, takes its place, and so does
-        a comment above it that vanilla kept."""
+        """Delete ours node `o`. A comment that vanilla wrote in the node's place takes
+        its place, and so does a comment above it that vanilla kept. A comment
+        directly above the next node goes with that node instead (carry_comments):
+        1.4 messagetypes.txt turns `sound=yes` into `#sound=yes - TODO in ud010`
+        above `message_category`."""
         s, e = _delete_span(self.o_text, o)
         text = ""
         if gap is not None and _own_line(self.o_text, o) and not _code_after(self.o_text, o.end).strip():

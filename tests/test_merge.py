@@ -315,3 +315,20 @@ def test_a_node_the_mod_took_from_a_later_vanilla_version_follows_vanilla():
     assert r.check_passed
     # Without the history the two buttons read as the mod's own and stay.
     assert "name = \"a\"" in merge_texts(base, ours, theirs, dialect=diff3.GUI).text
+
+
+def test_vanilla_comment_changes_on_unchanged_nodes_are_taken():
+    """1.4 map_markers.gui drops `# TODO: "unit_join"` after an unchanged cursor line,
+    and 1.4 independence_movement.txt adds `#"Do we like the actor ..."` above an if
+    whose inside changed. The mod left both comments as the base had them, so the
+    merge takes vanilla's comments. A comment the mod changed stays."""
+    base = ('a = {\n\tcursor = "unit_movement" # TODO: "unit_join"\n\tother = 1 # base note\n'
+            '\tif = {\n\t\tlimit = { x = 1 }\n\t\tv = 1\n\t}\n}\n')
+    ours = ('a = {\n\tcursor = "unit_movement" # TODO: "unit_join"\n\tother = 1 # my note\n'
+            '\tif = {\n\t\tlimit = { x = 1 }\n\t\tv = 1\n\t}\n}\n')
+    theirs = ('a = {\n\tcursor = "unit_movement"\n\tother = 1 # vanilla note\n'
+              '\t#"Do we like the actor?"\n\tif = {\n\t\tlimit = { x = 1 }\n\t\tv = 2\n\t}\n}\n')
+    r = merge_texts(base, ours, theirs, unwrap=True)
+    assert r.text == ('a = {\n\tcursor = "unit_movement"\n\tother = 1 # my note\n'
+                      '\t#"Do we like the actor?"\n\tif = {\n\t\tlimit = { x = 1 }\n\t\tv = 2\n\t}\n}\n')
+    assert r.check_passed
