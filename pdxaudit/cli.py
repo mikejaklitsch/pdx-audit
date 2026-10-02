@@ -8,9 +8,10 @@ driven by the vanilla-tracker bare git repo:
   tracked versions of its block, so a change vanilla made that your copy lacks is
   told apart from your own edits and from a change that meets one of them.
 
-  Dependency audit (--deps): flags names the mod uses (keys it writes and names
-  it references) that vanilla used at some tracked version but no longer uses,
-  with the patch that dropped them.
+  Dependency audit (--deps): flags names the mod uses (keys it writes, names
+  it references, GUI types and templates, and data-binding names in its .gui
+  files) that vanilla used at some tracked version but no longer uses, with the
+  patch that dropped them.
 
   GUI audit (--gui): finds mod .gui templates/types that shadow vanilla's and
   mod .gui files that replace a vanilla file, and compares each copy with
@@ -47,7 +48,8 @@ from .dupes import run_dupes_audit
 from .files import run_file_audit
 from .gui import run_gui_audit
 from .loc import run_loc_audit
-from .overrides import run_deps_audit, run_override_audit
+from .gui_names import run_deps
+from .overrides import run_override_audit
 from .base import VanillaBase
 from .report import ColorWriter, color_enabled, render_triage, window_heading
 from .results import build_payload, mod_fingerprint
@@ -379,7 +381,7 @@ def _main():
     runners = {
         "overrides": lambda: run_override_audit(
             mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx),
-        "deps": lambda: run_deps_audit(
+        "deps": lambda: run_deps(
             mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx),
         "gui": lambda: run_gui_audit(
             mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx),

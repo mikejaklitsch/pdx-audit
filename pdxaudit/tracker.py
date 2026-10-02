@@ -19,7 +19,7 @@ from .config import cfg, config_file, setting, SETTINGS
 from .safety import remove_file, RefusedRemoval
 
 # pdx-audit writes cache files with these names in the cache folder of the tracker.
-CACHE_FILE_RE = r"(?:blocks|gui|vocab|dupes)-v\d+-[0-9a-f]{40}(?:-[0-9a-f]{12})?\.json"
+CACHE_FILE_RE = r"(?:blocks|gui|guinames|locbind|vocab|dupes)-v\d+-[0-9a-f]{40}(?:-[0-9a-f]{12})?\.json"
 
 # The one temporary file --commit creates, inside the tracker repo itself. Its name is
 # also the pattern the removal helper checks, and it is left as it is so that a file an

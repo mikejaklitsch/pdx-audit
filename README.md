@@ -56,7 +56,7 @@ The app runs the audits through this interface, and you can use it to script the
 ```bash
 pdx-audit                     # all six audits
 pdx-audit --overrides         # REPLACE and INJECT blocks against vanilla
-pdx-audit --deps              # names and GUI templates that vanilla no longer uses
+pdx-audit --deps              # names, GUI types and templates, and data-binding names that vanilla no longer uses
 pdx-audit --gui               # vanilla GUI changes that your copies do not have
 pdx-audit --files             # vanilla changes inside files your mod replaces at the same path
 pdx-audit --loc               # vanilla strings that changed under keys you override
