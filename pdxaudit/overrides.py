@@ -1063,12 +1063,12 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
         print()
 
     findings = []
-    for ov, _vfile, since, base in removed:
+    for ov, _vfile, since, base_tag in removed:
         findings.append(Finding("override_orphaned", ov["block"], f"{ov['file']}:{ov['line']}",
-                                "", None, {"target": override_target(ov)}, since, base))
-    for ov, _vfile, since, base in created:
+                                "", None, {"target": override_target(ov)}, since, base_tag))
+    for ov, _vfile, since, base_tag in created:
         findings.append(Finding("override_now_created", ov["block"], f"{ov['file']}:{ov['line']}",
-                                "", None, {"target": override_target(ov)}, since, base))
+                                "", None, {"target": override_target(ov)}, since, base_tag))
     for ov in unreadable:
         findings.append(Finding("override_unreadable", ov["block"], f"{ov['file']}:{ov['line']}",
                                 "", None, {"target": override_target(ov)}))
