@@ -122,16 +122,22 @@ class Node:
     block that names itself. value: (op, value) for a stmt, the head (op, value)
     for a block, a tuple for items, the text for raw. start, end: offsets into the
     parsed text; open_end is the end of a block's '{'. sig is equal for nodes that
-    read the same; size counts statements."""
-    __slots__ = ("kind", "key", "label", "value", "children", "start", "end", "open_end",
-                 "sig", "size")
+    read the same; size counts statements.
 
-    def __init__(self, kind, key, value, children, start, end, open_end=None, label=None):
+    weight: a list entry such as `10 = army_heavy_cavalry` in a formation or a weight
+    list. The number is the entry's weight and the name is what the entry is, so the
+    node reads the other way round: key is the name and value the weight. The mod can
+    then change a weight and still pair with vanilla's entry of that name."""
+    __slots__ = ("kind", "key", "label", "value", "children", "start", "end", "open_end",
+                 "sig", "size", "weight")
+
+    def __init__(self, kind, key, value, children, start, end, open_end=None, label=None, weight=False):
         self.kind, self.key, self.label = kind, key, label or key
+        self.weight = weight
         self.value, self.children = value, children
         self.start, self.end, self.open_end = start, end, open_end
         if children is None:
-            self.sig = hash((kind, self.label, value))
+            self.sig = hash((kind, self.label, value, weight))
             self.size = 1
         else:
             self.sig = hash((kind, self.label, value, tuple(c.sig for c in children)))
@@ -203,10 +209,16 @@ def _build(parsed):
         elif val == "PENDING_BLOCK":              # a block pattern its '{' never followed
             out.append(Node("stmt", key, (op, None), None, n["_start"],
                             n["_start"] + len(n["key"])))
+        elif op == "=" and _WEIGHT_KEY.fullmatch(key) and isinstance(val, str) and _WEIGHT_NAME.fullmatch(val):
+            out.append(Node("stmt", val, (op, norm_value(key)), None, n["_start"], n["_end"], weight=True))
         else:
             out.append(Node("stmt", key, (op, norm_value(val)), None, n["_start"], n["_end"]))
     flush()
     return out
+
+
+_WEIGHT_KEY = re.compile(r"-?\d+(\.\d+)?")
+_WEIGHT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def body(top):

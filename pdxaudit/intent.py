@@ -142,6 +142,8 @@ def canon(node):
         return node.value
     if node.children is None:
         op, value = node.value
+        if getattr(node, "weight", False):      # `10 = army_heavy_cavalry`, read as name and weight
+            return f"{value} {op} {node.key}"
         return f"{node.key} {op or ''} {value if value is not None else ''}".strip()
     op, value = node.value
     head = " ".join(x for x in (node.key, op, value) if x)

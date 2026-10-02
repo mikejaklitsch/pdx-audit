@@ -426,3 +426,29 @@ def test_a_change_inside_a_block_that_vanilla_readdressed_after_old_is_taken():
     assert [a for a, p in got if p != ["z"]] and all(a == TAKE for a, p in got if p != ["z"])
     assert [a for a, p in got if p == ["z"]] == [OPEN]
     assert "limit = { x2 = yes } v = 2" in r.text
+
+
+def test_a_weight_list_pairs_its_entries_by_name_not_by_weight():
+    """Vanilla split `10 = army_cavalry` into heavy and light entries. The mod had
+    already written its own weights for both. Each entry pairs with vanilla's entry
+    of the same name: the merge never writes a second weight for one category, and
+    a weight both sides set differently is a decision."""
+    base = "a = {\n\tleft = {\n\t\t10 = army_cavalry\n\t\tmax_frontage = 1.25\n\t}\n}\n"
+    theirs = "a = {\n\tleft = {\n\t\t10 = army_heavy_cavalry\n\t\t10 = army_light_cavalry\n\t\tmax_frontage = 1.25\n\t}\n}\n"
+    ours = ("REPLACE:a = {\n\tleft = {\n\t\t6 = army_heavy_cavalry\n\t\t6 = army_light_cavalry\n"
+            "\t\t1 = army_artillery\n\t\tmax_frontage = 1.25\n\t}\n}\n")
+    r = merge_texts(base, ours, theirs, unwrap=True)
+    assert r.text.count("army_light_cavalry") == 1 and r.text.count("army_heavy_cavalry") == 1
+    assert "6 = army_light_cavalry" in r.text
+    # Both sides removed army_cavalry, so it needs no decision.
+    assert sorted((d.kind, d.path[-1]["key"]) for d in r.decisions) == [
+        ("both_added", "army_heavy_cavalry"), ("both_added", "army_light_cavalry")]
+    assert next(d for d in r.decisions if d.path[-1]["key"] == "army_light_cavalry").theirs == \
+        "10 = army_light_cavalry"
+
+
+def test_a_weight_changed_by_vanilla_alone_is_taken():
+    base = "a = {\n\tl = {\n\t\t10 = army_heavy_cavalry\n\t\t5 = army_artillery\n\t}\n}\n"
+    theirs = "a = {\n\tl = {\n\t\t10 = army_heavy_cavalry\n\t\t8 = army_artillery\n\t}\n}\n"
+    r = merge_texts(base, "REPLACE:" + base, theirs, unwrap=True)
+    assert "\t\t8 = army_artillery\n" in r.text and "5 = army_artillery" not in r.text
