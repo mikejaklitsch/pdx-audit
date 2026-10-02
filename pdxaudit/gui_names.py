@@ -33,7 +33,7 @@ from .gui import commits_up_to, mod_gui_files
 from .report import Finding
 from .tracker import cache_path, full_hash, tag_of
 
-NAMES_CACHE_VERSION = 2
+NAMES_CACHE_VERSION = 3
 LOC_CACHE_VERSION = 1
 
 _IDENT = re.compile(r"[A-Za-z_]\w*")
@@ -114,16 +114,17 @@ def file_names(text):
                     strings(value, node.start)
             elif node.kind == "block":
                 head, _sep, rest = node.key.partition(" ")
+                kw = head.lower()                 # the engine reads `Type`, `Template` too
                 op, value = node.value
-                if head == "type" and rest:
+                if kw == "type" and rest:
                     defs.add(("type", rest))
                     if value:
                         uses.append(("type", _unquote(value), line(node.start)))
-                elif head in ("template", "local_template") and rest:
+                elif kw in ("template", "local_template") and rest:
                     defs.add(("template", rest))
-                elif head == "block" and rest:
+                elif kw == "block" and rest:
                     defs.add(("block", _unquote(rest)))
-                elif head == "blockoverride" and rest:
+                elif kw == "blockoverride" and rest:
                     uses.append(("block", _unquote(rest), line(node.start)))
                 elif not rest and _IDENT.fullmatch(head):
                     uses.append(("type", head, line(node.start)))

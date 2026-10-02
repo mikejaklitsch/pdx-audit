@@ -211,3 +211,10 @@ def test_removed_block_is_found_and_mod_blocks_are_own(tmp_path):
     findings, _out = _run(tr, _mod(tmp_path, gui))
     assert [(f.name, f.detail, f.location) for f in findings] == [
         ("caption", "block dropped in 1.1", "in_game/gui/mine.gui:3")]
+
+
+def test_capitalised_keywords_define_names():
+    """`Types X { Type topbar = widget }` and `Template t` define names, as the
+    lowercase forms do."""
+    defs = file_names("Types X {\n\tType topbar = widget {\n\t}\n}\nTemplate t1 {\n\tb = 1\n}\n")["defs"]
+    assert ("type", "topbar") in defs and ("template", "t1") in defs

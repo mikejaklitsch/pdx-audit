@@ -134,3 +134,13 @@ def test_every_finding_of_a_definition_shares_its_block(world):
         (1, "template foo = {", None, None), (2, "\tsize = { 10 10 }", "review", "-"),
         (None, "\tsize = { 20 20 }", "review", "+"), (3, "\tlegacy = 1", None, None), (4, "}", None, None)]
     assert rows[1]["emph"] == [(10, 15)] and rows[2]["emph"] == [(10, 15)]
+
+
+def test_gui_keywords_are_read_in_any_case():
+    """Vanilla 1.4 hud_topbar.gui opens its group with `Types HUD_TopbarTypes`. The
+    engine reads the keyword in any case, so the parser does too."""
+    from pdxaudit.gui import parse_gui_defs
+    text = "Types HUD_TopbarTypes\n{\n\tType topbar = widget {\n\t\tsize = { 1 1 }\n\t}\n}\nTemplate t1 {\n\tx = 1\n}\n"
+    defs, clean = parse_gui_defs(text)
+    assert clean
+    assert [(d["kind"], d["name"]) for d in defs] == [("type", "topbar"), ("types", "HUD_TopbarTypes"), ("template", "t1")]

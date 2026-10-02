@@ -15,9 +15,11 @@ from .report import Finding
 from .tracker import MODULE_ROOTS, _git_archive, cache_path, full_hash, tag_of
 from .config import should_skip
 
-GUI_DEF_HEAD = re.compile(r"^\s*(template|local_template|types)\s+([A-Za-z_][\w.]*)")
+# The engine reads these keywords in any case: vanilla 1.4 hud_topbar.gui opens
+# with `Types HUD_TopbarTypes`.
+GUI_DEF_HEAD = re.compile(r"^\s*(template|local_template|types)\s+([A-Za-z_][\w.]*)", re.I)
 
-GUI_TYPE_HEAD = re.compile(r"^\s*type\s+([A-Za-z_][\w.]*)\s*=")
+GUI_TYPE_HEAD = re.compile(r"^\s*type\s+([A-Za-z_][\w.]*)\s*=", re.I)
 
 def _gui_code(line):
     """Code portion of a .gui line: comment stripped, string contents blanked
@@ -68,7 +70,7 @@ def parse_gui_defs(text):
             if m:
                 # a still-braceless def at depth 0 was malformed; drop it
                 open_defs = [d for d in open_defs if d["opened"]]
-                open_defs.append({"kind": m.group(1), "name": m.group(2),
+                open_defs.append({"kind": m.group(1).lower(), "name": m.group(2),
                                   "start": i, "base": 0, "opened": False})
         elif depth == 1 and open_defs and open_defs[0]["kind"] == "types":
             m = GUI_TYPE_HEAD.match(code)
@@ -174,7 +176,7 @@ def build_gui_vanilla(vanilla_repo, commit, modules, label=""):
         print(f" {len(def_idx)} defs in {len(file_idx)} files.", file=sys.stderr)
     return def_idx, file_idx, bad
 
-GUI_CACHE_VERSION = 1
+GUI_CACHE_VERSION = 2
 
 def _gui_cache_path(vanilla_repo, commit, modules):
     """Cache file for a commit's parsed GUI index, keyed by the full commit hash
