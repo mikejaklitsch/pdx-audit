@@ -320,10 +320,10 @@ The proposer fills `system` and `source` from the evidence. It leaves `reason` e
 pdx-audit merge --old 1.3.11 --new 1.4.0-beta [--file PATH | --block NAME] (--dry-run | --apply) [--json]
 ```
 
-- `--old` and `--new` select tracker versions, as for the audits.
+- `--old` and `--new` select tracker versions, as for the audits. `--old` must be a tracked version before `--new`. Otherwise the merge stops with an error.
 - `--file` limits the merge to the copies in one mod file. `--block` limits it to one identity.
 - `--dry-run` writes nothing in the mod. It prints a unified diff per file and the decision list, and runs the removed-line check.
-- `--apply` writes only the files whose removed-line check passes and whose decisions are all closed. It writes atomically, keeps the BOM of each file, and does not format. The user runs `pdx-format` on the listed files.
+- `--apply` writes only the files whose removed-line check passes and whose decisions are all closed. It writes atomically and keeps the BOM and the line ends of each file. It needs no format pass: the dry run gives the merged text the layout of pdx-format (section 15).
 
 ### 7.2 What it merges
 
@@ -339,7 +339,21 @@ An INJECT merge touches only the children that the INJECT sets. A vanilla change
 
 A same-path script file also gets the top-level definitions that vanilla added after `--old` and that the mod lacks. Each goes after the nearest earlier vanilla definition that the mod holds, else before the nearest later one, else at the end. A definition that `--old` held and the mod lacks is a mod deletion: it stays deleted. When vanilla changed it, it is an open decision. A definition that the mod keeps in another file of its folder is not missing.
 
-Excluded: files whose first line holds `AUTO-GENERATED`, and outputs that `pdx-maint.toml` lists for an active tool. Their generators read vanilla again. The merge lists them as "regenerate", with the tool name.
+The intent store decides each new definition, and each deleted definition that vanilla changed. A rule matches it with the change kind `vanilla_added` (or `removed_changed` for a deleted definition) and the path pattern `[""]`, which selects only a deviation of a whole copy. It can also match by `content`, `file`, `block` (the definition name) and `vanilla_key`. `take_vanilla` puts the definition in, `keep_mod` keeps it out, and a grouping rule (no disposition) makes it open. With no rule, a new definition goes in, unless a pdx-maint system or a rule's `content` or `file` field owns the file. Then it is open. With no rule, a deleted definition that vanilla changed is always open.
+
+Text that vanilla did not hold at `--old` merges with an empty base. This applies to a copy, a definition, or a same-path file that vanilla added later. A node that both sides hold alike stays once. A node that only vanilla holds goes in. A node that both sides added in different forms is a `both_added` decision, so one key is never written two times.
+
+Vanilla can remove the text of a copy after `--old`: a REPLACE block, an INJECT target, a GUI definition, a file definition, or a whole same-path file. Each one is a `vanilla_removed` decision. `take_vanilla` deletes the block. A whole file stays open, because `--apply` never deletes a file.
+
+The merge lists each text that it cannot compare node by node, with the reason. The plan holds these in `skipped`:
+
+- a definition too large to compare statement by statement;
+- a text that is not script, where vanilla changed lines;
+- a REPLACE or an INJECT that the audit could not read;
+- a file with no version in the tracker (`file_untracked`: a `.dds` or `.splnet` file that the mod copies from the game);
+- a file whose type the tracker did not record at `--old` (`.map` and `.csv` before 1.4.0). Vanilla held the file, but no base is known. An empty base would call each vanilla line an addition.
+
+Excluded: files whose first line holds `AUTO-GENERATED`, and outputs that `pdx-maint.toml` lists for an active tool, by glob or in the tool's `manifest:` file. Their generators read vanilla again. The merge lists them as "regenerate", with the tool name, and never as skipped.
 
 ### 7.3 Algorithm
 
@@ -548,4 +562,19 @@ Changes against sections 7 and 10 that the acceptance tests asked for:
 - **INJECT.** A key that the INJECT sets and vanilla changed in the window is an `inject_overlap` decision. `keep_mod` keeps it; `take_vanilla` deletes the key from the INJECT, so vanilla's value applies.
 - **Removed-line check.** It compares the merged text with ours, less the lines an op wrote or touched, as a multiset of statements. So a moved line is not a removal, and a line that the output lost still shows.
 - **Plan.** The dry run saves a plan in the per-user data folder. `--apply` takes the plan and writes exactly its text.
-- **Generated files.** The override, files and GUI audits report a generated file as one finding per file when vanilla changed its source in the window. The merge lists it to regenerate. Detection reads the first line, or in a localization file the line after the language key (as the mod's `is_generated`), and names the tool from `pdx-maint.toml`.
+- **Base text in the plan.** Each decision holds the base text in `base` and the base version in `base_version` (`(none)` for an empty base).
+- **Comments, extended.** A comment that vanilla writes in the place of a statement it removes takes the statement's place. A changed or inserted vanilla node brings the comment lines above it and the comment after it on its line, unless the mod changed that comment. A node that vanilla did not otherwise change takes vanilla's change to its comments, when the mod left them as the base had them. An insertion into a one-line block puts vanilla's comments on lines of their own.
+- **Layout.** The dry run runs pdx-format once on each merged `.txt` and `.gui` file whose mod text is in pdx-format layout already. It checks that the formatted text holds the same tokens and comments. A file that the mod keeps out of pdx-format keeps its own layout, and the report names it. A file that pdx-format refuses fails, and `--apply` refuses it.
+- **Empty lines.** The plan splices its edits so that a removal never leaves two empty lines in sequence.
+- **Nodes from a later vanilla version.** A copy's base is the version it matches best, but the mod can take a node from a later vanilla version. The merge reads vanilla's versions between the base and `--new`. A node that only ours has, and that one of these versions held as it is, is vanilla's text: vanilla's later change to it is a `vanilla_changed` or `vanilla_removed` decision.
+- **Blocks the mod moved.** The mod can move a vanilla block, as it is, into a block of its own. After the pass, the merge finds such copies. When vanilla no longer holds the text, the copy takes vanilla's change or goes, and the original's place gets no second copy. A new vanilla block that holds such a moved block is an open decision, because taking it would write the moved block two times.
+- **Overlaps.** Two edits that overlap fail the removed-line check. A copy that the plan cannot splice, and a new definition whose place falls inside a merged node, are open decisions.
+- **Generated files.** The override, files and GUI audits report a generated file as one finding per file when vanilla changed its source in the window. The merge lists it to regenerate. Detection reads the first line, or in a localization file the line after the language key (as the mod's `is_generated`), and names the tool from `pdx-maint.toml`. A file that a tool lists in its `manifest:` output file is that tool's output too.
+
+### 15.1 Open questions
+
+The whole-mod reconciliation of 2026-10-01 (SUL, 1.3.11 to 1.4.0-beta) left these questions for the user:
+
+1. A copy's base is its baseline, which can be older than `--old`. So the merge takes vanilla changes older than `--old`. Must it take them, or keep the mod's value unless a rule says otherwise?
+2. Vanilla 1.4 rebuilt location_card and BuildingType_tooltip into new blocks. The merge takes vanilla's new blocks and leaves the mod's changed nodes as open decisions. Must the mod's changes move into vanilla's new blocks?
+3. Some rules derive the mod's value from vanilla's value (the food cancels). Must a disposition support this, in addition to `keep_mod`?

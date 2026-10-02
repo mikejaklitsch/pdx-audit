@@ -99,6 +99,14 @@ The merge reads three texts of each copy: vanilla at the copy's baseline (not la
 
 Each base node is decided alone: vanilla's change is taken where your node is the base's, your node stays where vanilla did not change it, and a block that both changed is merged inside. Where both changed one statement, the intent store decides, or the node is an open decision. A node that only vanilla has goes after the counterpart of its nearest earlier sibling, with the comment lines above it. The merge writes into your text at the offsets of the nodes, so your layout, your order and your comments stay.
 
+Vanilla's comments go with the nodes they describe. A changed or inserted vanilla node brings the comment lines above it and the comment after it on its line, unless you changed that comment. A comment that vanilla writes in the place of a removed statement takes the statement's place.
+
+A node of your copy can be vanilla's text from a version later than the base, or a vanilla block that you moved, as it is, into a block of your own. The merge reads vanilla's versions between the base and `--new` to find such nodes, and vanilla's later change to them is a decision. A new vanilla block that holds a block you moved is open, so the moved block is never written two times.
+
+In a same-path script file, the merge also adds the top-level definitions that vanilla added after `--old`. Each one passes through the intent store: a rule matches it by the change kind `vanilla_added` and the path pattern `[""]`. Text that vanilla did not hold at `--old` has an empty base. A key that both sides added in different forms is a `both_added` decision.
+
+The plan holds the merged text after one pdx-format pass, when your file is in pdx-format layout already. Each decision holds the base, your text and vanilla's text, and the base version.
+
 ## The version window
 
 | Invocation | Versions for copies | Window for the other audits |

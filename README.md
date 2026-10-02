@@ -123,7 +123,9 @@ pdx-audit merge --old 1.3.11 --new 1.4.0 --apply <plan.json>
 
 The merge takes the changes of vanilla into your REPLACE blocks, your same-path files and your GUI copies, node by node, and keeps your own edits. The intent store decides where both changed: a rule or an entry with `keep_mod` keeps yours, `take_vanilla` takes vanilla's. Each other conflict is an open decision, with the commit that wrote your line. For an INJECT, a key that you inject and that vanilla changed is a decision.
 
-The dry run writes nothing in the mod. It prints the full diff and the decisions, checks that every line it removes is explained by a change of vanilla, and saves a plan. `--apply` writes the plan: it refuses a file that changed after the dry run, a file whose removed-line check failed, a file with an open decision, and a file that a stale entry decided. A file that a tool generates is never merged: the report names the tool to run. Run pdx-format on the files that `--apply` wrote.
+The dry run writes nothing in the mod. It prints the full diff and the decisions, checks that every line it removes is explained by a change of vanilla, and saves a plan. `--apply` writes the plan: it refuses a file that changed after the dry run, a file whose removed-line check failed, a file with an open decision, and a file that a stale entry decided. A file that a tool generates is never merged: the report names the tool to run. The dry run gives each merged file the layout of pdx-format, so the files that `--apply` writes need no format pass. A file that you keep out of pdx-format keeps its own layout.
+
+The merge also adds the top-level definitions that vanilla added to your same-path files. The intent store decides each one: `take_vanilla` puts it in, `keep_mod` keeps it out, and a rule with no disposition makes it open. With no rule it goes in, unless a pdx-maint system owns the file. Text that vanilla added after `--old` merges with an empty base. Text that vanilla removed is a `vanilla_removed` decision. A file that the merge cannot compare node by node (too large, not script, no vanilla history) is listed with the reason.
 
 ## From a clone
 
