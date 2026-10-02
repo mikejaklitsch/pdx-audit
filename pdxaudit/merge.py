@@ -306,7 +306,7 @@ class _Merge:
     def __init__(self, base, ours, theirs, dialect, unwrap, decide, ours_offset=0):
         self.b_text, self.o_text, self.t_text = base, ours, theirs
         self.dialect, self.unwrap, self.decide = dialect, unwrap, decide
-        self.ops, self.decisions = [], []
+        self.ops, self.decisions, self.overlaps = [], [], []
 
     def view(self, text):
         top = diff3.nodes(text)
@@ -589,7 +589,7 @@ class _Merge:
 
     # --- output -----------------------------------------------------------------
     def apply(self):
-        ops = _splice_ops(self.ops)
+        ops = _splice_ops(self.ops, self.overlaps)
         ops = sorted(self.expand_one_line_blocks(ops), key=lambda op: (op.start, op.end))
         out, pos = [], 0
         for op in ops:
@@ -631,11 +631,15 @@ class _Merge:
         return out
 
 
-def _splice_ops(ops):
-    """`ops` in order, less each op that overlaps an earlier one."""
+def _splice_ops(ops, dropped=None):
+    """`ops` in order, less each op that overlaps an earlier one; `dropped` receives
+    those. A dropped op fails the removed-line check (merge_texts), so a file whose
+    edits collide is never written."""
     clean, pos = [], 0
     for op in sorted(ops, key=lambda op: (op.start, op.end)):
-        if op.start < pos:                           # overlapping ops: keep the first
+        if op.start < pos:
+            if dropped is not None:
+                dropped.append(op)
             continue
         clean.append(op)
         pos = op.end
@@ -802,7 +806,9 @@ def merge_texts(base, ours, theirs, dialect=diff3.SCRIPT, unwrap=False, decide=N
     m = _Merge(base, ours, theirs, dialect, unwrap, decide)
     text, ops = m.run()
     res = Result(text, ops, m.decisions)
-    res.unexplained = removed_lines(ours, text, ops)
+    res.unexplained = removed_lines(ours, text, ops) + [
+        (ours.count("\n", 0, op.start) + 1, f"an edit ({op.why}) overlaps another edit and was not made")
+        for op in m.overlaps]
     return res
 
 

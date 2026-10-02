@@ -175,7 +175,14 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
     from .tracker import tag_of
     reg = registry(mod_root)
     gen = {}
-    copies, devs = intent.collect(mod_root, base, commits, new_hash, new_msg, {file} if file else None, gen)
+    from .gui import version_window
+    order = [tag_of(m) for _h, m in version_window(commits, new_hash)]
+    if old_tag not in order[:-1]:
+        raise ValueError(f"--old {old_tag} is not a tracked version before the new one "
+                         f"({', '.join(order[:-1])})")
+    findings = []
+    copies, devs = intent.collect(mod_root, base, commits, new_hash, new_msg, {file} if file else None, gen,
+                                  findings)
     states = intent.entry_states(it, copies, devs)
     by_file = defaultdict(list)
     regenerate, skipped = dict(gen), []
@@ -203,11 +210,12 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
         if base_text == theirs:
             continue
         by_file[c.file].append((c, base_tag, base_text, theirs))
-    _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, by_file, regenerate)
+    _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, by_file, regenerate, skipped)
     added = _new_definitions(mod_root, base, commits, new_hash, old_tag, file, block, reg, regenerate, it,
                              states, skipped)
+    whole = _whole_copies(mod_root, findings, order, old_tag, file, block, it, states, reg, skipped)
     files = []
-    for rel in sorted(set(by_file) | set(added)):
+    for rel in sorted(set(by_file) | set(added) | set(whole)):
         items = by_file.get(rel, [])
         path = Path(mod_root) / rel
         text, bom, crlf = read_mod_file(path)
@@ -215,7 +223,8 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
         for c, base_tag, base_text, theirs in items:
             start = _locate(text, c)
             if start is None:
-                skipped.append((rel, f"the copy {c.name} at line {c.line} does not read as the audit read it"))
+                _not_merged(rel, c, base_tag, f"the copy {c.name} at line {c.line} does not read as the audit "
+                            "read it", skipped, decisions)
                 continue
             tpl = _Template(c, mod_root, reg)
             if c.audit == "inject":
@@ -226,7 +235,8 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
             # An op must not touch a character that the copy holds blank for another
             # definition. Such an op would overwrite that definition.
             if any(text[start + op.start:start + op.end] != c.mod_text[op.start:op.end] for op in res.ops):
-                skipped.append((rel, f"the merge of {c.name} at line {c.line} touches another definition"))
+                _not_merged(rel, c, base_tag, f"the merge of {c.name} at line {c.line} touches another "
+                            "definition", skipped, decisions)
                 continue
             stale |= tpl.stale
             first_line = text.count("\n", 0, start)
@@ -242,16 +252,32 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
         stale |= new_stale
         for pos, ins, label in inserts:
             if any(s < pos < e for s, e, _t in edits):
-                skipped.append((rel, f"the new definition {label} falls inside a merged node"))
+                for d in new_decisions:
+                    if d.path[0]["key"] == label and d.action == merge.TAKE:
+                        d.action = merge.OPEN
+                        d.reason += "; its place falls inside a merged node, so put it in by hand"
                 continue
             edits.append((pos, pos, ins))
         decisions += [(d, d.path[0]["key"], old_tag) for d in new_decisions]
+        w_edits, w_decisions, w_stale = whole.get(rel, ([], [], set()))
+        for s_, e_, new_ in w_edits:
+            if any(s_ < e and s < e_ for s, e, _t in edits):
+                skipped.append((rel, "a deletion of a whole block that vanilla removed overlaps a merged node"))
+                continue
+            edits.append((s_, e_, new_))
+        decisions += [(d, d.path[0]["key"], old_tag) for d in w_decisions]
+        stale |= w_stale
         wanted = {d.line for d, _n, _b in decisions if d.action == merge.OPEN and d.line}
         blamed = proposer.blame(mod_root, rel, wanted) if wanted else {}
         decisions = [dict(d.to_json(), copy=name, base_version=btag,
                           **({"commit": (blamed.get(d.line) or (None,))[0]} if d.line in blamed else {}))
                      for d, name, btag in decisions]
-        merged, _spans = merge.splice(text, edits)
+        edits.sort(key=lambda x: (x[0], x[1]))
+        for (s1, e1, _t1), (s2, e2, _t2) in zip(edits, edits[1:]):
+            if s2 < e1:                  # two copies' edits overlap: the file fails
+                unexplained.append((text.count("\n", 0, s2) + 1, "two edits of the merge overlap here"))
+        merged, _spans = merge.splice(text, [x for k, x in enumerate(edits)
+                                             if not any(x[0] < y[1] for y in edits[:k])])
         files.append({"file": rel, "before_sha": _sha(text), "merged": merged, "bom": bom, "crlf": crlf,
                       "ours": text, "decisions": decisions,
                       "open": sum(1 for d in decisions if d["action"] == merge.OPEN),
@@ -343,6 +369,14 @@ def lay_out(files):
             f["format"] = {"applied": True}
 
 
+def _not_merged(rel, c, base_tag, why, skipped, decisions):
+    """A copy the plan cannot splice into its file: listed in `skipped`, and an open
+    decision, so --apply does not write the file without the copy's changes."""
+    skipped.append((rel, why))
+    decisions.append((merge.Decision([{"key": c.name}], "not_merged", merge.OPEN, reason=why, line=c.line),
+                      c.name, base_tag))
+
+
 def _distinct_skips(skipped):
     """[{file, why, copies}]: one row per file and reason, with the number of copies."""
     rows = {}
@@ -350,6 +384,108 @@ def _distinct_skips(skipped):
         rows.setdefault((f, w), 0)
         rows[(f, w)] += 1
     return [{"file": f, "why": w, "copies": n} for (f, w), n in rows.items()]
+
+
+# Audit findings for a copy that vanilla removed after --old as a whole: the copy
+# type, and True when the copy is a whole file.
+WHOLE_REMOVED = {"override_orphaned": ("replace", False), "gui_van_removed": ("gui_def", False),
+                 "file_def_removed": ("file", False), "file_review": ("file", True),
+                 "gui_file_review": ("gui_file", True)}
+
+
+def _whole_copies(mod_root, findings, order, old_tag, file, block, it, states, reg, skipped):
+    """{mod path: (edits, decisions, stale entries)} for the cases the copy audits
+    report as findings and not as copies, when vanilla made them after --old:
+
+      vanilla removed the block of a REPLACE, a shadowed GUI template or type, or a
+      definition or a whole file at the mod's path: a vanilla_removed decision. The
+      intent store decides it; with no rule it is open, because the mod's copy now
+      defines the text alone. take_vanilla deletes the block from the mod file; a
+      whole file stays open, as --apply never deletes a file.
+
+    A text the merge cannot compare node by node goes to `skipped` with the reason:
+    a definition too large to compare statement by statement, a text that is not
+    script, a REPLACE the audit could not read, a file with no vanilla history."""
+    from .overrides import find_overrides
+    after = set(order[order.index(old_tag) + 1:])
+    out = {}
+    for f in findings:
+        rel, _sep, line = f.location.rpartition(":")
+        if not line.isdigit():
+            rel, line = f.location, "0"
+        if file and rel != file:
+            continue
+        if block and f.name != block:
+            continue
+        target = (f.key or {}).get("target", "")
+        if f.kind == "file_untracked":
+            skipped.append((rel, f"the tracker holds no version of this file ({f.detail}); compare it with "
+                                 "vanilla by hand"))
+            continue
+        if f.kind == "override_unreadable":
+            skipped.append((rel, f"the audit could not read the REPLACE of {f.name} at line {line}"))
+            continue
+        if f.since not in after:
+            continue                      # vanilla made this change at or before --old
+        if f.kind == "file_bulk_changed":
+            skipped.append((rel, f"{f.name} is too large to merge statement by statement; {f.detail} "
+                                 f"after {f.base}; take them by hand"))
+            continue
+        if f.kind.startswith("file_") and f.kind.endswith("_mid") and "#" not in target:
+            skipped.append((rel, "the file is not script; vanilla changed lines in it (see the file audit); "
+                                 "take them by hand"))
+            continue
+        if f.kind not in WHOLE_REMOVED or (f.kind.endswith("file_review") and (f.key or {}).get("change") != "removed"):
+            continue
+        copy, whole_file = WHOLE_REMOVED[f.kind]
+        if f.kind == "override_orphaned" and any(
+                "INJECT" in o["type"] for o in find_overrides(mod_root)
+                if o["file"] == rel and o["line"] == int(line) and o["block"] == f.name):
+            copy = "inject"
+        content = rel.rsplit("/", 1)[0] if copy in ("file", "gui_file") else target.split(":", 1)[-1].rsplit("/", 1)[0]
+        identity = f"{content}/{f.name}" if copy != "gui_def" else target
+        removed_copy(mod_root, out, rel, f.name, int(line), copy, identity, content, f.since, whole_file,
+                     it, states, reg)
+    return out
+
+
+def removed_copy(mod_root, out, rel, name, line, copy, identity, content, since, whole_file, it, states, reg):
+    """Add to `out` the vanilla_removed decision for a copy whose vanilla text is gone
+    (see _whole_copies), and the edit that deletes it when the store says
+    take_vanilla."""
+    dev = intent.Deviation(
+        copy=copy, identity=identity, block=name, content=content, file=rel, vanilla_file=None, line=line,
+        change="vanilla_removed", priority=diff3.MID, path=[], keys=(), systems=reg.systems_of(rel))
+    rec = out.setdefault(rel, ([], [], set()))
+    if intent.attribute(dev, it) is None:
+        action, by = merge.OPEN, None
+    else:
+        action, by = _apply_intent(dev, it, states, "conflict", rec[2])
+    what = "the file" if whole_file else f"the block {name}"
+    why = f"vanilla removed {what} in {since}"
+    edit = None
+    if whole_file:
+        why += "; --apply does not delete a file: delete it by hand, or keep it"
+        if action == merge.TAKE:
+            action = merge.OPEN
+    elif action == merge.TAKE:
+        edit = _block_at(read_mod_file(Path(mod_root) / rel)[0], line)
+        if edit is None:
+            action, why = merge.OPEN, why + "; the block is not a single top-level block at its line"
+    rec[1].append(merge.Decision([{"key": name}], "vanilla_removed", action, by, reason=why,
+                                 line=line or None))
+    if edit is not None:
+        rec[0].append(edit)
+
+
+def _block_at(text, line):
+    """(start, end, "") that deletes the one top-level block that starts on `line` of
+    `text`, with the comment lines above it, or None."""
+    hits = [n for n in diff3.nodes(text) if text.count("\n", 0, n.start) + 1 == line]
+    if len(hits) != 1 or hits[0].kind != "block":
+        return None
+    s, e = merge._delete_span(text, hits[0])
+    return s, e, ""
 
 
 def untracked_reason(rel, old_tag):
@@ -363,8 +499,9 @@ def untracked_reason(rel, old_tag):
             "compare it with vanilla by hand")
 
 
-def _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, by_file, regenerate):
-    """Add each INJECT whose target block vanilla changed between --old and --new."""
+def _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, by_file, regenerate, skipped):
+    """Add each INJECT whose target block vanilla changed between --old and --new to
+    `by_file`."""
     from .changes import Copy
     from .gui import version_window
     from .overrides import block_history, extract_mod_block, find_overrides
@@ -375,9 +512,7 @@ def _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, b
         return
     window = version_window(commits, new_hash)
     tags = [tag_of(m) for _h, m in window]
-    if old_tag not in tags:
-        return
-    old_i = tags.index(old_tag)
+    old_i = tags.index(old_tag)                      # plan() checked --old
     hist = block_history(base, [window[old_i], window[-1]], sorted({o["category"] for o in injects}),
                          {(o["category"], o["block"]) for o in injects})
     for ov in injects:
@@ -386,10 +521,13 @@ def _add_injects(mod_root, base, commits, new_hash, old_tag, file, block, reg, b
             regenerate[ov["file"]] = tool
             continue
         old_text, new_text = hist.get((ov["category"], ov["block"]), [None, None])
-        if new_text is None or old_text == new_text:
-            continue
+        if old_text == new_text:
+            continue                     # vanilla did not change the target after --old
+        if new_text is None:
+            continue    # vanilla removed the target: the override audit's override_orphaned (_whole_copies)
         text = extract_mod_block(mod_root, ov)
         if text is None:
+            skipped.append((ov["file"], f"the INJECT of {ov['block']} at line {ov['line']} could not be read"))
             continue
         c = Copy("inject", ov["block"], f"inject:{ov['category']}/{ov['block']}", text,
                  [old_text, new_text], [tags[old_i], tags[-1]], ov["file"], ov["line"], True,
@@ -584,7 +722,11 @@ def _main(args):
     if args.apply:
         return _apply(mod_root, args.apply)
     base, commits, new_hash, new_msg = _vanilla(mod_root, args)
-    p = plan(mod_root, base, commits, args.old, new_hash, new_msg, it, args.file, args.block)
+    try:
+        p = plan(mod_root, base, commits, args.old, new_hash, new_msg, it, args.file, args.block)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
     out = Path(args.plan_out) if args.plan_out else (
         store.dir / "merge-plans" / f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -620,7 +762,7 @@ def _apply(mod_root, plan_path):
             why.append("it uses stale entries")
         if f.get("format", {}).get("failed"):
             why.append("pdx-format refused the merged text")
-        if f["merged"] == text:
+        if f["merged"] == text and not why:
             continue
         if why:
             refused.append((f["file"], why))

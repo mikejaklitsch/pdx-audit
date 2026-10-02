@@ -298,3 +298,54 @@ def test_apply_refuses_a_file_that_pdx_format_refused(tmp_path, monkeypatch, cap
     assert p["files"][0]["format"]["failed"]
     assert main(common + ["--apply", str(plan)]) == 1
     assert "pdx-format refused the merged text" in capsys.readouterr().err
+
+
+def test_an_old_version_that_is_not_tracked_is_an_error(tmp_path, monkeypatch, capsys):
+    mod, common = _setup(tmp_path, monkeypatch)
+    common[common.index("--old") + 1] = "0.9"
+    assert main(common + ["--dry-run", "--plan-out", str(tmp_path / "p.json")]) == 2
+    assert "--old 0.9 is not a tracked version" in capsys.readouterr().err
+
+
+def test_copies_whose_vanilla_text_is_gone_are_decisions(tmp_path, monkeypatch):
+    """Vanilla removes, after --old, the block of a REPLACE, the target of an INJECT,
+    and a whole same-path file. Each is a vanilla_removed decision: open with no rule;
+    a take_vanilla rule deletes the INJECT block; a whole file stays open, because
+    --apply never deletes a file. A REPLACE whose block vanilla removed before --old
+    is not a change of this window."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    laws = "in_game/common/laws/l.txt"
+    gone_file = "in_game/common/x/gone.txt"
+    v0 = {laws: "ancient = {\n\tx = 1\n}\nlaw_a = {\n\tx = 1\n}\nlaw_b = {\n\tx = 1\n}\n", gone_file: _block("G")}
+    v1 = {laws: "law_a = {\n\tx = 1\n}\nlaw_b = {\n\tx = 1\n}\n", gone_file: _block("G")}
+    v2 = {laws: "law_c = {\n\tx = 1\n}\n", DEFS: _block("Z")}
+    tr = build_tracker(tmp_path, [("0.9", v0), ("1.0", v1), ("1.1", v2)])
+    mod = tmp_path / "mod"
+    fe = "in_game/common/laws/fe.txt"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}',
+                      fe: "REPLACE:law_a = {\n\tx = 5\n}\n\nINJECT:law_b = {\n\ty = 1\n}\n\n"
+                          "REPLACE:ancient = {\n\tx = 2\n}\n",
+                      gone_file: _block("G", 3)})
+    _rules(tmp_path, mod, [{"id": "laws.drop_dead_injects", "system": "laws", "disposition": "take_vanilla",
+                            "reason": "Test: an INJECT into a removed law goes.", "source": {"kind": "user"},
+                            "match": {"audit": ["inject"], "change": ["vanilla_removed"]}}])
+    p = _plan(tmp_path, mod, tr)
+    files = {f["file"]: f for f in p["files"]}
+    got = sorted((f, d["path"][0]["key"], d["kind"], d["action"]) for f, x in files.items()
+                 for d in x["decisions"])
+    assert got == [(fe, "law_a", "vanilla_removed", "open"), (fe, "law_b", "vanilla_removed", "take"),
+                   (gone_file, gone_file, "vanilla_removed", "open")]
+    assert files[fe]["merged"] == "REPLACE:law_a = {\n\tx = 5\n}\n\nREPLACE:ancient = {\n\tx = 2\n}\n"
+    assert "does not delete a file" in files[gone_file]["decisions"][0]["reason"]
+
+
+def test_text_the_merge_cannot_compare_node_by_node_is_listed(tmp_path, monkeypatch):
+    """A .csv file is not script: vanilla's change to it is listed with the reason,
+    never dropped without a word."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    csv = "in_game/map_data/ports.csv"
+    tr = build_tracker(tmp_path, [("1.0", {csv: "a;1\nb;2\nc;3\n"}), ("1.1", {csv: "a;1\nb;5\nc;3\n"})])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}', csv: "a;9\nb;2\nc;3\n"})
+    p = _plan(tmp_path, mod, tr)
+    assert [(s["file"], "not script" in s["why"]) for s in p["skipped"]] == [(csv, True)]

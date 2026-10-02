@@ -290,3 +290,12 @@ def test_a_removal_leaves_no_two_empty_lines():
     assert splice("a\n\n\nb\nc\n", [(6, 7, "C")])[0] == "a\n\n\nb\nC\n"
     # Empty lines an edit leaves at the end become one line end.
     assert splice("a\nb\n", [(2, 3, "\n\n\n")])[0] == "a\n"
+
+
+def test_overlapping_edits_fail_the_check():
+    """Two edits that cover one place cannot both be made. The merge makes the first
+    and reports the second, so the removed-line check fails and --apply refuses."""
+    from pdxaudit.merge import _splice_ops
+    a, b, c = Op(0, 5, "x", "one"), Op(3, 8, "y", "two"), Op(8, 8, "z", "three", removes=False)
+    dropped = []
+    assert _splice_ops([b, a, c], dropped) == [a, c] and dropped == [b]

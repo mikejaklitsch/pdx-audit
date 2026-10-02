@@ -458,12 +458,14 @@ def inject_deviations(mod_root, base, window, overrides, reg=None):
     return out
 
 
-def collect(mod_root, base, commits, new_hash, new_msg, only=None, generated=None):
+def collect(mod_root, base, commits, new_hash, new_msg, only=None, generated=None, findings=None):
     """(copies, deviations) of the whole mod against vanilla at `new_hash`, measured
     across every tracked version up to it. The copy audits run with their output
     discarded. `only`: a set of mod paths; the other files are not read. `generated`
     ({}): receives {mod path: tool id} for the generated files whose vanilla source
-    changed; the audits skip their copies."""
+    changed; the audits skip their copies. `findings` ([]): receives the findings of
+    the three copy audits, for the cases that are not a copy (a block or file that
+    vanilla removed, a text too large or not script)."""
     from .files import run_file_audit
     from .gui import run_gui_audit, version_window
     from .overrides import find_overrides, run_override_audit
@@ -477,9 +479,11 @@ def collect(mod_root, base, commits, new_hash, new_msg, only=None, generated=Non
     path = _cache_path(base, new_hash)
     cache = _read_cache(path)
     with changes.collect(cache) as copies, redirect_stdout(io.StringIO()):
-        run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx)
-        run_gui_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx)
-        run_file_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx)
+        found = (run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx) or [])
+        found += run_gui_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx) or []
+        found += run_file_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ctx) or []
+    if findings is not None:
+        findings += found
     devs, fresh = [], {}
     for c in copies:
         found = deviations_of(c, mod_root)
