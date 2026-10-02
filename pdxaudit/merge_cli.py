@@ -251,10 +251,7 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
         decisions = [dict(d.to_json(), copy=name, base_version=btag,
                           **({"commit": (blamed.get(d.line) or (None,))[0]} if d.line in blamed else {}))
                      for d, name, btag in decisions]
-        merged = text
-        # Apply from the end of the file. Two insertions at one offset keep their order.
-        for _k, (s, e, new) in sorted(enumerate(edits), key=lambda x: (x[1][0], x[1][1], x[0]), reverse=True):
-            merged = merged[:s] + new + merged[e:]
+        merged, _spans = merge.splice(text, edits)
         files.append({"file": rel, "before_sha": _sha(text), "merged": merged, "bom": bom, "crlf": crlf,
                       "diff": merge.unified(rel, text, merged), "decisions": decisions,
                       "open": sum(1 for d in decisions if d["action"] == merge.OPEN),

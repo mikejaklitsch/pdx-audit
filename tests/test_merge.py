@@ -274,3 +274,19 @@ def test_comments_go_with_a_changed_or_inserted_vanilla_node():
     assert r.text == ("a = {\n\t# about x, changed\n\tx = 2 # new\n\ty = 2 # my note\n\t# keep me\n"
                       "\t# why w\n\tw = 1 # w note\n\tm = 1\n}\n")
     assert r.check_passed
+
+
+def test_a_removal_leaves_no_two_empty_lines():
+    """A line that holds only white space above a removed node is an empty line too.
+    1.4 location_window.gui and map_markers.gui showed the case."""
+    from pdxaudit.merge import splice
+    base = "a = {\n\tx = 1\n\n\ty = 1\n\n\tz = 1\n}\n"
+    ours = "a = {\n\tx = 1\n\t\t\n\ty = 1\n\n\tz = 1\n}\n"
+    theirs = "a = {\n\tx = 1\n\n\tz = 1\n}\n"
+    r = merge_texts(base, ours, theirs, unwrap=True)
+    merged, _spans = splice(ours, [(op.start, op.end, op.text) for op in r.ops])
+    assert merged == "a = {\n\tx = 1\n\n\tz = 1\n}\n"
+    # A run of empty lines that no edit touches stays as the mod wrote it.
+    assert splice("a\n\n\nb\nc\n", [(6, 7, "C")])[0] == "a\n\n\nb\nC\n"
+    # Empty lines an edit leaves at the end become one line end.
+    assert splice("a\nb\n", [(2, 3, "\n\n\n")])[0] == "a\n"

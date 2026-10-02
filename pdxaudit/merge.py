@@ -694,6 +694,55 @@ def _expand(text, indent):
     return new if new is not None and "".join(new.split()) == "".join(text.split()) else None
 
 
+def splice(text, edits):
+    """(new text, spans) for `text` with each (start, end, new text) edit applied.
+    Edits do not overlap; two insertions at one offset keep their order. spans: the
+    (start, end) of each edit's text in the new text. Then each run of two or more
+    lines that hold only white space at an edit is made one empty line, so a removal
+    never leaves two empty lines."""
+    order = sorted(range(len(edits)), key=lambda k: (edits[k][0], edits[k][1], k))
+    out, spans, pos, size = [], [], 0, 0
+    for k in order:
+        s, e, new = edits[k]
+        out.append(text[pos:s])
+        size += s - pos
+        out.append(new)
+        spans.append((size, size + len(new)))
+        size += len(new)
+        pos = e
+    out.append(text[pos:])
+    return _squeeze_blank_runs("".join(out), spans), spans
+
+
+def _squeeze_blank_runs(text, spans):
+    lines = text.split("\n")
+    starts, at = [], 0
+    for line in lines:
+        starts.append(at)
+        at += len(line) + 1
+    touched = set()
+    for a, z in spans:
+        touched.update(range(text.count("\n", 0, a) - 1, text.count("\n", 0, z) + 2))
+    keep, k = [], 0
+    while k < len(lines):
+        if lines[k].strip():
+            keep.append(lines[k])
+            k += 1
+            continue
+        j = k
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        run = lines[k:j]
+        if j - k < 2 or not touched & set(range(k, j)) or k == 0:
+            keep.extend(run)                     # untouched, or the file's first lines
+        elif j == len(lines):
+            keep.append("")                      # the text ends with one line end
+        else:
+            keep.append("")
+        k = j
+    return "\n".join(keep)
+
+
 def removed_lines(ours, merged, ops):
     """Lines of ours that the merged text lacks and that no removing op covers."""
     covered = set()
