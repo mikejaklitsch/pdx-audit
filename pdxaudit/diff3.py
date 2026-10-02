@@ -92,6 +92,15 @@ MOD_KINDS = ("mod_changed", "mod_added", "mod_removed")
 
 _NUMBER = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)")
 
+# The logic keywords that pdx-format writes in upper case. Vanilla writes `not` and
+# `NOT` alike, so a key compares in upper case.
+KEYWORDS_UPPER = frozenset({"OR", "NOR", "NAND", "NOT", "AND"})
+
+
+def norm_key(key):
+    """Canonical spelling for a key: a logic keyword in upper case."""
+    return key.upper() if key.upper() in KEYWORDS_UPPER else key
+
 
 def norm_value(v):
     """Canonical spelling for a value: numbers lose insignificant zeros."""
@@ -180,7 +189,7 @@ def _build(parsed):
             out.append(Node("raw", text.split(" ", 1)[0], text, None, n["_start"], n["_end"]))
             continue
         op, val, val_key = n.get("op"), n["val"], n.get("val_key")
-        key = " ".join(filter(None, (n["key"], n.get("mid_key"),
+        key = " ".join(filter(None, (norm_key(n["key"]) if n["key"] else n["key"], n.get("mid_key"),
                                      val_key if op is None else None))) or "{}"
         if isinstance(val, list):
             children = _build(val)

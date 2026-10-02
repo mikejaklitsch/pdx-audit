@@ -81,6 +81,16 @@ pdx-audit keeps the record in the data folder of the user, with one file for eac
 
 A finding stays in the report until you correct it or dismiss it, also after later commits move the window past its patch.
 
+## The intent store
+
+A **deviation** is one difference between a copy and the current text of vanilla: one change of the table above, of any kind, your own edits included, or one child that an INJECT sets. The store explains deviations with rules and entries.
+
+Each deviation has an **address**. The address names the copy by vanilla identity: the content folder and the block name for script (`in_game/common/laws/law_a`), the template or type for GUI, or the path for a same-path GUI file. It never names the mod file, so a block that you move to another file keeps its address. Inside the copy, the address names each node by the fields the alignment pairs siblings by: the key, the `name`, the selector (`limit`, `trigger` or `id`, by a hash of its text), a distinctive quoted value, and a position among siblings that share all of these. So two `if` blocks with different limits have different addresses.
+
+An entry records the hash of its node on both sides when you confirm it. On each run the entry is **recorded** when both hashes are the same, **stale** when vanilla or your node changed, and **lost** when the node is gone. Only a recorded entry explains a deviation. An entry wins over a rule. Two rules with different dispositions on one deviation explain nothing, and the conflict is reported.
+
+A file that a tool generates (an `AUTO-GENERATED` header, or an output of a tool in `pdx-maint.toml`) is never proposed or merged. Its tool reads vanilla again: `pdx-maint run <id>` regenerates it.
+
 ## The version window
 
 | Invocation | Versions for copies | Window for the other audits |

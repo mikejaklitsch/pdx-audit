@@ -84,6 +84,27 @@ pdx-audit --undismiss cc01a5e3
 
 `pdx-audit --set` writes the settings that the Settings page writes: `vanilla_repo`, `game_root` and `patch_name`. Edit `skip_dirs`, `skip_files`, `merge_types` and `engine_data` in the config file. `engine_data` is the path of the pdx-syntax database (`eu5_syntax.db`); the dependency audit reads it to confirm or drop its data-binding findings. `pdx-audit --config` shows each setting, where it comes from, and where the file is.
 
+## Record why the mod differs
+
+A dismissal hides one finding. The intent store explains many differences at once, and a later merge applies it. pdx-audit keeps the store in your per-user record, beside the dismissals. It never writes it into the mod.
+
+- A **rule** belongs to a system of `pdx-maint.toml`. It has one reason, a source (a pdx-maint note, a commit, or you), a disposition, and a matcher that selects differences by key, value, path, comment, change and file. A rule without a disposition is a grouping: its differences always come to you.
+- An **entry** explains one difference, or one block with all that is in it.
+- A **disposition** is `keep_mod`, `take_vanilla`, `merge` or `banned`.
+
+```bash
+pdx-audit intent propose                     # candidates for the differences that nothing explains
+pdx-audit intent seed --dismissals --keep-file tools/port_merge_keep.txt --rules rules.json
+pdx-audit intent accept <proposal.json> --only c1,c4
+pdx-audit intent list [--state stale]
+pdx-audit intent add --finding cc01a5e3 --disposition keep_mod --system economy --reason "halved on purpose"
+pdx-audit intent add-rule rule.json
+pdx-audit intent confirm <entry id>          # take a stale entry as the node reads now
+pdx-audit intent remove <id>
+```
+
+A proposal is a JSON file in the per-user data folder. The proposer fills a reason only from a pdx-maint note, and gives the note id as the source. It shows commits and comments as evidence only. Write the reason, the system and the disposition of each candidate in the file, then accept it.
+
 ## From a clone
 
 Clone [pdx-utilities](https://github.com/mikejaklitsch/pdx-utilities) next to this repo: pdx-audit's shared helpers live there. Then run `./pdx-audit`, or install with `pipx install --editable .` followed by `pipx inject pdx-audit --editable ../pdx-utilities`, so edits to the shared helpers reach pdx-audit immediately. The tests run with `python -m pytest`.

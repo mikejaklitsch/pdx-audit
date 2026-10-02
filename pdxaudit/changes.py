@@ -13,11 +13,38 @@ collapsed, so a dismissal holds until any of it changes. Your own edits are info
 are shown nowhere but the counts."""
 import json
 from collections import namedtuple
+from contextlib import contextmanager
 
 from . import diff3, ledger
 from .report import Finding, diff_lines, value_pair
 
 FLAGGED = (diff3.HIGH, diff3.MID)
+
+# The copies an intent run reads (see `collect`). None outside such a run.
+_COPIES = None
+
+Copy = namedtuple("Copy", "audit name target mod_text versions tags file line unwrap dialect "
+                          "vanilla_file changes finding_ids")
+Copy.__doc__ = """One copy that audit() compared. changes: diff3's [Change], all kinds.
+finding_ids: {id(Change): the id of the finding the change belongs to}."""
+
+
+@contextmanager
+def collect():
+    """Within the block, audit() appends each copy it compares to the list it yields.
+    The file audit then also compares the copies that vanilla never changed, because
+    the intent store explains every difference, not only the ones vanilla made."""
+    global _COPIES
+    outer, _COPIES = _COPIES, []
+    try:
+        yield _COPIES
+    finally:
+        _COPIES = outer
+
+
+def collecting():
+    """True inside `collect`."""
+    return _COPIES is not None
 MARK = {diff3.HIGH: "stale", diff3.MID: "review"}
 
 Audited = namedtuple("Audited", "findings flagged base block texts")
@@ -181,6 +208,10 @@ def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
         with_data = {id(f): f._replace(data=block) for f in findings}
         finding_of = {k: with_data[id(f)] for k, f in finding_of.items()}
         findings = [with_data[id(f)] for f in findings]
+    if _COPIES is not None:
+        _COPIES.append(Copy(audit_name, name, target, mod_text, versions, tags, file, line, unwrap,
+                            dialect, vanilla_file, changes,
+                            {k: ledger.finding_id(f) for k, f in finding_of.items()}))
     return Audited(findings, [(c, finding_of[id(c)]) for c in flagged], base, block, texts)
 
 

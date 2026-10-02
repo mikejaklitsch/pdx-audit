@@ -494,7 +494,8 @@ def audit_level(rel, mine, theirs, vtags, prefix, depth, block, want, copies, ad
             if label != TOP_LEVEL and not block:
                 removed.append((rel, name, d.line, vtags[removed_at(label, labels)]))
             continue
-        if vdefs[-1].sig == d.sig or len({v.sig for v in vdefs if v is not None}) == 1:
+        if vdefs[-1].sig == d.sig or (len({v.sig for v in vdefs if v is not None}) == 1
+                                      and not changes.collecting()):
             counts["current"] += 1            # current, or vanilla never changed it
             continue
         vtexts = [None if v is None else v.body for v in vdefs]

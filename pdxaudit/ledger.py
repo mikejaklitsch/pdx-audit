@@ -24,7 +24,7 @@ NOT_DISMISSIBLE = frozenset({
 
 
 def empty_state():
-    return {"dismissed": {}, "open": {}}
+    return {"dismissed": {}, "open": {}, "intent": {}}
 
 
 def target_of(f):

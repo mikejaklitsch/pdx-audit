@@ -1,6 +1,6 @@
 # Intent Rules and Node Merge: Design
 
-Status: draft for review. This document describes phases 2 to 4. Nothing in it is built yet. Phase 0 (removed GUI names in the dependency audit) is built: see `pdxaudit/gui_names.py`.
+Status: approved on 2026-10-01 with the decisions of section 14, which replace the text above them where the two differ. Phase 0 (removed names in the dependency audit) is built: see `pdxaudit/gui_names.py`. Phases 2 to 4 are built in order.
 
 ## 1. The problem
 
@@ -293,7 +293,7 @@ Evidence per deviation:
 | Evidence | Source |
 |---|---|
 | system | the mod file of the copy against `[system.*].files` globs in `pdx-maint.toml` |
-| commit | `git blame -C -C -C --porcelain` on the mod file, cached per (path, mod HEAD), one run per file. `-C -C -C` follows lines that moved between files. |
+| commit | one `git blame -C -C --line-porcelain` call per mod file, with one `-L a,b` range for each run of deviation lines, run in a thread pool and kept for the run by the file's text. One `-C` follows lines that moved between files in one commit; `-C -C` adds copies from any file of the parent of the creating commit, which covers a block split out of another file. A third `-C` searches every file of every commit: on `/mnt/c` one such call took more than 1.5 minutes for one file, so the tools do not use it. |
 | comment | the comment lines directly above the node or the block in the mod |
 | note | `pdx-maint note search <block name>` and notes whose anchors name the file |
 | check | a mod lint check whose source names the key (a plain text search of `tools/lint/*.py`) |
@@ -363,7 +363,7 @@ The merge works on nodes, never on lines.
 
 ### 7.4 Decision list
 
-Each open decision gives: the address, the three texts, the change kind, the matched rules (if two disagree), and the mod commit that wrote the ours node. The commit comes from the cached `git blame -C -C -C` of section 6.1.
+Each open decision gives: the address, the three texts, the change kind, the matched rules (if two disagree), and the mod commit that wrote the ours node. The commit comes from the line-range `git blame -C -C` of section 6.1.
 
 ### 7.5 Removed-line check
 
@@ -510,17 +510,25 @@ Synthetic trackers (`conftest.build_tracker`) for each case:
 
 The largest risk is in phase 4: the re-indentation of inserted vanilla GUI text, and GUI files where `diff3.align` pairs positional children wrongly. The acceptance test measures both.
 
-## 14. Open questions
+## 14. Decisions (2026-10-01)
 
-Each needs a decision from the user. The tools must not infer them.
+These answers replace the open questions of the draft. Where they differ from a section above, they apply.
 
-1. The six example rules: confirm the reason, disposition and owning system of each. The `[FU]` rules and the `header_action_button_left` ban name no pdx-maint system yet. Which systems own them?
-2. `[FU]` marker lines: do the mod lines carry a comment that marks them, or must the matcher select them another way?
-3. `economy.fe_unique_pms`: does the rule cover every building type, or only the buildings that have an `fe_` production method file?
-4. A stale entry: must `--apply` refuse it (this design), or apply it with a warning?
-5. The proposer: may it prefill `reason` from a pdx-maint note that the user wrote, or must the user always type the reason?
-6. Store scope: per mod commit with branch semantics (this design), or one store per mod for all branches?
-7. Rename candidates: report them in the dependency audit (HOW_IT_WORKS says now that it does not guess renames), and with which threshold?
-8. The transform adapter `tools/intent_transforms.py`: may pdx-audit import mod code, or must it call the adapter as a subprocess?
-9. `run_deps_audit` in `pdxaudit/overrides.py` reads only the GUI modules where the mod has `.gui` files. So it reports the font templates (`Font_Size_*`, `Font_Type_*`) as dropped in 1.2.0: the Pre-patch version also defined them in `main_menu/gui/preload/fonts.gui`. The fix moves its template and block check into `gui_names.py`, which reads every module. That needs an edit of `overrides.py`, which holds an uncommitted change of another session now.
-10. Data-binding findings: the 1.4 engine dump in pdx-syntax confirms 17 of the 20 names from the pre-port mod as removed, and shows `GetGlobalVariable`, `EconomyView.GetEstimatedBalance` and a `Start` function as present. May pdx-audit read an engine dump when the user configures one, to confirm or drop these findings?
+1. **Rules.** The approved rules are: food cancels; `fe_` unique production methods (every building type); specialized rank flags; climate classes. There is no `header_action_button_left` ban: the removed-name check of the dependency audit covers every removed name. A system `faster_universalis` groups all `[FU]` lines. Its rule has no disposition: such nodes always go to the user, and the merge never applies them.
+2. **[FU] lines** end in a `# [FU]` comment. The rule matches on the comment.
+3. Done in 1.
+4. `--apply` refuses a stale entry.
+5. The proposer may fill a reason from a pdx-maint note, with the note id as the source. It never fills a reason from a commit message or a code comment. The user is the source of intent.
+6. The store is per mod commit, with branch semantics.
+7. Rename candidates are review findings only. No tool applies them.
+8. **No transform matcher.** A rule has a `tool` field: the pdx-maint registry id of the tool that maintains it. A node that a tool produces (an `AUTO-GENERATED` file, a composer output) is never merged; the report says "regenerate with `pdx-maint run <id>`". pdx-audit never imports mod code. It may call another tool only through the tool's registered command, only in dry-run mode, and only for a tool with a stable job (the composer's rewrites). Otherwise it only names the tool. Section 4.2 is replaced by this.
+9. The uncommitted change of `overrides.py` is committed on its own. The template and block check moved from `run_deps_audit` into `gui_names.py`.
+10. The dependency audit reads the pdx-syntax database (config key `engine_data`) to drop or confirm binding findings.
+
+General rule: every pdx-audit action that changes mod files has a dry run that shows the full diff, and `--apply` refuses when the removed-line check of the dry run fails. A tool update never changes mod files without a reviewed dry run.
+
+Changes that follow from these decisions:
+
+- A `banned` rule does not rewrite. The merge lists each use as an open decision, and the lint gate reports it.
+- A proposal is a JSON file, not TOML, so that pdx-audit needs no TOML writer. A disposition of `""` in a proposal means "not chosen yet", and `accept` refuses it. `null` makes a grouping rule.
+- A seed from the keep file or a dismissal carries the text that the user wrote, with the source kind `user`.

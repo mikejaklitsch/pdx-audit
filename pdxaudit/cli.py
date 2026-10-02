@@ -226,6 +226,9 @@ def _open_app(mod_root, vanilla_repo, args, missing=None):
 
 
 def main():
+    if sys.argv[1:2] == ["intent"]:
+        from .intent_cli import main as intent_main
+        sys.exit(intent_main(sys.argv[2:]))
     with session.run():
         return _main()
 

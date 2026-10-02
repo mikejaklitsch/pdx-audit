@@ -26,8 +26,11 @@ class VanillaBase:
         return build_gui_vanilla_cached(self.repo, point, modules, label)
 
     def block_index(self, point, categories, label=""):
+        """One read of the cached index per run: the override audit asks for the same
+        index once for each override it dates."""
         from .overrides import build_index_cached
-        return build_index_cached(self.repo, point, categories, label)
+        return session.memo(("block_index", self.repo, point, tuple(sorted(set(categories)))),
+                            lambda: build_index_cached(self.repo, point, categories, label))
 
     def names_defined(self, point, categories, names):
         from .overrides import names_defined_in_vanilla
