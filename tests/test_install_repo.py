@@ -46,6 +46,11 @@ def install(tmp_path):
     _git(root, "commit", "-q", "-m", "Initial commit")
     (root / "binaries").mkdir()
     (root / "binaries" / "license.txt").write_text("text\n")
+    # The engine folders have module folders of their own, with fewer files than
+    # the game, and they sort before it.
+    _write_tree(root / "clausewitz", {"main_menu/gui/engine.gui": "template e = {}\n",
+                                      "loading_screen/gui/load.gui": "template l = {}\n"})
+    _write_tree(root / "jomini", {"in_game/common/x/j.txt": "j = {}\n"})
     old = _commit_version(root, VANILLA_OLD, "1.0.0 Test")
     new = _commit_version(root, VANILLA_NEW, "1.1.0 Test")
     mod = tmp_path / "mod"

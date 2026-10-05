@@ -871,14 +871,18 @@ class BlockView(QAbstractScrollArea):
                 runs.append((y, y + h))
         return runs
 
+    # The halves of a side-by-side row, left to right: the copy (side_rows' "right")
+    # and then vanilla (its "left").
+    SIDE_ORDER = ("right", "left")
+
     def _paint_side(self, p, row, top, h, ox, w):
-        """One side-by-side row: vanilla's line in the left half and the copy's in the
+        """One side-by-side row: the copy's line in the left half and vanilla's in the
         right, each coloured against the version the copy matches: green for a line that
         side added, red for one it deleted. A finding's first row carries its severity
         icon at the left edge; a blank side is shaded."""
         half, mark = w // 2, row.get("mark")
         code_f = font(12.5, mono=True)
-        for k, side in enumerate(("left", "right")):
+        for k, side in enumerate(self.SIDE_ORDER):
             x0, cell = k * half, row[side]
             p.save()
             p.setClipRect(QRect(x0, int(top), half, h))
@@ -2300,11 +2304,12 @@ class MainWindow(QMainWindow):
             side = self.side_by_side.isChecked() and (block.get("vanilla_lines") is not None or pairs)
             flatten = self.flatten.isChecked()
             key = (rec["block"], side, flatten)
-            columns = ((f"vanilla {block.get('vanilla_tag') or ''} · {block.get('vanilla_file') or ''}",
-                        f"yours · {block['file']}") if side else None)
+            columns = ((f"yours · {block['file']}",
+                        f"vanilla {block.get('vanilla_tag') or ''} · {block.get('vanilla_file') or ''}")
+                       if side else None)
             if side and pairs:
-                columns = (f"vanilla, the keys you inject · {block.get('vanilla_file') or ''}",
-                           f"yours · {block['file']}")
+                columns = (f"yours · {block['file']}",
+                           f"vanilla, the keys you inject · {block.get('vanilla_file') or ''}")
 
             def build():
                 if side and pairs:

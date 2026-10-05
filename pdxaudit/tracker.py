@@ -81,18 +81,23 @@ def game_prefix(vanilla_repo, commit):
     """The folder of `commit` that holds the game's module folders (in_game,
     main_menu, loading_screen). It is "" when they are at the top, as in a tracker
     that --commit made, and a path such as "game" when the repository holds the
-    whole install. It is None when the commit holds no game files."""
+    whole install. It is None when the commit holds no game files.
+    An install also has engine folders with module folders of their own (EU5's
+    `clausewitz` and `jomini`), so the folder whose module folders hold the most
+    files is the game."""
     def find():
         top = git(vanilla_repo, "ls-tree", "-z", "--name-only", commit).split("\0")
         if any(name in MODULE_ROOTS for name in top):
             return ""
-        found = []
-        for d in git(vanilla_repo, "ls-tree", "-r", "-d", "-z", "--name-only", commit,
-                     timeout=60).split("\0"):
-            parent, _slash, name = d.rpartition("/")
-            if parent and name in MODULE_ROOTS:
-                found.append((parent.count("/"), parent))
-        return min(found)[1] if found else None
+        files = {}
+        for path in git(vanilla_repo, "ls-tree", "-r", "-z", "--name-only", commit,
+                        timeout=120).split("\0"):
+            parts = path.split("/")
+            i = next((i for i, part in enumerate(parts[:-1]) if part in MODULE_ROOTS), 0)
+            if i:
+                folder = "/".join(parts[:i])
+                files[folder] = files.get(folder, 0) + 1
+        return max(files, key=lambda f: (files[f], -f.count("/"), f)) if files else None
     return session.memo(("game-prefix", str(vanilla_repo), commit), find)
 
 
