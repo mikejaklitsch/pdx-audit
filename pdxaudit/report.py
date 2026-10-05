@@ -141,6 +141,11 @@ KIND.update({
         SEV_REVIEW, "gui", "statements you changed in your GUI copy that vanilla also changed or deleted", _CHECK),
     "gui_removed_changed_mid": (
         SEV_REVIEW, "gui", "statements you deleted from your GUI copy that vanilla has since changed", _RESTORE),
+    "override_block_changed_high": (
+        SEV_STALE, "override", "REPLACE blocks vanilla changed in several places, beside or over an edit of yours",
+        _BLOCK),
+    "override_block_changed_mid": (
+        SEV_REVIEW, "override", "REPLACE blocks vanilla changed in several places", _BLOCK),
     "override_vanilla_changed_high": (
         SEV_STALE, "override", "statements your REPLACE keeps at an old vanilla value, beside an edit of yours",
         _TAKE),

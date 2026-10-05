@@ -146,6 +146,19 @@ def _own_data_folder(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "xdg-data"))
 
 
+@pytest.fixture
+def statement_findings(monkeypatch):
+    """Each change in a REPLACE is a finding of its own (`replace_findings` statement),
+    for the tests that read one change's finding."""
+    monkeypatch.setenv("PDX_REPLACE_FINDINGS", "statement")
+
+
+@pytest.fixture
+def block_findings(monkeypatch):
+    """The changes of one REPLACE are one finding, the default."""
+    monkeypatch.setenv("PDX_REPLACE_FINDINGS", "block")
+
+
 @pytest.fixture(autouse=True)
 def _no_engine_data(monkeypatch):
     """Tests never read the engine data that the user's config names."""

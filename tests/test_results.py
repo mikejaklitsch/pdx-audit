@@ -5,10 +5,15 @@ into the same flags a user would type."""
 import json
 import sys
 
+import pytest
+
 from pdxaudit import results
 from pdxaudit.safety import remove_file
 
 from test_cli import cli  # noqa: F401  (fixture)
+
+# These tests read one change's finding; the block mode has its own tests.
+pytestmark = pytest.mark.usefixtures("statement_findings")
 
 
 def _payload(cli, *argv):

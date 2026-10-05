@@ -49,6 +49,8 @@ Press **Run audits**. Each chip in the top bar gives the number of findings of o
 
 **Dismiss** hides a finding that is correct as it is. A dismissal applies until the text of one side changes. The **Dismissed** page brings one back.
 
+All the changes that vanilla made in one block are one finding. For a REPLACE, the **REPLACE findings** setting on the Settings page selects this: `block` gives one finding for each REPLACE, and `statement` gives one finding for each change. `pdx-audit --set replace_findings statement` sets the same value. The change applies from the next run, and a dismissal made in one mode does not apply in the other.
+
 [HOW_IT_WORKS.md](HOW_IT_WORKS.md) gives what each audit compares, and why it reports what it reports.
 
 ## The command line

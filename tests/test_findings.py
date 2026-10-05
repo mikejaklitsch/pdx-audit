@@ -6,10 +6,15 @@ import io
 import re
 from contextlib import redirect_stdout
 
+import pytest
+
 from pdxaudit.report import Finding, count_label, render_triage, KIND, SEV_REVIEW, SEV_STALE
 from pdxaudit.overrides import run_override_audit, run_deps_audit
 from pdxaudit.gui import run_gui_audit
 from pdxaudit.loc import run_loc_audit
+
+# These tests read one change's finding; the block mode has its own tests.
+pytestmark = pytest.mark.usefixtures("statement_findings")
 
 
 def _run(fn, *a):

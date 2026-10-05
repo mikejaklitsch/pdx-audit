@@ -17,6 +17,8 @@ Recognized keys:
                    ones worked out from vanilla
     engine_data    the pdx-syntax database; the dependency audit reads its
                    data_types table to confirm or drop data-binding findings
+    replace_findings  "block": the changes vanilla made in one REPLACE are one
+                   finding; "statement": each change is a finding of its own
 
 Unknown keys are ignored. See config.sample.json for an example.
 """
@@ -45,6 +47,10 @@ SETTINGS = {
     "patch_name": {"label": "Default patch name", "kind": "text", "env": "PDX_PATCH_NAME",
                    "flag": "--patch-name", "default": "Pavia",
                    "help": "the patch name a commit records"},
+    "replace_findings": {"label": "REPLACE findings", "kind": "choice", "choices": ("block", "statement"),
+                         "env": "PDX_REPLACE_FINDINGS", "default": "block",
+                         "help": "block: one finding for each REPLACE that vanilla changed; "
+                                 "statement: one finding for each change"},
     "skip_dirs": {"kind": "list", "help": "directories excluded from every scan"},
     "skip_files": {"kind": "list", "help": "filename globs excluded from every scan"},
     "merge_types": {"kind": "list",
@@ -184,8 +190,11 @@ def _outranking(key):
 
 def _check_tracker(path):
     """A tracker path to store, and a note about it. A path that does not exist yet
-    is kept, since `--commit` creates the repo there."""
+    is kept, since `--commit` creates the repo there. A folder that holds a `.git`
+    folder, such as a game install kept in git, stands for that `.git` folder."""
     p = Path(canonical_path(path))
+    if (p / ".git").is_dir():
+        p = p / ".git"
     if p.is_file():
         raise ConfigError(f"{p} is a file, not a folder. The tracker is a bare git repository, "
                           f"such as /path/to/my-tracker.git.")
@@ -220,8 +229,16 @@ def _check_patch_name(value):
     return text, None
 
 
+def _check_replace_findings(value):
+    text = str(value).strip().lower()
+    choices = SETTINGS["replace_findings"]["choices"]
+    if text not in choices:
+        raise ConfigError(f"replace_findings is one of: {', '.join(choices)}.")
+    return text, None
+
+
 _CHECKS = {"vanilla_repo": _check_tracker, "game_root": _check_game_root,
-           "patch_name": _check_patch_name}
+           "patch_name": _check_patch_name, "replace_findings": _check_replace_findings}
 
 
 def set_value(key, value):

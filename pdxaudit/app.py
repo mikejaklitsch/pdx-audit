@@ -1503,16 +1503,23 @@ class MainWindow(QMainWindow):
         config.set_value, so a change made in either shows in the other."""
         page, lay = self._page()
         self.setting_edits, self.setting_notes = {}, {}
-        card, v = self._card("Settings", "Set the tracker and the game folder once; both apply to "
-                                         "every mod. pdx-audit --set writes the same file.")
+        card, v = self._card("Settings", "Set these once; they apply to every mod. A change to "
+                                         "REPLACE findings applies from the next run. pdx-audit --set "
+                                         "writes the same file.")
         form = QFormLayout()
         form.setSpacing(10)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
         for key in config.SETTABLE:
             spec = config.SETTINGS[key]
-            edit = QLineEdit()
-            edit.setPlaceholderText(spec["help"])
-            edit.returnPressed.connect(lambda k=key: self.save_setting(k))
+            if spec["kind"] == "choice":
+                edit = QComboBox()
+                edit.addItems(spec["choices"])
+                edit.setToolTip(spec["help"])
+                edit.activated.connect(lambda _i, k=key: self.save_setting(k))
+            else:
+                edit = QLineEdit()
+                edit.setPlaceholderText(spec["help"])
+                edit.returnPressed.connect(lambda k=key: self.save_setting(k))
             row = QHBoxLayout()
             row.setSpacing(8)
             row.addWidget(edit, 1)
@@ -1524,6 +1531,7 @@ class MainWindow(QMainWindow):
             save = QPushButton("Save")
             save.setProperty("kind", "primary")
             save.clicked.connect(lambda _c=False, k=key: self.save_setting(k))
+            save.setVisible(spec["kind"] != "choice")
             row.addWidget(save)
             clear = QPushButton("Clear")
             clear.setToolTip("Remove this setting")
@@ -1578,7 +1586,9 @@ class MainWindow(QMainWindow):
             if edit is None:
                 continue
             shown = s["stored"] if s["stored"] not in (None, "") else s["value"]
-            if not edit.hasFocus():
+            if isinstance(edit, QComboBox):
+                edit.setCurrentText(str(shown))
+            elif not edit.hasFocus():
                 edit.setText("" if shown in (None, "") else str(shown))
             stored_here = s["stored"] not in (None, "")
             self.setting_notes[s["key"]].setText("" if stored_here else f"from {s['origin']}")
@@ -1596,7 +1606,8 @@ class MainWindow(QMainWindow):
 
     def save_setting(self, key):
         """Store one setting, as `pdx-audit --set` does, and apply it to this window."""
-        value = self.setting_edits[key].text().strip()
+        edit = self.setting_edits[key]
+        value = (edit.currentText() if isinstance(edit, QComboBox) else edit.text()).strip()
         if not value:
             return self.clear_setting(key)
         return self._setting_action(key, lambda: config.set_value(key, value))

@@ -3,11 +3,13 @@ findings, the block view the app shows, and the per-target detail.
 
 A target is a GUI definition, a replaced GUI file, a REPLACE block, or one
 definition of a replaced script file. Every change whose priority is high or mid is
-flagged. In a REPLACE each flagged change is one finding, of kind
-`override_<change>_<priority>`. In a GUI copy and a file copy the changes vanilla
-made inside one block are one finding: a change joins the outermost block above it
-in an unbroken run of blocks that each hold a flagged change of their own, and a
-block with several changes is one `gui_block_changed_<priority>` finding. A finding's
+flagged. In a REPLACE the flagged changes are one finding: one change is a finding
+of kind `override_<change>_<priority>`, and several are one
+`override_block_changed_<priority>` finding. The `replace_findings` setting
+`statement` makes each change in a REPLACE a finding of its own. In a GUI copy and a file copy the
+changes vanilla made inside one block are one finding: a change joins the outermost
+block above it in an unbroken run of blocks that each hold a flagged change of their
+own, and a block with several changes is one `gui_block_changed_<priority>` finding. A finding's
 key holds the target, the place, and each change's text on both sides with layout
 collapsed, so a dismissal holds until any of it changes. Your own edits are info and
 are shown nowhere but the counts."""
@@ -15,7 +17,7 @@ import json
 from collections import namedtuple
 from contextlib import contextmanager
 
-from . import diff3, ledger
+from . import config, diff3, ledger
 from .report import Finding, diff_lines, value_pair
 
 FLAGGED = (diff3.HIGH, diff3.MID)
@@ -133,6 +135,13 @@ def _block_groups(flagged, top):
     return list(groups.values())
 
 
+def _replace_grouping():
+    """"copy" when the changes of one REPLACE are one finding, False when each is
+    a finding of its own (the `replace_findings` setting)."""
+    value, _origin = config.setting("replace_findings")
+    return False if str(value).strip().lower() == "statement" else "copy"
+
+
 def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
           unwrap=False, want=False, block_type=None, vanilla_file=None,
           dialect=diff3.SCRIPT, grouped=None):
@@ -172,9 +181,13 @@ def audit(audit_name, name, target, mod_text, versions, tags, file, line, *,
     texts = {id(c): (normalized(mod_text, c.mod), normalized(new_text, c.new)) for c in changes}
     flagged = [c for c in changes if c.priority in FLAGGED]
     if grouped is None:
-        grouped = audit_name == "gui"
-    groups = (_block_groups(flagged, diff3.nodes(mod_text)) if grouped
-              else [[c] for c in flagged])
+        grouped = {"gui": True, "override": _replace_grouping()}.get(audit_name, False)
+    if grouped == "copy":
+        groups = [flagged] if flagged else []
+    elif grouped:
+        groups = _block_groups(flagged, diff3.nodes(mod_text))
+    else:
+        groups = [[c] for c in flagged]
     findings, finding_of = [], {}
     for group in groups:
         first = min(group, key=at)

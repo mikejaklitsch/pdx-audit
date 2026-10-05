@@ -4,9 +4,14 @@ their injection-point check."""
 import io
 from contextlib import redirect_stdout
 
+import pytest
+
 from conftest import _write_tree, audit_args, build_tracker, make_ctx
 from pdxaudit import results
 from pdxaudit.overrides import run_override_audit
+
+# These tests read one change's finding; the block mode has its own tests.
+pytestmark = pytest.mark.usefixtures("statement_findings")
 
 TARGET = "override:in_game/common/building_types/some_building"
 

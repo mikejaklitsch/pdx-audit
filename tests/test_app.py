@@ -319,7 +319,8 @@ def _open_window(world, tmp_path, monkeypatch, repo=None):
 
 def test_the_settings_page_shows_each_value_and_where_it_comes_from(window, cfg_files):
     window.refresh_settings()
-    assert set(window.setting_edits) == {"vanilla_repo", "game_root", "patch_name"}
+    assert set(window.setting_edits) == {"vanilla_repo", "game_root", "patch_name", "replace_findings"}
+    assert window.setting_edits["replace_findings"].currentText() == "block"
     assert window.setting_notes["patch_name"].text() == "from the built-in default"
     assert window.setting_edits["patch_name"].text() == "Pavia"    # the value in use
 
@@ -340,6 +341,16 @@ def test_saving_a_setting_the_app_cannot_use_says_why(window, cfg_files, tmp_pat
     assert window.save_setting("game_root") is False
     assert "not a folder" in window.settings_message.text()
     assert not cfg_files.data.exists()
+
+
+def test_a_choice_setting_saves_from_its_dropdown(window, cfg_files, monkeypatch):
+    monkeypatch.delenv("PDX_REPLACE_FINDINGS", raising=False)
+    box = window.setting_edits["replace_findings"]
+    box.setCurrentText("statement")
+    box.activated.emit(box.currentIndex())
+    assert json.loads(cfg_files.data.read_text())["replace_findings"] == "statement"
+    assert window.clear_setting("replace_findings")
+    assert box.currentText() == "block"
 
 
 def test_clearing_a_setting_removes_it(window, cfg_files):
