@@ -35,7 +35,7 @@ def locate_vanilla_repo(mod_root: Path, override: str | None = None):
     anywhere under any name: `--vanilla-repo`, then $PDX_VANILLA_REPO, then the config
     file's `vanilla_repo`, then `<mod-parent>/vanilla-tracker/repo.git`."""
     if override:
-        p = Path(canonical_path(override))
+        p = git_dir_of(canonical_path(override))
         if p.exists():
             return p, None
         return None, f"Vanilla repo not found at {p}"
@@ -43,7 +43,7 @@ def locate_vanilla_repo(mod_root: Path, override: str | None = None):
     for name, src in (("$PDX_VANILLA_REPO", os.environ.get("PDX_VANILLA_REPO")),
                       (f"The config file's vanilla_repo ({config_file()})", cfg("vanilla_repo"))):
         if src:
-            p = Path(canonical_path(src))
+            p = git_dir_of(canonical_path(src))
             if p.exists():
                 return p, None
             return None, (f"Error: {name} points at {p}, which does not exist. Correct it with "
@@ -60,6 +60,47 @@ def locate_vanilla_repo(mod_root: Path, override: str | None = None):
                   "Point pdx-audit at a tracker under any name with "
                   "`pdx-audit --set vanilla_repo <path>` (or --vanilla-repo <path> for one run), "
                   "or create one with `pdx-audit --commit <version>`.")
+
+
+def git_dir_of(path) -> Path:
+    """The git folder of `path`: the path itself for a tracker or a `.git` folder, or
+    its `.git` folder when `path` is a working tree, such as a game install that
+    holds its own repository."""
+    p = Path(path)
+    return p / ".git" if (p / ".git").is_dir() else p
+
+
+def has_work_tree(vanilla_repo) -> bool:
+    """True when the repository is the `.git` folder of a working tree, such as a
+    game install, which the user commits to with git. The folder name decides it:
+    a tracker can carry `core.bare = false` in its config and still be a tracker."""
+    return Path(vanilla_repo).name == ".git"
+
+
+def game_prefix(vanilla_repo, commit):
+    """The folder of `commit` that holds the game's module folders (in_game,
+    main_menu, loading_screen). It is "" when they are at the top, as in a tracker
+    that --commit made, and a path such as "game" when the repository holds the
+    whole install. It is None when the commit holds no game files."""
+    def find():
+        top = git(vanilla_repo, "ls-tree", "-z", "--name-only", commit).split("\0")
+        if any(name in MODULE_ROOTS for name in top):
+            return ""
+        found = []
+        for d in git(vanilla_repo, "ls-tree", "-r", "-d", "-z", "--name-only", commit,
+                     timeout=60).split("\0"):
+            parent, _slash, name = d.rpartition("/")
+            if parent and name in MODULE_ROOTS:
+                found.append((parent.count("/"), parent))
+        return min(found)[1] if found else None
+    return session.memo(("game-prefix", str(vanilla_repo), commit), find)
+
+
+def treeish(vanilla_repo, commit):
+    """`commit` as git reads the game files in it: the commit itself, or its game
+    folder (`<commit>:game`), so that every path starts at the module folders."""
+    prefix = game_prefix(vanilla_repo, commit)
+    return f"{commit}:{prefix}" if prefix else commit
 
 
 def find_vanilla_repo(mod_root: Path, override: str | None = None) -> Path:
@@ -84,6 +125,11 @@ def get_commits(vanilla_repo):
             continue
         parts = line.split(None, 1)
         result.append((parts[0], parts[1] if len(parts) > 1 else ""))
+    # A tracker that --commit made holds only game files. A repository of the whole
+    # install can also hold commits with no game folder, which are not versions.
+    if result and game_prefix(vanilla_repo, result[0][0]) != "":
+        versions = [(h, m) for h, m in result if game_prefix(vanilla_repo, h) is not None]
+        result = versions or result
     return result
 
 def full_hash(vanilla_repo, commit):
@@ -98,7 +144,7 @@ def tree_files(vanilla_repo, commit):
     def cached():
         import json
         full = full_hash(vanilla_repo, commit)
-        path = cache_path(vanilla_repo, f"tree-v1-{full}.json") if full else None
+        path = cache_path(vanilla_repo, f"tree-v2-{full}.json") if full else None
         if path is not None and path.is_file():
             try:
                 return [tuple(x) for x in json.loads(path.read_text())]
@@ -117,7 +163,7 @@ def tree_files(vanilla_repo, commit):
 
     def list_tree():
         files = []
-        for rec in git(vanilla_repo, "ls-tree", "-r", "-z", commit, timeout=60).split("\0"):
+        for rec in git(vanilla_repo, "ls-tree", "-r", "-z", treeish(vanilla_repo, commit), timeout=60).split("\0"):
             meta, _tab, path = rec.partition("\t")
             parts = meta.split()
             if len(parts) == 3 and parts[1] == "blob" and parts[0] in ("100644", "100755"):
@@ -164,7 +210,11 @@ def _cat_file(vanilla_repo, ids, timeout):
 _CACHE_HASH_RE = re.compile(r"-([0-9a-f]{40})[-.]")
 
 def cache_dir_of(vanilla_repo):
-    """Returns the cache folder of the tracker. This folder is next to the tracker."""
+    """Returns the cache folder of the tracker. This folder is next to a bare
+    tracker, and inside the `.git` folder of a repository with a working tree, so
+    that it never goes into the game install."""
+    if has_work_tree(vanilla_repo):
+        return Path(vanilla_repo) / "pdx-audit-cache"
     return Path(vanilla_repo).parent / "cache"
 
 def cache_path(vanilla_repo, name):
@@ -240,7 +290,7 @@ def warn_if_tracker_stale(vanilla_repo, newest_hash, sample_size=40):
         return
     checked = stale = 0
     for sd in STALE_SENTINEL_DIRS:
-        out = git(vanilla_repo, "ls-tree", "-r", newest_hash, "--", sd)
+        out = git(vanilla_repo, "ls-tree", "-r", treeish(vanilla_repo, newest_hash), "--", sd)
         entries = []
         for line in out.strip().split("\n"):
             if "\t" not in line:
@@ -267,16 +317,17 @@ def warn_if_tracker_stale(vanilla_repo, newest_hash, sample_size=40):
     return msg
 
 def _git_archive(vanilla_repo, commit, paths=None, timeout=60):
-    """Wrapper around shared git_archive with ignore_zeros note."""
-    return git_archive(vanilla_repo, commit, paths, timeout)
+    """The tar of `paths` in the game folder of `commit`. Member names start at the
+    module folders, as in a tracker that --commit made."""
+    return git_archive(vanilla_repo, treeish(vanilla_repo, commit), paths, timeout)
 
 def resolve_tracker_path(mod_root_arg, vanilla_repo_arg) -> Path:
     """Where the tracker repo lives (or should live)."""
     if vanilla_repo_arg:
-        return Path(canonical_path(vanilla_repo_arg))
+        return git_dir_of(canonical_path(vanilla_repo_arg))
     for src in (os.environ.get("PDX_VANILLA_REPO"), cfg("vanilla_repo")):
         if src:
-            return Path(canonical_path(src))
+            return git_dir_of(canonical_path(src))
     mod_root = find_mod_root(mod_root_arg)
     return mod_root.parent / "vanilla-tracker" / "repo.git"
 
@@ -355,6 +406,14 @@ def do_commit(repo: Path, tag: str, patch: str,
                         "HEAD", "refs/heads/master"], check=True)
         print(f"Created tracker repo: {repo}")
 
+    head = git(repo, "rev-parse", "--verify", "--quiet", "HEAD").strip()
+    if has_work_tree(repo) or (head and game_prefix(repo, head) not in ("", None)):
+        print(f"Error: {repo} is a git repository of the game install, not a tracker that "
+              f"--commit made; nothing was written. Commit each new version with git in "
+              f"that repository. pdx-audit reads each commit that holds the game folder.",
+              file=sys.stderr)
+        sys.exit(1)
+
     tag_exists = subprocess.run(
         ["git", "--git-dir", str(repo), "rev-parse", "--verify", "--quiet",
          f"refs/tags/{tag}"], capture_output=True).returncode == 0
@@ -387,7 +446,6 @@ def do_commit(repo: Path, tag: str, patch: str,
               file=sys.stderr)
         sys.exit(1)
 
-    head = git(repo, "rev-parse", "--verify", "--quiet", "HEAD").strip()
     if head and git(repo, "rev-parse", "HEAD^{tree}").strip() == tree:
         print("No changes from the previous commit; nothing committed.")
         return

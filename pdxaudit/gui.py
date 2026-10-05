@@ -206,7 +206,7 @@ def build_gui_vanilla_cached(vanilla_repo, commit, modules, label=""):
         except (OSError, ValueError, KeyError, IndexError):
             pass
     def_idx, file_idx, bad = build_gui_vanilla(vanilla_repo, commit, modules, label)
-    if cache:
+    if cache and file_idx:
         try:
             cache.parent.mkdir(parents=True, exist_ok=True)
             payload = {
