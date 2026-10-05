@@ -5,12 +5,12 @@ import io
 from pathlib import Path
 from contextlib import redirect_stdout
 
-from pdxaudit.tracker import prune_cache, git
+from pdxaudit.tracker import cache_dir_of, prune_cache, git
 from pdxaudit.overrides import run_override_audit
 
 
 def _cache_dir(repo):
-    return Path(repo).parent / "cache"
+    return cache_dir_of(repo)
 
 
 def _silent(fn, *a):

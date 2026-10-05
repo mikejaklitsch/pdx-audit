@@ -5,6 +5,7 @@ commit can hold no game files. The audits read it as they read a tracker that
 import io
 import os
 import subprocess
+import sys
 import types
 from pathlib import Path
 from contextlib import redirect_stdout
@@ -95,30 +96,55 @@ def test_the_audits_read_the_install_repository(install):
     assert "1 changed strings" in out
 
 
-def test_the_cache_stays_out_of_the_install(install):
-    assert cache_dir_of(install.repo) == install.root / ".git" / "pdx-audit-cache"
-    _out(run_override_audit, install.mod, install.repo,
-         install.old, "1.0.0", install.new, "1.1.0", install.args)
-    assert not (install.root / "cache").exists()
-    assert list((install.root / ".git" / "pdx-audit-cache").glob("blocks-v*.json"))
+def _state(root):
+    """Every file and folder under `root`, with the size and time of each file."""
+    out = {}
+    for p in sorted(root.rglob("*")):
+        st = p.stat()
+        out[p.relative_to(root).as_posix()] = None if p.is_dir() else (st.st_size, st.st_mtime_ns)
+    return out
 
 
-def test_commit_refuses_the_install_repository(install, tmp_path, capsys):
-    head = _git(install.root, "rev-parse", "HEAD")
+def test_a_full_run_writes_nothing_into_the_repository_or_the_install(install, tmp_path):
+    # The repository is the user's own: the audits only read it, and the cache goes
+    # into the per-user data folder.
+    before = _state(install.root)
+    env = {**os.environ, "XDG_DATA_HOME": str(tmp_path / "data"),
+           "PDX_GAME_ROOT": str(install.root / "game")}
+    env.pop("PDX_VANILLA_REPO", None)
+    r = subprocess.run([sys.executable, "-m", "pdxaudit.cli", "--mod-root", str(install.mod),
+                        "--vanilla-repo", str(install.root), "--summary", "--color", "never"],
+                       env=env, capture_output=True, text=True, encoding="utf-8",
+                       cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    assert r.returncode == 0, r.stderr
+    assert "some_building" in r.stdout
+    assert _state(install.root) == before
+    cache = tmp_path / "data" / "pdx-audit" / "tracker-cache"
+    assert list(cache.glob("*/blocks-v*.json"))
+
+
+def test_the_cache_of_a_tracker_is_in_the_data_folder(tmp_path):
+    from conftest import build_tracker
+    tr = build_tracker(tmp_path, [("1.0", VANILLA_OLD)])
+    cache = cache_dir_of(tr.repo)
+    assert cache.parent == tmp_path / "xdg-data" / "pdx-audit" / "tracker-cache"
+    assert cache != cache_dir_of(tmp_path / "another" / "repo.git")
+
+
+def test_commit_refuses_the_install_repository(install, capsys):
+    before = _state(install.root)
     with pytest.raises(SystemExit):
         do_commit(install.root / ".git", "1.2.0", "Test", str(install.root / "game"))
     assert "Commit each new version with git" in capsys.readouterr().err
-    assert _git(install.root, "rev-parse", "HEAD") == head
-    assert _git(install.root, "tag", "-l") == ""
+    assert _state(install.root) == before
 
 
-def test_a_tracker_with_core_bare_false_keeps_its_cache_and_commits(tmp_path, monkeypatch):
+def test_a_tracker_with_core_bare_false_still_takes_commits(tmp_path, monkeypatch):
     # A tracker folder that git once used with a working tree carries
     # `core.bare = false`; it is still a tracker, not the .git folder of an install.
     from conftest import build_tracker
     tr = build_tracker(tmp_path, [("1.0", VANILLA_OLD)])
     subprocess.run(["git", "--git-dir", tr.repo, "config", "core.bare", "false"], check=True)
-    assert cache_dir_of(tr.repo) == tmp_path / "vanilla-tracker" / "cache"
     for k, v in (("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@e"),
                  ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@e")):
         monkeypatch.setenv(k, v)

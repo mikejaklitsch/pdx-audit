@@ -139,6 +139,14 @@ def audit_args(**kw):
 
 
 @pytest.fixture(autouse=True)
+def _own_data_folder(tmp_path, monkeypatch):
+    """Each test has its own per-user data folder, so the tracker caches and the
+    records a test writes never reach the user's."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "xdg-data"))
+
+
+@pytest.fixture(autouse=True)
 def _no_engine_data(monkeypatch):
     """Tests never read the engine data that the user's config names."""
     import pdxaudit.gui_names

@@ -210,12 +210,12 @@ def _cat_file(vanilla_repo, ids, timeout):
 _CACHE_HASH_RE = re.compile(r"-([0-9a-f]{40})[-.]")
 
 def cache_dir_of(vanilla_repo):
-    """Returns the cache folder of the tracker. This folder is next to a bare
-    tracker, and inside the `.git` folder of a repository with a working tree, so
-    that it never goes into the game install."""
-    if has_work_tree(vanilla_repo):
-        return Path(vanilla_repo) / "pdx-audit-cache"
-    return Path(vanilla_repo).parent / "cache"
+    """Returns the cache folder of the tracker: a folder of the per-user data folder,
+    named for the tracker's path. pdx-audit writes nothing into a tracker or next to
+    it, so a repository that the user keeps stays as it is."""
+    from .store import data_root
+    key = hashlib.sha1(str(Path(vanilla_repo).resolve()).encode()).hexdigest()[:12]
+    return data_root() / "tracker-cache" / key
 
 def cache_path(vanilla_repo, name):
     """Returns the path of the cache file `name` in the cache folder of the tracker."""

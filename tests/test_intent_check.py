@@ -85,7 +85,8 @@ def test_the_deviation_cache_gives_the_same_deviations(tmp_path):
     tr, mod = _setup(tmp_path)
     copies, devs, _o = _collect(tr, mod)
     assert all(c.cached is None for c in copies)
-    cache = list((tmp_path / "vanilla-tracker" / "cache").glob("devs-v1-*.json"))
+    from pdxaudit.tracker import cache_dir_of
+    cache = list(cache_dir_of(tr.repo).glob("devs-v1-*.json"))
     assert len(cache) == 1 and json.loads(cache[0].read_text())
     copies2, devs2, _o = _collect(tr, mod)
     assert copies2 and all(c.cached is not None for c in copies2)

@@ -25,7 +25,7 @@ On the **Settings** page, fill the two boxes and press **Save** under each one.
 - **Game folder**: the `game` folder of your EU5 install. **Browse** opens a file dialog.
 - **Tracker**: a folder for the vanilla history. Give a path that does not exist yet, and pdx-audit makes the folder. If you have a tracker already, give its path instead. Any name works.
 
-A git repository that you keep of the game install also works as the tracker. Give the path of its `.git` folder, or of the folder that holds `.git`. pdx-audit reads the game files from the folder of each commit that holds `in_game`, `main_menu` and `loading_screen`, and it skips commits that hold no game files. You commit new versions to that repository with git, because **Commit version** writes only to a tracker that pdx-audit made. pdx-audit keeps its cache in the `.git` folder, not in the install.
+A git repository that you keep of the game install also works as the tracker. Give the path of its `.git` folder, or of the folder that holds `.git`. pdx-audit reads the game files from the folder of each commit that holds `in_game`, `main_menu` and `loading_screen`, and it skips commits that hold no game files. You commit new versions to that repository with git, because **Commit version** writes only to a tracker that pdx-audit made. pdx-audit only reads that repository, and writes nothing into it or into the install.
 
 ## Build the history
 

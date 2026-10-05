@@ -79,6 +79,8 @@ A dismissal applies while that content is the same. When vanilla changes its sta
 
 pdx-audit keeps the record in the data folder of the user, with one file for each git commit of the mod. It never writes in the mod, and it never removes a folder. A branch sees the decisions up to its start point, and its own decisions.
 
+The cache of what pdx-audit reads from each vanilla version is in the same data folder, in `tracker-cache`, with one folder for each tracker. pdx-audit only reads the tracker, and writes nothing into it or next to it.
+
 A finding stays in the report until you correct it or dismiss it, also after later commits move the window past its patch.
 
 ## The intent store
@@ -89,7 +91,7 @@ Each deviation has an **address**. The address names the copy by vanilla identit
 
 An entry records the hash of its node on both sides when you confirm it. On each run the entry is **recorded** when both hashes are the same, **stale** when vanilla or your node changed, and **lost** when the node is gone. Only a recorded entry explains a deviation. An entry wins over a rule. Two rules with different dispositions on one deviation explain nothing, and the conflict is reported.
 
-The **baseline** records the deviations that nothing explains at one moment. The gate (`intent check`) exempts them until they change, or until vanilla changes them after the baseline. A new or changed deviation needs a rule or an entry. The deviations of each copy go into a cache in the cache folder of the tracker (`devs-v1-<commit>.json`), keyed by a hash of the copy's text and of vanilla's history. A check of some files reads only their copies.
+The **baseline** records the deviations that nothing explains at one moment. The gate (`intent check`) exempts them until they change, or until vanilla changes them after the baseline. A new or changed deviation needs a rule or an entry. The deviations of each copy go into a cache in the tracker's cache folder (`devs-v1-<commit>.json`), keyed by a hash of the copy's text and of vanilla's history. A check of some files reads only their copies.
 
 A file that a tool generates (an `AUTO-GENERATED` header, or an output of a tool in `pdx-maint.toml`) is never proposed or merged. Its tool reads vanilla again: `pdx-maint run <id>` regenerates it.
 
