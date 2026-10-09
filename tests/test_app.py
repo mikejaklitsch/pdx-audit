@@ -201,6 +201,33 @@ def test_earlier_findings_get_their_own_section(window):
     assert "Still open from earlier patches" in window.section_titles()
 
 
+def test_files_and_findings_are_listed_by_rank(window):
+    both = Finding("override_both_changed_mid", "other_building", "in_game/common/building_types/n.txt:3",
+                   "", None, {"target": "override:x/other_building", "path": [], "yours": "a = 1",
+                              "vanilla": "a = 2"}, "1.1.0", "1.0.0")
+    absent = Finding("override_absent", "lonely", "in_game/common/building_types/m.txt:9", "", None,
+                     {"target": "override:x/lonely"}, "1.1.0")
+    window.show_results(_payload(_findings() + [both, absent]))
+    window.set_list_mode("files")
+    files = [t for t in window.tree_titles() if t.endswith(".txt")]
+    assert files == ["in_game/common/buildings/dup1.txt", "in_game/common/building_types/n.txt",
+                     "in_game/common/building_types/m.txt"]
+    m_txt = [r["name"] for r in window.listed_records() if r["file"].endswith("/m.txt")]
+    assert m_txt == ["some_building", "lonely"]          # the automatic merge, then the note
+    records = {r["name"]: r for r in window.listed_records()}
+    window.select_record(records["dup_thing"])
+    assert "Game error" in window.detail_text()
+    window.select_record(records["other_building"])
+    assert "Decision for you" in window.detail_text()
+    counts = _plain_text(window.counts_label.text())
+    assert "1 game error" in counts and "1 decision for you" in counts and "2 automatic merges" not in counts
+
+
+def _plain_text(html_text):
+    import re
+    return re.sub(r"<[^>]+>", "", html_text).replace("&nbsp;", " ")
+
+
 def test_run_menu_offers_the_mods_categories_and_blocks(window):
     assert "common/building_types" in window.category_choices()
     window.set_run_choice(category="common/building_types")
@@ -319,7 +346,8 @@ def _open_window(world, tmp_path, monkeypatch, repo=None):
 
 def test_the_settings_page_shows_each_value_and_where_it_comes_from(window, cfg_files):
     window.refresh_settings()
-    assert set(window.setting_edits) == {"vanilla_repo", "game_root", "patch_name", "replace_findings"}
+    assert set(window.setting_edits) == {"vanilla_repo", "game_root", "patch_name", "replace_findings",
+                                         "editor"}
     assert window.setting_edits["replace_findings"].currentText() == "block"
     assert window.setting_notes["patch_name"].text() == "from the built-in default"
     assert window.setting_edits["patch_name"].text() == "Pavia"    # the value in use
@@ -451,6 +479,55 @@ def test_a_config_file_left_by_an_earlier_version_is_named_on_the_page(window, c
     assert window.setting_edits["patch_name"].text() == "Pavia"      # and it is not used
 
 
+def test_picking_a_suggested_editor_fills_and_saves_the_command(window, cfg_files, monkeypatch):
+    from pdxaudit import app as appmod
+    monkeypatch.setattr(appmod.editor, "suggestions", lambda: [("VS Code", "code --goto {file}:{line}")])
+    window.refresh_editor_suggestions()
+    box = window.editor_suggestions
+    assert box.itemText(0).startswith("Pick an installed editor")
+    i = box.findText("VS Code")
+    box.setCurrentIndex(i)
+    box.activated.emit(i)
+    assert window.setting_edits["editor"].text() == "code --goto {file}:{line}"
+    assert json.loads(cfg_files.data.read_text())["editor"] == "code --goto {file}:{line}"
+
+
+def test_open_in_editor_runs_the_editor_command_at_the_findings_line(window, cfg_files, world, monkeypatch):
+    from pdxaudit import app as appmod, config
+    calls = []
+    monkeypatch.setattr(appmod.editor, "launch", calls.append)
+    config.set_value("editor", "myedit --goto {file}:{line}")
+    window.show_results(_payload(_findings()))
+    records = {r["name"]: r for r in window.listed_records()}
+    window.select_record(records["some_building"])
+    assert window.open_button.isEnabled()
+    window.open_in_editor()
+    path = Path(world.mod) / "in_game/common/building_types/m.txt"
+    assert calls == [["myedit", "--goto", f"{path}:2"]]
+
+
+def test_without_an_editor_command_the_system_opens_the_file(window, cfg_files, world, monkeypatch):
+    from pdxaudit import app as appmod
+    opened = []
+    monkeypatch.setattr(appmod.QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()) or True)
+    window.show_results(_payload(_findings()))
+    records = {r["name"]: r for r in window.listed_records()}
+    window.select_record(records["some_building"])
+    window.open_in_editor()
+    assert opened == [str(Path(world.mod) / "in_game/common/building_types/m.txt")]
+
+
+def test_open_in_editor_is_off_when_the_file_is_not_in_the_mod(window, cfg_files):
+    gone = Finding("dupes_multiple_sources", "gone_thing", "in_game/common/buildings/gone.txt:1", "",
+                   None, {"target": "dupes:common/buildings/gone_thing"}, "1.1.0")
+    window.show_results(_payload(_findings() + [gone]))
+    records = {r["name"]: r for r in window.listed_records()}
+    window.select_record(records["dup_thing"])
+    assert window.open_button.isEnabled()                # a finding that cannot be dismissed still opens
+    window.select_record(records["gone_thing"])
+    assert not window.open_button.isEnabled()
+
+
 def test_code_is_drawn_on_the_grid_the_change_boxes_use():
     # The block view draws code one character per cell, and puts the box that marks a
     # changed word on the same cells. Measuring that cell with the integer QFontMetrics
@@ -462,3 +539,63 @@ def test_code_is_drawn_on_the_grid_the_change_boxes_use():
     text = "x" * 60
     drawn = QFontMetricsF(font(12.5, mono=True)).horizontalAdvance(text)
     assert abs(drawn - len(text) * code_width()) < 1.0, (drawn, len(text) * code_width())
+
+
+def _press(win, widget, point=None):
+    """A click at `point` of `widget`, sent to the window as a real click is."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    point = widget.rect().center() if point is None else point
+    QTest.mouseClick(win.windowHandle(), Qt.MouseButton.LeftButton, pos=widget.mapTo(win, point))
+    QtWidgets.QApplication.instance().processEvents()
+
+
+def test_a_dropdown_opens_inside_the_window(window):
+    """A dropdown's list is a panel inside the window, not a popup window of its own:
+    under WSLg a popup window can stay on the screen after it closes. A click picks an
+    item; a click outside or on the dropdown closes the list; the keys work."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    window.resize(1200, 800)
+    window.show()
+    page = window.merge_page
+    window.pages.setCurrentWidget(page)
+    app = QtWidgets.QApplication.instance()
+    windows = len(app.topLevelWindows())
+    combo = page.sort_combo
+    picked = []
+    combo.activated.connect(picked.append)
+    _press(window, combo)
+    assert combo.popup_shown() and combo._panel.parentWidget() is window
+    assert len(app.topLevelWindows()) == windows
+    lst = combo._list
+    _press(window, lst, lst.visualRect(lst.model().index(1, 0)).center())
+    assert not combo.popup_shown() and picked == [1] and combo.currentData() == "most"
+    _press(window, combo)
+    _press(window, page.file_list)                      # a click outside
+    assert not combo.popup_shown()
+    _press(window, combo)
+    _press(window, combo)                               # a click on the dropdown
+    assert not combo.popup_shown()
+    _press(window, combo)
+    QTest.keyClick(lst, Qt.Key.Key_Down)
+    QTest.keyClick(lst, Qt.Key.Key_Return)
+    assert not combo.popup_shown() and combo.currentData() == "fewest" and picked == [1, 2]
+    _press(window, combo)
+    QTest.keyClick(window.windowHandle(), Qt.Key.Key_Escape)
+    assert not combo.popup_shown() and combo.currentData() == "fewest"
+
+
+def test_the_run_options_open_inside_the_window_with_their_dropdowns(window):
+    window.resize(1200, 800)
+    window.show()
+    _press(window, window.run_arrow)
+    panel = window.run_popup
+    assert panel.isVisible() and panel.parentWidget() is window and not panel.isWindow()
+    _press(window, window.category_combo)                # a dropdown inside the panel
+    assert window.category_combo.popup_shown() and panel.isVisible()
+    _press(window, window.category_combo._list, window.category_combo._list.visualRect(
+        window.category_combo._list.model().index(0, 0)).center())
+    assert not window.category_combo.popup_shown() and panel.isVisible()
+    _press(window, window.pages)                         # a click outside closes the panel
+    assert not panel.isVisible()

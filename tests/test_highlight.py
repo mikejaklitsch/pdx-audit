@@ -3,6 +3,7 @@ theme: spans rebuild each line exactly, the theme's colours land on the right
 tokens, EU5's own vocabulary is recognised, and state carries across lines."""
 import time
 
+from pdxaudit import highlight
 from pdxaudit.highlight import highlighter
 
 
@@ -50,3 +51,18 @@ def test_a_long_block_highlights_quickly():
     start = time.time()
     _spans(*block)
     assert time.time() - start < 3.0
+
+
+def test_a_value_next_to_the_closing_brace_closes_the_block():
+    hl = highlight.highlighter()
+    stack = [hl.root]
+    for _ in range(50):
+        _tokens, stack = hl._line("a = { b = c d = 0.00}", stack)
+    assert stack == [hl.root]                  # each line closes its own block
+    assert _style("a = { d = 0.00}", "}") == _style("a = { d = 0.00 }", "}")
+
+
+def test_the_worker_process_gives_the_same_spans():
+    lines = ["x = {", "\tadd_adm = 10  # a note", "\td = 0.00}"]
+    assert highlight.spans_of([lines, ["a = yes"]]) == [highlight.highlighter().line_spans(lines),
+                                                        highlight.highlighter().line_spans(["a = yes"])]

@@ -568,3 +568,80 @@ def test_a_moved_block_that_holds_vanilla_new_text_needs_no_decision():
     assert r.text == ours
     assert not r.open
     assert [(d.kind, d.action) for d in r.decisions] == [("removed_changed", KEEP)]
+
+
+def test_a_block_of_the_mods_own_is_not_a_vanilla_block_that_the_merge_deleted():
+    """Vanilla deletes the first widget. The first merge deletes it from ours too. In
+    the merged text the mod's own widget is the only unpaired widget, but it shares
+    almost nothing with the deleted one, so it is not that widget moved and changed:
+    a merge of the merged text asks nothing."""
+    base = ("a = {\n\twidget = {\n\t\tsize = { 1 45 }\n\t\tkind = tax\n\t\ticon = tax\n\t}\n"
+            "\tplot = { x = 1 }\n\twidget = {\n\t\tkind = graph\n\t\tbar = 1\n\t\tline = 2\n\t}\n}\n")
+    theirs = ("a = {\n\tplot = { x = 1 }\n\twidget = {\n\t\tkind = graph\n\t\tbar = 1\n\t\tline = 2\n\t}\n}\n")
+    ours = ("REPLACE:a = {\n\twidget = {\n\t\tsize = { 1 45 }\n\t\tkind = tax\n\t\ticon = tax\n\t}\n"
+            "\tplot = { x = 1 }\n\twidget = {\n\t\tvisible = mine\n\t\tsize = { 1 190 }\n\t\tmy_graph = yes\n\t}\n"
+            "\twidget = {\n\t\tkind = graph\n\t\tbar = 1\n\t\tline = 2\n\t\tmine = 1\n\t}\n}\n")
+    first = merge_texts(base, ours, theirs, unwrap=True)
+    assert _decisions(first) == [("vanilla_removed", TAKE, ["widget"])]
+    assert "kind = tax" not in first.text and "my_graph = yes" in first.text
+    again = merge_texts(base, first.text, theirs, unwrap=True)
+    assert _decisions(again) == [] and again.text == first.text
+
+
+def test_a_block_whose_key_each_side_holds_once_is_paired_however_it_changed():
+    """The key names the block: the mod moved it and rewrote most of it, and vanilla's
+    change inside it is still a change to the mod's block."""
+    base = "a = {\n\tmod = {\n\t\tx = 1\n\t\ty = 1\n\t\tfood = 1\n\t}\n\tplot = { p = 1 }\n}\n"
+    theirs = "a = {\n\tmod = {\n\t\tx = 1\n\t\ty = 1\n\t\tfood = 2\n\t}\n\tplot = { p = 1 }\n}\n"
+    ours = ("REPLACE:a = {\n\tplot = { p = 1 }\n"
+            "\tmod = {\n\t\tx = 5\n\t\ty = 5\n\t\tfood = 1\n\t\tz = 1\n\t}\n}\n")
+    r = merge_texts(base, ours, theirs, unwrap=True)
+    assert _decisions(r) == [("vanilla_changed", TAKE, ["mod", "food"])]
+    assert "\t\tfood = 2" in r.text and "x = 5" in r.text
+
+
+def test_a_moved_block_that_keeps_most_of_its_statements_is_still_paired():
+    """Each side holds two widgets, so the key names neither. The mod moved one past a
+    sibling and changed one of its statements: it keeps most of them, so it is the
+    same block, and vanilla's deletion of it is a decision about the mod's text."""
+    base = ("a = {\n\twidget = {\n\t\tkind = tax\n\t\ticon = tax\n\t\tsize = 1\n\t}\n\tplot = { x = 1 }\n"
+            "\twidget = {\n\t\tkind = graph\n\t\tbar = 1\n\t}\n}\n")
+    theirs = "a = {\n\tplot = { x = 1 }\n\twidget = {\n\t\tkind = graph\n\t\tbar = 1\n\t}\n}\n"
+    ours = ("REPLACE:a = {\n\tplot = { x = 1 }\n"
+            "\twidget = {\n\t\tkind = tax\n\t\ticon = tax\n\t\tsize = 2\n\t}\n"
+            "\twidget = {\n\t\tkind = graph\n\t\tbar = 1\n\t}\n}\n")
+    r = merge_texts(base, ours, theirs, unwrap=True)
+    assert [(k, p) for k, _a, p in _decisions(r)] == [("both_changed", ["widget"])]
+
+
+def test_two_new_blocks_at_one_place_go_in_in_vanilla_order():
+    """Vanilla replaces two widgets with two new hboxes. The mod holds the first
+    hbox's statements elsewhere, so the merge decides that hbox after its pass; the
+    two still go in in vanilla's order, and a merge of the merged text asks nothing."""
+    base = ("a = {\n\tmargin = 5\n\twidget = { w = 1 }\n\twidget = { w = 2 }\n}\n"
+            "b = {\n\tslider = {\n\t\ts = 1\n\t\tt = 2\n\t\tu = 3\n\t}\n}\n")
+    theirs = ("a = {\n\tmargin = 5\n\thbox = {\n\t\tslider = {\n\t\t\ts = 1\n\t\t\tt = 2\n\t\t\tu = 3\n\t\t}\n\t}\n"
+              "\thbox = { tip = 1 }\n}\n"
+              "b = {\n\tslider = {\n\t\ts = 1\n\t\tt = 2\n\t\tu = 3\n\t}\n}\n")
+    ours = ("a = {\n\tmargin = 5\n\twidget = { w = 1 }\n\twidget = { w = 2 }\n}\n"
+            "b = {\n\tslider = {\n\t\ts = 1\n\t\tt = 2\n\t\tu = 3\n\t}\n}\n")
+    first = merge_texts(base, ours, theirs)
+    assert first.text.index("hbox = {\n\t\tslider") < first.text.index("hbox = { tip = 1 }")
+    again = merge_texts(base, first.text, theirs)
+    assert again.text == first.text
+
+
+def test_a_block_that_vanilla_deleted_does_not_pair_with_an_unrelated_block_in_its_place():
+    """Vanilla deletes its widget; the mod keeps a widget of its own next to it. After
+    the first merge the mod's widget is the only widget, in the deleted one's place,
+    but it holds none of its text: it is no change of the deleted widget, and taking
+    vanilla's side never deletes it."""
+    base = "a = {\n\tspacing = 1\n\twidget = {\n\t\tsize = 33\n\t\tbutton = rank\n\t\taction = up\n\t}\n\thbox = { h = 1 }\n}\n"
+    theirs = "a = {\n\tspacing = 1\n\thbox = { h = 1 }\n}\n"
+    ours = ("REPLACE:a = {\n\tspacing = 1\n\twidget = {\n\t\tsize = 33\n\t\tbutton = rank\n\t\taction = up\n\t}\n"
+            "\twidget = {\n\t\tsize = 33\n\t\tvisible = debug\n\t\ticon = circle\n\t\ttooltip = dump\n\t}\n"
+            "\thbox = { h = 1 }\n}\n")
+    first = merge_texts(base, ours, theirs, unwrap=True)
+    assert _decisions(first) == [("vanilla_removed", TAKE, ["widget"])]
+    again = merge_texts(base, first.text, theirs, unwrap=True, decide=lambda *a: (TAKE, "choice"))
+    assert _decisions(again) == [] and "visible = debug" in again.text

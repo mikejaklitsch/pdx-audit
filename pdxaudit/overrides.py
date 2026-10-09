@@ -9,7 +9,7 @@ import hashlib
 from pathlib import Path
 from collections import defaultdict
 
-from . import changes, diff3, ledger, renames, session
+from . import changes, diff3, ledger, session
 from .gui import audit_window, commits_up_to
 from .report import diff_lines, diff_summary, Finding
 from .tracker import MODULE_ROOTS, _git_archive, cache_path, full_hash, tag_of
@@ -457,15 +457,6 @@ def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=Non
     dropped_keys = dropped(keys)
     dropped_refs = dropped(refs, skip=set(keys))   # a name the mod also writes is a key
 
-    # Measured rename candidates, one comparison for each patch that dropped names.
-    found = {}
-    by_patch = defaultdict(set)
-    for kind, items in (("key", dropped_keys), ("ref", dropped_refs)):
-        for item in items:
-            by_patch[item[5]].add((kind, item[0]))
-    for i, targets in by_patch.items():
-        found.update(script_rename_candidates(base, vocabs[i][2], vocabs[i + 1][2], targets))
-
     summary = [f"# Dependency Audit: {vocabs[0][0]} → {vocabs[-1][0]}"]
     if old_msg or new_msg:
         summary.append(f"*every tracked version up to {new_msg}*" if not fixed_window
@@ -484,7 +475,7 @@ def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=Non
         print("**No keys or references the mod uses were dropped by vanilla.**")
         return []
 
-    def section(title, items, verb, kind):
+    def section(title, items, verb):
         if not items:
             return
         print(f"## {title}")
@@ -493,56 +484,19 @@ def run_deps_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ctx=Non
             more = f" (+{len(sites) - 1} more)" if len(sites) > 1 else ""
             print(f"### {name}")
             print(f"- **Vanilla:** used {count} times at {last}, gone since {gone}")
-            if (kind, name) in found:
-                print(f"- **Rename candidate:** {renames.describe(found[(kind, name)])}")
             print(f"- **Mod {verb} it at:** `{sites[0]}`{more}")
             print()
 
-    section("Keys the mod writes that vanilla no longer uses", dropped_keys, "writes", "key")
-    section("Names the mod references that vanilla no longer uses", dropped_refs, "references", "ref")
+    section("Keys the mod writes that vanilla no longer uses", dropped_keys, "writes")
+    section("Names the mod references that vanilla no longer uses", dropped_refs, "references")
     findings = []
-    for kind, use, short, items in (("deps_key_dropped", "key", "key", dropped_keys),
-                                    ("deps_ref_dropped", "reference", "ref", dropped_refs)):
+    for kind, use, items in (("deps_key_dropped", "key", dropped_keys),
+                             ("deps_ref_dropped", "reference", dropped_refs)):
         for name, _last, gone, _count, sites, _i in items:
-            cand = found.get((short, name))
-            tail = f"; {renames.describe(cand)}" if cand else ""
-            findings.append(Finding(kind, name, sites[0], f"dropped in {gone}{tail}",
-                                    {"rename_candidate": cand[0]} if cand else None,
+            findings.append(Finding(kind, name, sites[0], f"dropped in {gone}", None,
                                     {"target": f"deps:{name}", "use": use}, gone))
     return findings
 
-
-def _script_sites(text):
-    """{line: {('key' | 'ref', name)}} for the assignments and the single-name values
-    of a script text, read as the dependency audit reads the mod."""
-    out = {}
-    for ln, raw in enumerate(text.split("\n"), 1):
-        code = raw.split("#")[0]
-        found = set()
-        m = IDENT_ASSIGN.match(code)
-        if m:
-            found.add(("key", m.group(1)))
-        m = RHS_IDENT.match(code)
-        if m and m.group(1) not in RHS_SKIP:
-            found.add(("ref", m.group(1)))
-        if found:
-            out[ln] = found
-    return out
-
-
-def script_rename_candidates(base, old_point, new_point, targets):
-    """renames.candidates for script names, over vanilla's .txt files that hold a
-    target at `old_point`."""
-    needles = [name.encode() for _kind, name in targets]
-    old_ids = {p: b for p, b in base.files(old_point).items() if p.endswith(".txt")}
-    old_blobs = base.blobs(list(old_ids.values()))
-    paths = [p for p, b in old_ids.items() if any(n in old_blobs.get(b, b"") for n in needles)]
-    new_ids = base.files(new_point)
-    new_blobs = base.blobs([new_ids[p] for p in paths if p in new_ids])
-    dec = lambda raw: raw.decode("utf-8-sig", errors="replace")   # noqa: E731
-    old_files = {p: dec(old_blobs[old_ids[p]]) for p in paths}
-    new_files = {p: dec(new_blobs[new_ids[p]]) for p in paths if p in new_ids and new_ids[p] in new_blobs}
-    return renames.candidates(old_files, new_files, targets, _script_sites)
 
 def names_defined_in_vanilla(vanilla_repo, commit, categories, names):
     """Subset of `names` that appear as an assignment target ('name =') anywhere

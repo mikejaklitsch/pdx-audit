@@ -14,33 +14,33 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import (QEvent, QPoint, QPointF, QProcess, QProcessEnvironment,
-                            QPropertyAnimation, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal)
-from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetrics, QFontMetricsF, QIcon, QPainter,
-                           QPainterPath, QPalette, QPen, QPixmap)
+from PySide6.QtCore import (QEvent, QObject, QPoint, QPointF, QProcess, QProcessEnvironment,
+                            QPropertyAnimation, QRect, QRectF, QSettings, QSize, Qt, QTimer, QUrl, Signal)
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontDatabase, QFontMetrics, QFontMetricsF,
+                           QIcon, QPainter, QPainterPath, QPalette, QPen, QPixmap, QWindow)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView, QAbstractScrollArea, QApplication, QButtonGroup, QCheckBox, QComboBox,
     QFileDialog, QFormLayout, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+    QListView, QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QSplitter, QStackedWidget, QStyle, QStyledItemDelegate, QTextBrowser, QToolButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from . import config, highlight, results
-from .report import KIND
+from . import config, editor, highlight, results
+from .merge_view import MergePage
+from .report import KIND, RANK_HELP, RANK_LABEL, RANK_ORDER, rank_count
 from .store import open_store
 from .tracker import get_commits, patch_name as tracker_patch_name
 
 HERE = Path(__file__).parent
 ROLE = Qt.ItemDataRole.UserRole
-SEV_ORDER = ("broken", "stale", "review")
 AUDIT_CHIPS = (("override", "Override"), ("deps", "Dependency"), ("gui", "GUI"),
                ("files", "File copy"), ("loc", "Localization"), ("dupes", "Duplicate"))
 CLI_TO_AUDIT = {"overrides": "override", "deps": "deps", "gui": "gui", "files": "files", "loc": "loc",
                 "dupes": "dupes"}
 AUDIT_LABEL = dict(AUDIT_CHIPS)
 
-C = {"bg": "#14161a", "rail": "#101215", "bar": "#171a1f", "list": "#16191d", "code": "#111317",
+C = {"bg": "#14161a", "rail": "#101215", "well": "#0c0e11", "bar": "#171a1f", "list": "#16191d", "code": "#111317",
      "line": "#22262d", "field": "#1a1d22", "edge": "#2a2f37", "edge2": "#353b45",
      "popup": "#1d2026", "hover": "#1b1f25",
      "text": "#e4e7ec", "text2": "#c7ccd5", "soft": "#aab1bd", "muted": "#8b93a1",
@@ -48,6 +48,7 @@ C = {"bg": "#14161a", "rail": "#101215", "bar": "#171a1f", "list": "#16191d", "c
      "accent": "#5fb3c8", "accent_ink": "#0d1a1e", "accent_bg": "#1f3a41",
      "accent_edge": "#2d5660", "accent_text": "#9ad8e6", "added": "#7fd39a",
      "broken": "#f06b5f", "stale": "#ff9a52", "review": "#7aa2f7", "danger": "#d8483e"}
+RANK_COLOUR = {"breaks": "broken", "decide": "stale", "merge": "review", "check": "muted"}
 TINT = {"stale": QColor(255, 154, 82, 43), "review": QColor(122, 162, 247, 40)}
 # The words that differ between your line and vanilla's, drawn over the tint. Neutral,
 # so script coloured like the severity (orange keys on an orange row) stays readable.
@@ -76,12 +77,14 @@ def _settings():
 _fonts_loaded = False
 
 # The rail's pages, in order: icon, and what the page is for, since it has no labels.
+# (page index, icon, tooltip), in the order the rail shows them.
 RAIL_PAGES = (
-    ("findings", "Findings: what to fix, from the last run"),
-    ("dismissed", "Dismissed: findings you hid, and how to bring them back"),
-    ("commits", "Tracker: the vanilla commits to compare with, and making a new one"),
-    ("output", "Output: the run's report and its log"),
-    ("settings", "Settings: where the tracker and the game are"),
+    (0, "findings", "Findings: what to fix, from the last run"),
+    (5, "merge", "Merge: take vanilla's changes into the mod's copies"),
+    (1, "dismissed", "Dismissed: findings you hid, and how to bring them back"),
+    (2, "commits", "Tracker: the vanilla commits to compare with, and making a new one"),
+    (3, "output", "Output: the run's report and its log"),
+    (4, "settings", "Settings: where the tracker and the game are"),
 )
 
 ICONS = {
@@ -96,6 +99,7 @@ ICONS = {
     "chevron": '<path d="M4.5 6.5L8 10l3.5-3.5"/>',
     "settings": '<path d="M2.5 5.5h11M2.5 10.5h11"/><circle cx="6" cy="5.5" r="1.7"/>'
                 '<circle cx="10.5" cy="10.5" r="1.7"/>',
+    "merge": '<path d="M4.5 2.5v11M4.5 6.5c0 3 7 2 7 5v2"/><circle cx="11.5" cy="4" r="1.5"/>',
 }
 
 
@@ -158,7 +162,7 @@ def _cap(s):
 
 
 def _worst(recs):
-    return next((s for s in SEV_ORDER if any(r["sev"] == s for r in recs)), "review")
+    return next((k for k in RANK_ORDER if any(r["rank"] == k for r in recs)), "check")
 
 
 def _expand(text):
@@ -202,7 +206,7 @@ def stylesheet():
     a = (HERE / "assets").as_posix()
     return f"""
     QWidget {{ color: {C['text']}; font-family: "{SANS}"; font-size: 13px; }}
-    QMainWindow, #root, #page {{ background: {C['bg']}; }}
+    QMainWindow, QDialog, #root, #page {{ background: {C['bg']}; }}
     #rail {{ background: {C['rail']}; border-right: 1px solid {C['line']}; }}
     #rail QToolButton {{ border: none; border-radius: 8px; }}
     #rail QToolButton:hover {{ background: {C['field']}; }}
@@ -230,6 +234,9 @@ def stylesheet():
                                    selection-background-color: {C['accent_bg']}; outline: none; padding: 4px; }}
     QCheckBox {{ spacing: 9px; color: {C['text2']}; }}
     QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid #4a515c; border-radius: 4px; background: transparent; }}
+    QCheckBox:disabled {{ color: {C['dim']}; }}
+    QCheckBox::indicator:disabled {{ border-color: {C['edge']}; }}
+    QCheckBox::indicator:checked:disabled {{ background: {C['accent_edge']}; border-color: {C['accent_edge']}; }}
     QCheckBox::indicator:checked {{ background: {C['accent']}; border-color: {C['accent']}; image: url({a}/check.svg); }}
     QPushButton {{ background: transparent; border: 1px solid {C['edge2']}; border-radius: 6px; padding: 0 12px;
                    min-height: 28px; color: #d4d8df; font-weight: 600; font-size: 12.5px; }}
@@ -256,7 +263,10 @@ def stylesheet():
     #seg {{ border: 1px solid {C['edge']}; border-radius: 7px; }}
     #seg QToolButton {{ border: none; border-radius: 5px; padding: 0 9px; min-height: 22px; color: {C['muted']}; font-size: 12px; }}
     #seg QToolButton:checked {{ background: {C['accent_bg']}; color: {C['accent_text']}; }}
-    #popup {{ background: {C['popup']}; border: 1px solid #2f343d; border-radius: 8px; }}
+    #popup, #comboPopup {{ background: {C['popup']}; border: 1px solid #2f343d; border-radius: 8px; }}
+    #comboList {{ background: transparent; border: none; outline: none; color: #d4d8df; }}
+    #comboList::item {{ padding: 4px 8px; border-radius: 4px; }}
+    #comboList::item:selected {{ background: {C['accent_bg']}; color: #ffffff; }}
     #popup QLabel {{ color: {C['muted']}; font-size: 12px; }}
     QTreeWidget, QListWidget {{ background: {C['list']}; border: none; outline: none; }}
     #dataTree {{ background: {C['bar']}; }}
@@ -268,8 +278,36 @@ def stylesheet():
                                     selection-background-color: {C['accent_edge']}; }}
     QPlainTextEdit {{ font-family: "{MONO}"; font-size: 12.5px; }}
     #card {{ background: {C['bar']}; border: 1px solid {C['line']}; border-radius: 10px; }}
+    #card[selected="true"] {{ border: 1px solid {C['accent']}; }}
+    QPushButton[chosen="true"] {{ background: {C['accent_bg']}; border-color: {C['accent_edge']}; }}
+    QPushButton[chosen="true"]:disabled {{ background: {C['accent_bg']}; border-color: {C['accent_edge']}; color: {C['text2']}; }}
     #cardTitle {{ font-size: 13px; font-weight: 600; }}
+    #mergePage {{ background: {C['rail']}; }}
+    #mergePage QSplitter::handle {{ background: transparent; }}
+    #mergeBar, #mergePage #detailHead {{ background: {C['bar']}; border: 1px solid {C['edge']}; border-radius: 10px; }}
+    #mergePage #listPanel {{ background: {C['list']}; border: 1px solid {C['edge']}; border-radius: 10px; }}
+    #mergePage #listHead {{ border-bottom: 1px solid {C['edge']}; }}
+    #mergeFiles {{ background: transparent; }}
+    #mergeFiles::item {{ padding: 7px 12px; border-bottom: 1px solid {C['line']}; }}
+    #mergeFiles::item:selected {{ background: {C['accent_bg']}; color: #ffffff; }}
+    #mergeFiles::item:hover:!selected {{ background: {C['hover']}; }}
+    #mergeFiles::branch {{ border-bottom: 1px solid {C['line']}; }}
+    #mergeFiles::branch:selected {{ background: {C['accent_bg']}; }}
+    #mergeFiles::branch:has-children:closed {{ image: url({a}/chevron-right.svg); }}
+    #mergeFiles::branch:has-children:open {{ image: url({a}/chevron-down.svg); }}
+    #rowWell {{ background: {C['well']}; border: 1px solid {C['edge']}; border-radius: 10px; }}
+    #rowBox {{ background: transparent; }}
+    #rowBox #card {{ background: {C['bar']}; border: 1px solid {C['edge']}; }}
+    #rowBox #card[selected="true"] {{ border: 1px solid {C['accent']}; }}
+    #viewPanel {{ background: {C['bg']}; border: 1px solid {C['edge']}; border-radius: 10px; }}
+    #viewBar {{ background: {C['bar']}; border-bottom: 1px solid {C['edge']};
+                border-top-left-radius: 9px; border-top-right-radius: 9px; }}
+    #viewTitle {{ font-family: "{MONO}"; font-size: 12px; color: {C['text2']}; }}
+    #cardFoot {{ border-top: 1px solid {C['line']}; }}
     #hint {{ color: {C['muted']}; font-size: 12px; }}
+    #faint {{ color: {C['faint']}; font-size: 11.5px; }}
+    #codeBox {{ font-family: "{MONO}"; font-size: 12px; background: {C['code']}; border: 1px solid {C['line']};
+                padding: 6px; }}
     QToolTip {{ background: {C['popup']}; color: {C['text']}; border: 1px solid #2f343d; padding: 4px 6px; }}
     QMessageBox {{ background: {C['bar']}; }}
     QProgressBar {{ background: {C['line']}; border: none; border-radius: 2px; }}
@@ -278,6 +316,142 @@ def stylesheet():
 
 
 # --- small widgets --------------------------------------------------------------
+
+class Overlay(QFrame):
+    """A panel that floats over the window, as a child of the window. The app uses it
+    in place of Qt's popups: a popup is a window of its own, and under WSLg that
+    window can stay on the screen after it closes. A click outside the panel, or
+    Escape, closes it, as it closes a popup."""
+
+    shown = []                  # the open panels, the top one last
+    closed = Signal()
+
+    def __init__(self, window, name="popup"):
+        super().__init__(window)
+        self.setObjectName(name)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.anchor = None
+        self.hide()
+        _OverlayWatch.install()
+
+    def open_at(self, anchor, point):
+        """Show the panel with its top left corner at `point` of widget `anchor`. The
+        panel stays inside the window; when it has no room below, it opens above."""
+        self.anchor = anchor
+        win = self.parentWidget()
+        at = anchor.mapTo(win, point)
+        x = max(4, min(at.x(), win.width() - self.width() - 4))
+        y = at.y()
+        if y + self.height() > win.height() - 4:
+            y = max(4, anchor.mapTo(win, QPoint(0, 0)).y() - self.height() - 4)
+        self.move(x, y)
+        self.raise_()
+        self.show()
+        if self not in Overlay.shown:
+            Overlay.shown.append(self)
+
+    def hideEvent(self, event):
+        if self in Overlay.shown:
+            Overlay.shown.remove(self)
+            self.closed.emit()
+        super().hideEvent(event)
+
+
+class _OverlayWatch(QObject):
+    """Closes the open Overlay panels on a click outside them, on Escape, and when the
+    window loses the focus. A click on the widget that opened a panel only closes it."""
+
+    _one = None
+
+    @classmethod
+    def install(cls):
+        if cls._one is None:
+            cls._one = cls()
+            QApplication.instance().installEventFilter(cls._one)
+
+    def eventFilter(self, obj, event):
+        if not Overlay.shown or not isinstance(obj, QWindow):
+            return False
+        t = event.type()
+        if t == QEvent.Type.MouseButtonPress:
+            pos = event.globalPosition().toPoint()
+            for panel in reversed(list(Overlay.shown)):
+                if panel.rect().contains(panel.mapFromGlobal(pos)):
+                    break
+                panel.hide()
+                anchor = panel.anchor
+                if anchor is not None and anchor.isVisible() and anchor.rect().contains(anchor.mapFromGlobal(pos)):
+                    return True
+        elif t == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            Overlay.shown[-1].hide()
+            return True
+        elif t == QEvent.Type.FocusOut and obj.isTopLevel():
+            for panel in list(Overlay.shown):
+                panel.hide()
+        return False
+
+
+class Combo(QComboBox):
+    """A QComboBox whose list opens in an Overlay inside the window (see Overlay). It
+    takes the mouse, the wheel and the keys: Up, Down, Enter and Escape."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._panel = self._list = None
+
+    def _build(self):
+        self._panel = Overlay(self.window(), "comboPopup")
+        lay = QVBoxLayout(self._panel)
+        lay.setContentsMargins(4, 4, 4, 4)
+        self._list = QListView(objectName="comboList")
+        self._list.setMouseTracking(True)
+        self._list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._list.entered.connect(self._list.setCurrentIndex)
+        self._list.clicked.connect(self._pick)
+        self._list.installEventFilter(self)
+        lay.addWidget(self._list)
+        OverlayScrollBar(self._list)
+        self._panel.closed.connect(lambda: self.setFocus() if self._list.hasFocus() else None)
+
+    def showPopup(self):
+        if not self.count():
+            return
+        if self._panel is None or self._panel.parentWidget() is not self.window():
+            self._build()
+        lst = self._list
+        lst.setModel(self.model())
+        lst.setModelColumn(self.modelColumn())
+        rows = min(self.count(), self.maxVisibleItems())
+        lst.setCurrentIndex(self.model().index(max(self.currentIndex(), 0), self.modelColumn()))
+        width = max(self.width(), lst.sizeHintForColumn(self.modelColumn()) + 28)
+        self._panel.resize(width, rows * max(lst.sizeHintForRow(0), 1) + 2 * lst.frameWidth() + 8)
+        self._panel.open_at(self, QPoint(0, self.height() + 2))
+        lst.scrollTo(lst.currentIndex())
+        lst.setFocus()
+
+    def hidePopup(self):
+        if self._panel is not None:
+            self._panel.hide()
+
+    def popup_shown(self):
+        return self._panel is not None and self._panel.isVisible()
+
+    def _pick(self, index):
+        row = index.row()
+        self.hidePopup()
+        self.setCurrentIndex(row)
+        self.activated.emit(row)
+        self.textActivated.emit(self.itemText(row))
+
+    def eventFilter(self, obj, event):
+        if obj is self._list and event.type() == QEvent.Type.KeyPress and \
+                event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self._list.currentIndex().isValid():
+                self._pick(self._list.currentIndex())
+            return True
+        return super().eventFilter(obj, event)
+
 
 class OverlayScrollBar(QWidget):
     """A thin rounded thumb drawn over the edge of a scroll area, shown while the
@@ -480,12 +654,12 @@ class SeverityBar(QWidget):
         if not total:
             p.fillRect(self.rect(), QColor(C["line"]))
             return
-        present = [s for s in SEV_ORDER if self.counts.get(s)]
+        present = [k for k in RANK_ORDER if self.counts.get(k)]
         width = self.width() - 2 * (len(present) - 1)
         x = 0.0
-        for i, s in enumerate(present):
-            w = width * self.counts[s] / total
-            p.fillRect(QRectF(x, 0, w, self.height()), QColor(C[s]))
+        for i, k in enumerate(present):
+            w = width * self.counts[k] / total
+            p.fillRect(QRectF(x, 0, w, self.height()), QColor(C[RANK_COLOUR[k]]))
             x += w + 2
 
 
@@ -532,7 +706,7 @@ class TreeDelegate(QStyledItemDelegate):
         else:
             x += 6
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(C[info["sev"]]))
+        p.setBrush(QColor(C[RANK_COLOUR[info["rank"]]]))
         p.drawEllipse(QPointF(x + 3.5, cy), 3.5, 3.5)
         x += 14
         right = r.right() - 12
@@ -593,6 +767,7 @@ class BlockView(QAbstractScrollArea):
     and a note under the line. Long unchanged stretches fold; click to open."""
 
     LINE, NOTE, FOLD, HEAD, TOGGLE = 21, 18, 24, 28, 30
+    coloured = Signal()          # colour_later's rows have their colours
     # Where a side-by-side half draws its line number, sign and code, from its left edge.
     SIDE_NUMBER, SIDE_SIGN, SIDE_CODE = 16, 52, 68
 
@@ -605,6 +780,7 @@ class BlockView(QAbstractScrollArea):
         self.viewport().setMouseTracking(True)
         self.vscroll = OverlayScrollBar(self)
         self.hscroll = OverlayScrollBar(self, Qt.Orientation.Horizontal)
+        self.coloured.connect(self.viewport().update)
 
     def set_rows(self, rows, footer, selected, columns=None, prepared=None):
         """Show `rows`: block_rows' or source rows, or side_rows' with `columns` naming
@@ -635,23 +811,31 @@ class BlockView(QAbstractScrollArea):
     def _colour(rows):
         """Syntax spans for each code row. The block's own lines are highlighted as
         one sequence so the grammar's state carries across them; a line vanilla
-        added, and each duplicate definition, is highlighted on its own."""
-        hl = highlight.highlighter()
-        for side in ("left", "right"):
-            cells = [r[side] for r in rows if r.get(side)]
-            for cell, spans in zip(cells, hl.line_spans([_expand(c["text"]) for c in cells])):
-                cell["spans"] = spans
-
-        def run(seq):
-            for row, spans in zip(seq, hl.line_spans([_expand(r["text"]) for r in seq])):
-                row["spans"] = spans
-
-        run([r for r in rows if "text" in r and not r.get("ghost")])
+        added, and each duplicate definition, is highlighted on its own. The
+        highlighter runs in its own process (highlight.spans_of), so call this from
+        a worker thread."""
+        seqs = [[r[side] for r in rows if r.get(side)] for side in ("left", "right")]
+        seqs.append([r for r in rows if "text" in r and not r.get("ghost")])
         for r in rows:
             if r.get("ghost"):
-                run([r])
+                seqs.append([r])
             elif "toggle" in r:
-                run([c for c in r["rows"] if "text" in c])
+                seqs.append([c for c in r["rows"] if "text" in c])
+        seqs = [seq for seq in seqs if seq]
+        for seq, spans in zip(seqs, highlight.spans_of([[_expand(c["text"]) for c in seq] for seq in seqs])):
+            for cell, line in zip(seq, spans):
+                cell["spans"] = line
+
+    def colour_later(self, rows):
+        """Colour `rows` on a worker thread, then paint them again. Until then they
+        show without syntax colours."""
+        def run():
+            self._colour(rows)
+            try:
+                self.coloured.emit()
+            except RuntimeError:
+                pass                 # the view was deleted while this ran
+        threading.Thread(target=run, daemon=True).start()
 
     def _draw_code(self, p, spans, x, top, ghost=False, cols=None):
         """Draw a line's syntax spans from x; with `cols`, a line longer than that many
@@ -718,7 +902,8 @@ class BlockView(QAbstractScrollArea):
                 if "toggle" in row or "text" in row or "left" in row]
 
     def _layout(self):
-        code_fm = QFontMetrics(font(12.5, mono=True))
+        # Code is drawn on the grid of code_width(), so its width is its length.
+        code_w = lambda text: len(_expand(text)) * code_width()   # noqa: E731
         note_fm = QFontMetrics(font(11.5))
         self.items, y, widest = [], 10, 0
         if self.columns:
@@ -731,7 +916,7 @@ class BlockView(QAbstractScrollArea):
             if "left" in row:
                 cells = [c for c in (row["left"], row["right"]) if c]
                 for cell in cells:
-                    widest = max(widest, self.SIDE_CODE + code_fm.horizontalAdvance(_expand(cell["text"])) + 20)
+                    widest = max(widest, self.SIDE_CODE + code_w(cell["text"]) + 20)
                 h = self.LINE * max(lines(c["text"], side_cols) for c in cells)
                 self.items.append((y, h, row))
                 y += h
@@ -746,7 +931,7 @@ class BlockView(QAbstractScrollArea):
                 y += self.FOLD
                 continue
             h = self.LINE * lines(row["text"], line_cols) + (self.NOTE if row.get("note") else 0)
-            widest = max(widest, 62 + code_fm.horizontalAdvance(row["text"].replace("\t", "    ")) + 20,
+            widest = max(widest, 62 + code_w(row["text"]) + 20,
                          62 + note_fm.horizontalAdvance(row.get("note") or "") + 20)
             self.items.append((y, h, row))
             y += h
@@ -757,9 +942,9 @@ class BlockView(QAbstractScrollArea):
                 y += self.HEAD
                 for line in lines:
                     self.items.append((y, self.LINE, {"footer": line, "spans": highlight.highlighter().line_spans([_expand(line)])[0]}))
-                    widest = max(widest, 62 + code_fm.horizontalAdvance(line) + 20)
+                    widest = max(widest, 62 + code_w(line) + 20)
                     y += self.LINE
-        self.content_h, self.content_w = y + 10, 0 if self.wrap else widest
+        self.content_h, self.content_w = y + 10, 0 if self.wrap else int(widest + 1)
         vp = self.viewport()
         self.verticalScrollBar().setRange(0, max(0, self.content_h - vp.height()))
         self.verticalScrollBar().setPageStep(max(vp.height(), 1))
@@ -925,7 +1110,7 @@ class BlockView(QAbstractScrollArea):
                 return
             if "fold" in row and top <= y < top + h:
                 i = self.visible.index(row)
-                self._colour(row["fold"])
+                self.colour_later(row["fold"])
                 self.visible[i:i + 1] = row["fold"]
                 self._layout()
                 return
@@ -940,6 +1125,9 @@ class MainWindow(QMainWindow):
 
     def __init__(self, mod_root, vanilla_repo, options, autorun=True):
         super().__init__()
+        # Start the highlighter's process now, so the first block view does not wait
+        # for it to load the grammar.
+        threading.Thread(target=highlight.spans_of, args=([["a = b"]],), daemon=True).start()
         self.background_jobs = 0
         self._generations = {}
         self._prepared = {}      # (block id, side by side, flatten) -> BlockView.prepare's result
@@ -989,6 +1177,8 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self._build_tracker_page())
         self.pages.addWidget(self._build_output_page())
         self.pages.addWidget(self._build_settings_page())
+        self.merge_page = MergePage(self, C, MONO, lambda: _settings())
+        self.pages.addWidget(self.merge_page)
         column.addWidget(self.pages, 1)
         column.addWidget(self._build_statusbar())
         outer.addLayout(column, 1)
@@ -1051,7 +1241,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(8, 12, 8, 12)
         lay.setSpacing(6)
         self.rail_group = QButtonGroup(self)
-        for i, (icon, tip) in enumerate(RAIL_PAGES):
+        for i, icon, tip in RAIL_PAGES:
             b = QToolButton()
             b.setCheckable(True)
             b.setFixedSize(36, 36)
@@ -1122,17 +1312,14 @@ class MainWindow(QMainWindow):
         return bar
 
     def _popup(self):
-        pop = QFrame(self, Qt.WindowType.Popup)
-        pop.setObjectName("popup")
-        pop.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        return pop
+        return Overlay(self)
 
     def _build_popups(self):
         self.window_popup = self._popup()
         form = QFormLayout(self.window_popup)
         form.setContentsMargins(14, 14, 14, 14)
         form.setSpacing(10)
-        self.old_combo, self.new_combo = QComboBox(), QComboBox()
+        self.old_combo, self.new_combo = Combo(), Combo()
         for combo in (self.old_combo, self.new_combo):
             combo.setMinimumWidth(220)
             combo.currentIndexChanged.connect(lambda _i: self._update_window_label())
@@ -1145,7 +1332,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(14, 14, 14, 14)
         lay.setSpacing(6)
         lay.addWidget(QLabel("Category"))
-        self.category_combo = QComboBox()
+        self.category_combo = Combo()
         self.category_combo.addItem("All categories", "")
         for category in self.targets:
             self.category_combo.addItem(category, category)
@@ -1153,7 +1340,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.category_combo)
         lay.addSpacing(6)
         lay.addWidget(QLabel("Block"))
-        self.block_combo = QComboBox()
+        self.block_combo = Combo()
         self.block_combo.setMaxVisibleItems(18)
         lay.addWidget(self.block_combo)
         lay.addSpacing(6)
@@ -1182,14 +1369,12 @@ class MainWindow(QMainWindow):
 
     def _open_window_popup(self):
         self.window_popup.adjustSize()
-        self.window_popup.move(self.window_button.mapToGlobal(QPoint(0, self.window_button.height() + 4)))
-        self.window_popup.show()
+        self.window_popup.open_at(self.window_button, QPoint(0, self.window_button.height() + 4))
 
     def _open_run_popup(self):
         self.run_popup.adjustSize()
-        corner = self.run_arrow.mapToGlobal(QPoint(self.run_arrow.width(), self.run_arrow.height() + 4))
-        self.run_popup.move(corner.x() - self.run_popup.width(), corner.y())
-        self.run_popup.show()
+        self.run_popup.open_at(self.run_arrow, QPoint(self.run_arrow.width() - self.run_popup.width(),
+                                                      self.run_arrow.height() + 4))
 
     def _build_strip(self):
         strip = QFrame(objectName="strip")
@@ -1246,6 +1431,7 @@ class MainWindow(QMainWindow):
         hh.addWidget(seg)
         v.addWidget(head)
         self.tree = QTreeWidget()
+        self.tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.tree.setHeaderHidden(True)
         self.tree.setIndentation(0)
         self.tree.setRootIsDecorated(False)
@@ -1397,6 +1583,9 @@ class MainWindow(QMainWindow):
         self.dismiss_button = QPushButton("Dismiss")
         self.dismiss_button.setProperty("kind", "danger")
         self.dismiss_button.clicked.connect(self.dismiss_current)
+        self.open_button = QPushButton("Open in editor")
+        self.open_button.clicked.connect(self.open_in_editor)
+        bh.addWidget(self.open_button)
         bh.addWidget(self.reason_edit, 1)
         bh.addWidget(self.dismiss_note, 1)
         bh.addWidget(self.dismiss_button)
@@ -1432,6 +1621,7 @@ class MainWindow(QMainWindow):
                                                    "dismissal also lapses on its own once either "
                                                    "side's text changes.")
         self.dismissed_tree = QTreeWidget(objectName="dataTree")
+        self.dismissed_tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.dismissed_tree.setHeaderLabels(["Id", "Name", "Finding", "Detail", "Dismissed", "Reason"])
         self.dismissed_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.dismissed_tree.setRootIsDecorated(False)
@@ -1453,6 +1643,7 @@ class MainWindow(QMainWindow):
         snaps, sv = self._card("Commits", self._tracker_line())
         self.version_card = snaps
         self.version_tree = QTreeWidget(objectName="dataTree")
+        self.version_tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.version_tree.setHeaderLabels(["Version", "Hash"])
         self.version_tree.setRootIsDecorated(False)
         OverlayScrollBar(self.version_tree)
@@ -1490,6 +1681,7 @@ class MainWindow(QMainWindow):
                                                      "deleted branches. Your dismissals on live "
                                                      "branches are untouched.")
         self.orphan_list = QListWidget()
+        self.orphan_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         OverlayScrollBar(self.orphan_list)
         ov.addWidget(self.orphan_list, 1)
         self.orphan_button = QPushButton("Remove orphaned records")
@@ -1516,7 +1708,7 @@ class MainWindow(QMainWindow):
         for key in config.SETTABLE:
             spec = config.SETTINGS[key]
             if spec["kind"] == "choice":
-                edit = QComboBox()
+                edit = Combo()
                 edit.addItems(spec["choices"])
                 edit.setToolTip(spec["help"])
                 edit.activated.connect(lambda _i, k=key: self.save_setting(k))
@@ -1532,6 +1724,12 @@ class MainWindow(QMainWindow):
                 browse.clicked.connect(lambda _c=False, k=key: self._browse_setting(k))
                 row.addWidget(browse)
                 self.setting_buttons.append(browse)
+            if key == "editor":
+                self.editor_suggestions = Combo()
+                self.editor_suggestions.setToolTip("The editors found on this machine. Picking one fills in "
+                                                   "its command; you can still edit the command by hand.")
+                self.editor_suggestions.activated.connect(self._pick_editor)
+                row.addWidget(self.editor_suggestions)
             save = QPushButton("Save")
             save.setProperty("kind", "primary")
             save.clicked.connect(lambda _c=False, k=key: self.save_setting(k))
@@ -1552,6 +1750,7 @@ class MainWindow(QMainWindow):
             self.setting_edits[key] = edit
             self.setting_notes[key] = note
         v.addLayout(form)
+        self.refresh_editor_suggestions()
         self.settings_message = QLabel(objectName="hint")
         self.settings_message.setWordWrap(True)
         self.settings_message.setVisible(False)
@@ -1598,6 +1797,22 @@ class MainWindow(QMainWindow):
             self.setting_notes[s["key"]].setText("" if stored_here else f"from {s['origin']}")
         # An empty box means "use the setting", which is what the CLI resolves anyway.
         self.snap_patch.setPlaceholderText(tracker_patch_name())
+
+    def refresh_editor_suggestions(self):
+        """Fill the editor list with the editors installed on this machine."""
+        box = self.editor_suggestions
+        box.clear()
+        found = editor.suggestions()
+        box.addItem("Pick an installed editor…" if found else "No known editor found", "")
+        for label, command in found:
+            box.addItem(label, command)
+
+    def _pick_editor(self, index):
+        command = self.editor_suggestions.itemData(index)
+        if command:
+            self.setting_edits["editor"].setText(command)
+            self.save_setting("editor")
+        self.editor_suggestions.setCurrentIndex(0)
 
     def _browse_setting(self, key):
         edit = self.setting_edits[key]
@@ -1738,6 +1953,7 @@ class MainWindow(QMainWindow):
         n = len(self.commits)
         self.status_right.setText(f"{self._tracker_name()} · {n} commit{'' if n == 1 else 's'}")
         self._update_window_label()
+        self.merge_page.refresh_versions()
 
     def _update_window_label(self):
         msgs = [m for _h, m in self.commits]
@@ -1879,25 +2095,28 @@ class MainWindow(QMainWindow):
     # --- background jobs --------------------------------------------------------
 
     def _set_busy(self, busy, text=None):
+        # A blocked button says why in its tooltip.
+        self.busy_reason = (f"Wait until this command ends: {(text or 'a command').rstrip('….')}." if busy else "")
         for w in (self.run_button, self.run_arrow, self.restore_button, self.commit_button,
-                  self.orphan_button):
+                  self.orphan_button, *self.setting_buttons):
+            if w.property("idle_tip") is None:
+                w.setProperty("idle_tip", w.toolTip())
             w.setEnabled(not busy)
-        for w in (self.run_button, self.run_arrow):
-            if not self.vanilla_repo:
+            w.setToolTip(self.busy_reason or w.property("idle_tip"))
+        if not self.vanilla_repo:
+            for w in (self.run_button, self.run_arrow):
                 w.setEnabled(False)
                 w.setToolTip("Choose a tracker in Settings, or make the first commit")
-            else:
-                w.setToolTip("")
-        # Settings are not edited while a run is reading the tracker they name.
-        for w in self.setting_buttons:
-            w.setEnabled(not busy)
         self.stop_button.setVisible(busy)
         self.busy_bar.setVisible(busy)
+        self.merge_page.set_busy(busy)
         if text:
             self._status(text)
         self._update_dismiss_state()
 
-    def _start(self, argv, on_done, text):
+    def _start(self, argv, on_done, text, command=None):
+        """Run the command line with `argv` in a background process. `command` is a
+        subcommand, such as merge, which takes its own options."""
         if self.process is not None:
             return
         proc = QProcess(self)
@@ -1912,14 +2131,18 @@ class MainWindow(QMainWindow):
         proc.errorOccurred.connect(lambda err: self._failed_to_start(err, on_done))
         self.process = proc
         self.last_line = ""
-        self.log.appendPlainText(f"\n$ pdx-audit {' '.join(argv)}")
+        self.log.appendPlainText(f"\n$ pdx-audit {command + ' ' if command else ''}{' '.join(argv)}")
         self.log_fresh = True       # the first output of this run starts its own line
         self._set_busy(True, text)
         # With no tracker, --commit is the one command that runs: it creates the repo
         # where the settings say, so the flag is left off for it to resolve that itself.
         tracker = ["--vanilla-repo", self.vanilla_repo] if self.vanilla_repo else []
-        proc.start(sys.executable, ["-m", "pdxaudit.cli", "--mod-root", str(self.mod_root),
-                                    *tracker, "--color", "never", *argv])
+        if command:
+            proc.start(sys.executable, ["-m", "pdxaudit.cli", command, "--mod-root", str(self.mod_root),
+                                        *tracker, *argv])
+        else:
+            proc.start(sys.executable, ["-m", "pdxaudit.cli", "--mod-root", str(self.mod_root),
+                                        *tracker, "--color", "never", *argv])
 
     def _read(self, data):
         text = bytes(data).decode("utf-8", "replace").replace("\r", "\n")
@@ -2039,11 +2262,13 @@ class MainWindow(QMainWindow):
     def _update_summary(self):
         p = self.payload or {}
         recs = self.records
-        counts = {s: sum(1 for r in recs if r["sev"] == s) for s in SEV_ORDER}
+        counts = {k: sum(1 for r in recs if r["rank"] == k) for k in RANK_ORDER}
         self.sev_bar.set_counts(counts)
         if recs:
             self.counts_label.setText("&nbsp;&nbsp;&nbsp;".join(
-                f'<b style="color:{C[s]}; font-weight:600;">{counts[s]}</b> {s}' for s in SEV_ORDER if counts[s]))
+                f'<span style="color:{C[RANK_COLOUR[k]]}; font-weight:600;">{rank_count(k, counts[k])}</span>'
+                for k in RANK_ORDER if counts[k]))
+            self.counts_label.setToolTip("\n".join(f"{_cap(RANK_LABEL[k][1])}: {RANK_HELP[k]}" for k in RANK_ORDER))
         else:
             self.counts_label.setText("No action needed: everything the mod overrides is current with vanilla.")
         extra = [f"{len({r['file'] for r in recs})} files"] if recs else []
@@ -2173,19 +2398,19 @@ class MainWindow(QMainWindow):
     def _add_leaf(self, parent, rec, depth):
         title = rec["name"] + (f" › {rec['path'].replace(' > ', ' › ')}" if rec.get("path") else "")
         self._node(parent, {"type": "leaf", "title": title, "id": rec["id"] if rec["dismissible"] else "",
-                            "sev": rec["sev"], "depth": depth, "index": len(self._items)}, title)
+                            "rank": rec["rank"], "depth": depth, "index": len(self._items)}, title)
         self._items.append((parent.child(parent.childCount() - 1), rec))
 
     def _sorted(self, recs):
-        return sorted(recs, key=lambda r: (SEV_ORDER.index(r["sev"]), r["name"], r["detail"]))
+        return sorted(recs, key=lambda r: (RANK_ORDER.index(r["rank"]), r["name"], r["detail"]))
 
     def _add_files(self, section, recs, expand):
         groups = {}
         for r in recs:
             groups.setdefault(r["file"], []).append(r)
-        for path in sorted(groups, key=lambda f: (SEV_ORDER.index(_worst(groups[f])), -len(groups[f]), f)):
+        for path in sorted(groups, key=lambda f: (RANK_ORDER.index(_worst(groups[f])), -len(groups[f]), f)):
             item = self._node(section, {"type": "file", "title": path, "full": True, "depth": 0,
-                                        "count": len(groups[path]), "sev": _worst(groups[path])}, path)
+                                        "count": len(groups[path]), "rank": _worst(groups[path])}, path)
             self._titles.append(path)
             for r in self._sorted(groups[path]):
                 self._add_leaf(item, r, 1)
@@ -2209,14 +2434,14 @@ class MainWindow(QMainWindow):
                 child = node["dirs"][name]
                 inside = gather(child)
                 item = self._node(parent, {"type": "folder", "title": name, "depth": depth,
-                                           "count": len(inside), "sev": _worst(inside)}, prefix + name)
+                                           "count": len(inside), "rank": _worst(inside)}, prefix + name)
                 self._titles.append(name)
                 add(item, child, depth + 1, prefix + name + "/")
                 item.setExpanded(expand)
             for name in sorted(node["files"]):
                 rs = node["files"][name]
                 item = self._node(parent, {"type": "file", "title": name, "depth": depth,
-                                           "count": len(rs), "sev": _worst(rs)}, prefix + name)
+                                           "count": len(rs), "rank": _worst(rs)}, prefix + name)
                 self._titles.append(name)
                 for r in self._sorted(rs):
                     self._add_leaf(item, r, depth + 1)
@@ -2278,7 +2503,10 @@ class MainWindow(QMainWindow):
 
         block = self.payload["blocks"].get(rec["block"]) if rec.get("block") else None
         kind = (block or {}).get("type") or AUDIT_LABEL.get(rec["audit"], rec["audit"])
-        meta = [f'<span style="color:{C[rec["sev"]]}; font-weight:600;">●&nbsp;{_cap(rec["sev"])}</span>', _esc(kind)]
+        rank = rec["rank"]
+        meta = [f'<span style="color:{C[RANK_COLOUR[rank]]}; font-weight:600;">●&nbsp;{_cap(RANK_LABEL[rank][0])}</span>',
+                _esc(kind)]
+        self.meta_label.setToolTip(RANK_HELP[rank])
         since = rec.get("since") or ""
         if since:
             meta.append(f"vanilla changed it in {_esc(since)}")
@@ -2467,7 +2695,19 @@ class MainWindow(QMainWindow):
         rec = self.current
         can = bool(rec and rec["dismissible"] and self.process is None)
         self.dismiss_button.setEnabled(can)
+        self.dismiss_button.setToolTip(getattr(self, "busy_reason", "") if self.process is not None else "")
         self.reason_edit.setEnabled(can)
+        path = self._mod_file(rec)
+        self.open_button.setEnabled(path is not None)
+        self.open_button.setToolTip(f"{path}:{rec['line'] or 1}" if path else
+                                    "The finding names no file in the mod")
+
+    def _mod_file(self, rec):
+        """The mod file a finding names, or None when it names none that exists."""
+        if not rec or not rec.get("file"):
+            return None
+        path = self.mod_root / rec["file"]
+        return path if path.is_file() else None
 
     # --- record actions --------------------------------------------------------
 
@@ -2490,6 +2730,29 @@ class MainWindow(QMainWindow):
         self._rebuild_tree()
         self.refresh_store_views()
         self._status(f"Dismissed {rec['id']} {rec['name']}.")
+
+    def open_in_editor(self):
+        """Open the finding's file at its line."""
+        rec = self.current
+        if self._mod_file(rec) is not None:
+            self.open_file(rec["file"], rec["line"])
+
+    def open_file(self, rel, line):
+        """Open the mod file `rel` at `line` with the editor setting, or with the
+        system's default program when there is no setting."""
+        path = self.mod_root / rel
+        if not path.is_file():
+            return
+        template, _origin = config.setting("editor")
+        if not template:
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                self._status(f"No program opens {path.name}. Set an editor command on the Settings page.")
+            return
+        try:
+            editor.launch(editor.command(template, path, line))
+        except (OSError, ValueError) as e:
+            QMessageBox.warning(self, "Editor did not start",
+                                f"The editor command could not start: {e}\n\nCorrect it on the Settings page.")
 
     def restore_selected(self):
         ids = [item.data(0, ROLE) for item in self.dismissed_tree.selectedItems()]

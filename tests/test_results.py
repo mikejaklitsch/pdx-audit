@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from pdxaudit import results
+from pdxaudit.report import RANK
 from pdxaudit.safety import remove_file
 
 from test_cli import cli  # noqa: F401  (fixture)
@@ -37,6 +38,7 @@ def test_results_file_holds_every_actionable_finding(cli):
     assert isinstance(payload["info"], int) and payload["dismissed"] == 0
     for r in payload["records"]:
         assert r["id"] == r["fid"][:8]
+        assert r["rank"] == RANK[r["kind"]]
 
 
 def test_every_change_of_a_target_shares_its_block_view(cli):

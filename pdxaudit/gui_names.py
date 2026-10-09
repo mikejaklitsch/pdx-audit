@@ -16,7 +16,7 @@ version, and no vanilla .gui file or English localization file uses it at the ne
 version. The tracker holds no engine dump. When the config names one (`engine_data`,
 the pdx-syntax database), the audit drops a binding finding for a name the engine
 still knows, and marks the others as confirmed. Each finding gives the patch that
-dropped the name, and a measured rename candidate when there is one (renames.py).
+dropped the name. It never names a replacement.
 
 The audit reads the .gui files of every module, because a module can use the
 definitions of another: in_game uses the font templates of loading_screen and the
@@ -27,7 +27,7 @@ import re
 import sys
 from collections import defaultdict
 
-from . import diff3, renames, session
+from . import diff3, session
 from .config import setting
 from .gui import commits_up_to, mod_gui_files
 from .report import Finding
@@ -227,23 +227,6 @@ def _gui_names(base, point, label=""):
                         lambda: build_vanilla_gui_names(base, point, label))
 
 
-def _gui_texts(base, point):
-    return session.memo(("gui_texts", id(base), point), lambda: _texts(base, point, _GUI_PATH))
-
-
-def _sites(text):
-    """{line: {(kind, name)}} for the GUI uses and binding names of a .gui text."""
-    def build():
-        found = file_names(text)
-        out = defaultdict(set)
-        for kind, name, ln in found["uses"]:
-            out[ln].add((kind, name))
-        for name, ln in found["bindings"]:
-            out[ln].add(("binding", name))
-        return dict(out)
-    return session.memo(("gui_sites", text), build)
-
-
 def engine_names(path=None):
     """The data-binding names the engine knows, from the data_types table of the
     pdx-syntax database: each part of each dotted name (`EconomyView.GetEstimatedBalance`
@@ -341,14 +324,6 @@ def run_gui_names_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ct
                 continue
             dropped.append(("binding", name, i, bindings[name]))
 
-    # Measured rename candidates, one comparison for each patch that dropped names.
-    found = {}
-    by_patch = defaultdict(set)
-    for kind, name, i, _where in dropped:
-        by_patch[i].add((kind, name))
-    for i, targets in by_patch.items():
-        found.update(renames.candidates(_gui_texts(base, versions[i][0]),
-                                        _gui_texts(base, versions[i + 1][0]), targets, _sites))
     dropped.sort(key=lambda x: (x[2], x[0], x[1]))
 
     defined = [d for d in dropped if d[0] != "binding"]
@@ -381,24 +356,19 @@ def run_gui_names_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, ct
                       + ("" if engine is None else "; the engine data does not list it"))
             else:
                 print(f"- **Vanilla:** {kind} defined at {last}, gone since {gone}")
-            if (kind, name) in found:
-                print(f"- **Rename candidate:** {renames.describe(found[(kind, name)])}")
             print(f"- **Mod uses it at:** {sites_line(sites)}")
             print()
 
     findings = []
     for kind, name, i, sites in dropped:
         gone = versions[i + 1][1]
-        cand = found.get((kind, name))
-        tail = f"; {renames.describe(cand)}" if cand else ""
-        data = {"rename_candidate": cand[0]} if cand else None
         if kind == "binding":
             fkind = "deps_binding_dropped" if engine is None else "deps_binding_removed"
-            findings.append(Finding(fkind, name, sites[0], f"unused since {gone}{tail}", data,
+            findings.append(Finding(fkind, name, sites[0], f"unused since {gone}", None,
                                     {"target": f"deps:binding/{name}", "use": "binding"}, gone))
         else:
-            findings.append(Finding("deps_gui_dropped", name, sites[0], f"{kind} dropped in {gone}{tail}",
-                                    data, {"target": f"deps:gui/{kind}/{name}", "use": kind}, gone))
+            findings.append(Finding("deps_gui_dropped", name, sites[0], f"{kind} dropped in {gone}",
+                                    None, {"target": f"deps:gui/{kind}/{name}", "use": kind}, gone))
     return findings
 
 

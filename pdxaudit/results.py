@@ -7,6 +7,7 @@ key, so a dismissal made from a record has the same id as one made with
 --dismiss."""
 import datetime
 import difflib
+import functools
 import hashlib
 import re
 from pathlib import Path
@@ -19,7 +20,7 @@ from . import ledger
 from .config import should_skip
 from .diff3 import CONFLICT_KINDS, norm_value
 from .overrides import _brace_extract, find_overrides
-from .report import (KIND, SEV_INFO, Finding, _is_value_finding, change_kind, line_label,
+from .report import (KIND, RANK, SEV_INFO, Finding, _is_value_finding, change_kind, line_label,
                      value_pair)
 from .store import open_store
 from .worddiff import word_spans
@@ -65,7 +66,7 @@ def build_payload(findings, *, mod_name="", old_msg="", new_msg="", new_tag="",
         fid = ledger.finding_id(f)
         file, line = _split_location(f.location)
         rec = {"fid": fid, "id": ledger.short_id(fid), "kind": f.kind, "name": f.name,
-               "audit": audit, "sev": sev, "label": label, "fix": fix,
+               "audit": audit, "sev": sev, "rank": RANK[f.kind], "label": label, "fix": fix,
                "location": f.location or "", "file": file, "line": line,
                "detail": f.detail or "", "key": f.key, "since": f.since or "",
                "base": f.base or "", "dismissible": ledger.is_dismissible(f),
@@ -331,6 +332,7 @@ def block_rows(block):
 _DIRECTIVE = re.compile(r"^[A-Z_]+:")
 
 
+@functools.lru_cache(maxsize=1 << 16)
 def _line_key(line):
     """A line as the side-by-side view compares it: its tokens without comments,
     layout, number spelling or an override directive such as `REPLACE:`. A blank or
@@ -659,11 +661,12 @@ def _fold_label(rows):
             else f"{len(rows)} unchanged lines")
 
 
-def fold_rows(rows, keep=FOLD_KEEP, min_hidden=FOLD_MIN_HIDDEN):
+def fold_rows(rows, keep=FOLD_KEEP, min_hidden=FOLD_MIN_HIDDEN, anchor=None):
     """rows with each long stretch of unmarked lines folded into one
     {"fold": [hidden rows], "label": what it hides} row. The `keep` lines next to a
     marked line stay visible as context; a stretch that reaches the start or end of
-    the block folds all the way to it."""
+    the block folds all the way to it. `anchor(row)`, when given, says which rows
+    stay in place of the marked ones."""
     out, run = [], []
 
     def flush(after_mark, before_mark):
@@ -679,7 +682,7 @@ def fold_rows(rows, keep=FOLD_KEEP, min_hidden=FOLD_MIN_HIDDEN):
 
     seen_mark = False
     for r in rows:
-        if r.get("mark") or r.get("ghost") or "toggle" in r:
+        if (anchor(r) if anchor else r.get("mark") or r.get("ghost") or "toggle" in r):
             flush(seen_mark, True)
             out.append(r)
             seen_mark = True

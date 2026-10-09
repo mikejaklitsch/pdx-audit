@@ -226,3 +226,10 @@ def test_unset_points_at_the_environment_variable_that_holds_the_setting(cfg_fil
     config.invalidate()
     message, = config.unset_value("patch_name")
     assert "PDX_PATCH_NAME" in message and "change it there" in message
+
+
+def test_the_editor_command_is_stored_and_a_broken_one_refused(cfg_files):
+    config.set_value("editor", "myedit --goto {file}:{line}")
+    assert json.loads(cfg_files.data.read_text(encoding="utf-8"))["editor"] == "myedit --goto {file}:{line}"
+    with pytest.raises(config.ConfigError):
+        config.set_value("editor", "myedit {path}")

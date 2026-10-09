@@ -275,3 +275,25 @@ def test_every_finding_has_a_fingerprint_target(world):
                            world.new, "1.1.0", *extra)
         for f in findings:
             assert f.key and f.key.get("target"), f
+
+
+# --- rank: what the user must do -------------------------------------------------
+
+def test_every_listed_kind_has_a_rank():
+    from pdxaudit.report import RANK, RANK_ORDER, SEV_INFO
+    for kind, (sev, *_rest) in KIND.items():
+        if sev != SEV_INFO:
+            assert RANK.get(kind) in RANK_ORDER, kind
+
+
+@pytest.mark.parametrize("kind, rank", [
+    ("dupes_multiple_sources", "breaks"), ("override_orphaned", "breaks"), ("deps_key_dropped", "breaks"),
+    ("deps_binding_dropped", "breaks"),
+    ("override_both_changed_mid", "decide"), ("file_removed_changed_mid", "decide"),
+    ("gui_vanilla_renamed_mid", "decide"), ("override_block_changed_high", "decide"),
+    ("override_vanilla_changed_mid", "merge"), ("gui_vanilla_added_high", "merge"),
+    ("file_vanilla_removed_mid", "merge"), ("file_def_added", "merge"),
+    ("override_absent", "check"), ("loc_removed", "check"), ("dupes_loc_key_same", "check")])
+def test_rank_follows_what_the_user_must_do(kind, rank):
+    from pdxaudit.report import RANK
+    assert RANK[kind] == rank

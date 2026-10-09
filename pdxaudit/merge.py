@@ -34,9 +34,11 @@ decision with the reason "older than --old" (see _Merge.gate).
 The removed-line check compares the merged text with ours line by line. Every line
 that the merge removes must lie inside an operation that a vanilla change explains.
 Any other removal fails the file, and `--apply` does not write it."""
+import bisect
 import difflib
 import json
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 from . import diff3, intent
@@ -51,6 +53,8 @@ class Op:
     text: str
     why: str                     # what explains it: "vanilla changed", "rule:x", ...
     removes: bool = True         # True when the op removes ours text
+    decision: int = None         # the index of the decision that takes the op, or None
+    rank: int = None             # an insertion's offset in theirs: insertions at one place go in its order
 
 
 @dataclass
@@ -65,6 +69,7 @@ class Decision:
     theirs: str = None
     line: int = None
     commit: str = None
+    address: dict = None         # the copy's identity and the node's path, for a choice
 
     def to_json(self):
         return {k: v for k, v in self.__dict__.items() if v not in (None, "")}
@@ -261,7 +266,21 @@ def _score(m, n, dialect, hint=None):
     return 1 + _similarity(m, n) + extra
 
 
-def _gap(a, b, ia, ib, dialect, hints=None):
+def _pair_score(a, b, i, j, dialect, hints=None, deleted=()):
+    """_score of a[i] and b[j], or 0 when a[i] is a block that vanilla deleted
+    (`deleted`), it has no name or selector, and b[j] does not keep MOVED_SHARE of
+    it. A pairing of a deleted block makes the mod's block a change of the deleted
+    one, and taking vanilla's side deletes the mod's text. A name or a selector shows
+    that it is that block; without them, only the text itself can."""
+    m, n = a[i], b[j]
+    s = _score(m, n, dialect, (hints or {}).get(i))
+    if s and i in deleted and m.sig != n.sig and m.label == m.key and diff3.selector(m, dialect) is None \
+            and not _kept_share(m, n):
+        return 0
+    return s
+
+
+def _gap(a, b, ia, ib, dialect, hints=None, deleted=()):
     """Order-preserving pairs between two runs of unmatched siblings, with the most
     total score (a weighted longest common subsequence)."""
     ia, ib = list(ia), list(ib)
@@ -269,17 +288,17 @@ def _gap(a, b, ia, ib, dialect, hints=None):
         return []
     if len(ia) * len(ib) > 250000:                 # a huge run: diff3's own pairing
         pairs = diff3.align([a[i] for i in ia], [b[j] for j in ib], dialect)
-        return [(ia[x], ib[y]) for x, y in pairs]
+        return [(ia[x], ib[y]) for x, y in pairs if _pair_score(a, b, ia[x], ib[y], dialect, hints, deleted)]
     n, m = len(ia), len(ib)
     best = [[0.0] * (m + 1) for _ in range(n + 1)]
     for x in range(n - 1, -1, -1):
         for y in range(m - 1, -1, -1):
-            s = _score(a[ia[x]], b[ib[y]], dialect, (hints or {}).get(ia[x]))
+            s = _pair_score(a, b, ia[x], ib[y], dialect, hints, deleted)
             take = best[x + 1][y + 1] + s if s else 0.0
             best[x][y] = max(best[x + 1][y], best[x][y + 1], take)
     pairs, x, y = [], 0, 0
     while x < n and y < m:
-        s = _score(a[ia[x]], b[ib[y]], dialect, (hints or {}).get(ia[x]))
+        s = _pair_score(a, b, ia[x], ib[y], dialect, hints, deleted)
         if s and best[x][y] == best[x + 1][y + 1] + s:
             pairs.append((ia[x], ib[y]))
             x, y = x + 1, y + 1
@@ -290,18 +309,19 @@ def _gap(a, b, ia, ib, dialect, hints=None):
     return pairs
 
 
-def merge_align(a, b, dialect, hints=None):
+def merge_align(a, b, dialect, hints=None, deleted=()):
     """Pairs between sibling nodes for the merge. Identical nodes pair first, in
     order. Between them, the runs pair by _score in order, so a block that vanilla
     inserted before a changed sibling of the same key does not take its partner.
     Last, a named block or a block with a selector that moved pairs out of order.
     `hints`: {index in a: vanilla's new version of that node}, for the base-to-ours
-    pairing."""
+    pairing. `deleted`: the indexes in a of the nodes that vanilla deleted (see
+    _pair_score)."""
     import difflib as _dl
     pairs, pa, pb = [], 0, 0
     sm = _dl.SequenceMatcher(None, [n.sig for n in a], [n.sig for n in b], autojunk=False)
     for x, y, size in sm.get_matching_blocks():
-        pairs += _gap(a, b, range(pa, x), range(pb, y), dialect, hints)
+        pairs += _gap(a, b, range(pa, x), range(pb, y), dialect, hints, deleted)
         pairs += [(x + k, y + k) for k in range(size)]
         pa, pb = x + size, y + size
     taken_a, taken_b = {i for i, _j in pairs}, {j for _i, j in pairs}
@@ -319,16 +339,63 @@ def merge_align(a, b, dialect, hints=None):
                 taken_a.add(i)
                 taken_b.add(j)
     # A key that only one unpaired node holds on each side: the same node, moved and
-    # changed.
+    # changed. A key that each side holds once names the node, as a statement's key
+    # does. A key that a side holds more than once names no node: the block must keep
+    # MOVED_SHARE of its structure (_kept_share). Else a block of the mod's own takes
+    # the place of a vanilla block that the mod deleted, and a merge of the merged
+    # file asks about it again.
     free_a = [i for i in range(len(a)) if i not in taken_a]
     free_b = [j for j in range(len(b)) if j not in taken_b]
     for i in free_a:
         same_a = [k for k in free_a if a[k].key == a[i].key]
         same_b = [j for j in free_b if b[j].key == a[i].key and j not in taken_b]
-        if len(same_a) == 1 and len(same_b) == 1 and _score(a[i], b[same_b[0]], dialect):
+        if len(same_a) != 1 or len(same_b) != 1 or not _pair_score(a, b, i, same_b[0], dialect, hints, deleted):
+            continue
+        named = sum(1 for n in a if n.key == a[i].key) == 1 == sum(1 for n in b if n.key == a[i].key)
+        if named or _kept_share(a[i], b[same_b[0]], (hints or {}).get(i)):
             pairs.append((i, same_b[0]))
             taken_b.add(same_b[0])
     return sorted(pairs)
+
+
+# A block is the same block in another place or in the place of a deleted one when it
+# keeps this share of its structure (_key_paths).
+MOVED_SHARE = 0.5
+
+
+def _key_paths(node, above=()):
+    """The structure of a block: the path of keys down to each statement under it.
+    An edit changes values and adds or removes some statements; another block has
+    other keys."""
+    out = set()
+    for c in node.children or ():
+        here = above + (c.key,)
+        if c.children is None:
+            out.add(here)
+        else:
+            out.add(here)
+            out |= _key_paths(c, here)
+    return out
+
+
+def _kept_share(m, n, hint=None):
+    """True when node n keeps enough of node m to be m: always for a statement (its
+    key names it); for a block, when a statement of its own with a distinctive quoted
+    value is the same in both (as diff3 pairs by such a value), or when they share
+    MOVED_SHARE of their structure (_key_paths). `hint`: vanilla's new version of m,
+    which n can hold already."""
+    if m.children is None or n.children is None:
+        return True
+    own = {c.sig for c in n.children}
+    if any(diff3._distinctive(c) and c.sig in own for x in (m, hint) if x is not None and x.children
+           for c in x.children):
+        return True
+    have = _key_paths(n)
+
+    def share(x):
+        keys = _key_paths(x)
+        return len(keys & have) / len(keys | have) if keys or have else 1.0
+    return max(share(m), share(hint) if hint is not None and hint.children is not None else 0) >= MOVED_SHARE
 
 
 def template_keys(text):
@@ -355,8 +422,9 @@ class _Merge:
         self.old_text, self.old_tag = old if old is not None else (None, None)
         self._old_view = None
         self._views = {}                 # parsed views by text, for gate()
-        self.dialect, self.unwrap, self.decide = dialect, unwrap, decide
-        self.ops, self.decisions, self.overlaps = [], [], []
+        self.dialect, self.unwrap, self._decide = dialect, unwrap, decide
+        self._at = None                  # the index of the decision that decide() makes now
+        self.ops, self.decisions = [], []
         self.history = [h for h in history if h is not None]
         # vanilla's texts before the base, oldest first: a node the mod still holds
         # from one of them is vanilla's old text, not the mod's own.
@@ -371,18 +439,29 @@ class _Merge:
         return diff3.body(top) if self.unwrap else top
 
     def run(self):
+        """(decisions, ops). Each op carries the index of the decision that takes it."""
         b, o, t = self.view(self.b_text), self.view(self.o_text), self.view(self.t_text)
         first = lambda text: next((n for n in diff3.nodes(text) if n.kind == "block"), None)   # noqa: E731
         outer = first(self.o_text) if self.unwrap else None
         parents = (first(self.b_text), first(self.t_text)) if self.unwrap else (None, None)
         self.level(b, o, t, [], outer, parents)
         self.moved()
-        return self.apply()
+        return self.decisions, _in_vanilla_order(self.ops)
+
+    def decide(self, *args):
+        """The decide callback. Each call makes one decision, the next one in
+        self.decisions, and the ops after the call belong to it (see _op)."""
+        self._at = len(self.decisions)
+        return self._decide(*args)
+
+    def _op(self, start, end, text, why, removes=True, rank=None):
+        self.ops.append(Op(start, end, text, why, removes, self._at, rank))
 
     # --- one level --------------------------------------------------------------
     def level(self, B, O, T, path, o_parent, parents=(None, None)):
         bt = dict(merge_align(B, T, self.dialect))
-        bo = dict(merge_align(B, O, self.dialect, {i: T[j] for i, j in bt.items()}))
+        bo = dict(merge_align(B, O, self.dialect, {i: T[j] for i, j in bt.items()},
+                              {i for i in range(len(B)) if i not in bt}))
         tb = {j: i for i, j in bt.items()}
         ob = {j: i for i, j in bo.items()}
         self.template_moves(B, O, T)
@@ -857,19 +936,16 @@ class _Merge:
 
     def recurse(self, here, b, o, t):
         self.carry_comments(b, o, t)
-        if o.value != t.value:
-            if o.value == b.value:
-                d = self.decide(here, "vanilla_changed", o, t, self.t_text, "head")
-                if d[0] == TAKE:
-                    self.ops.append(Op(o.start, o.open_end, self.t_text[t.start:t.open_end],
-                                       d[1] or "vanilla changed the head"))
-                self.decisions.append(Decision(here, "vanilla_changed", d[0], d[1],
-                                               ours=self.o_text[o.start:o.open_end],
-                                               theirs=self.t_text[t.start:t.open_end]))
-            elif t.value != b.value:
-                self.decisions.append(Decision(here, "both_changed", OPEN, None,
-                                               ours=self.o_text[o.start:o.open_end],
-                                               theirs=self.t_text[t.start:t.open_end]))
+        # The head: the text of the block before its opening brace.
+        kind = None if o.value == t.value else "vanilla_changed" if o.value == b.value else \
+            "both_changed" if t.value != b.value else None
+        if kind:
+            action, by = self.decide(here, kind, o, t, self.t_text,
+                                     "head" if kind == "vanilla_changed" else "conflict")
+            if action == TAKE:
+                self._op(o.start, o.open_end, self.t_text[t.start:t.open_end], by or "vanilla changed the head")
+            self.decisions.append(Decision(here, kind, action, by, ours=self.o_text[o.start:o.open_end],
+                                           theirs=self.t_text[t.start:t.open_end]))
         self.level(b.children, o.children, t.children, here, o, (b, t))
 
     def anchor(self, T, j, tb, bo, O, twins=None):
@@ -983,7 +1059,7 @@ class _Merge:
                 s = _line_start(self.o_text, _lead(self.o_text, o))
                 e = min(_line_end(self.o_text, o.end) + 1, len(self.o_text))
                 text = "".join(ind + c + "\n" for c in keep)
-        self.ops.append(Op(s, e, text, why))
+        self._op(s, e, text, why)
 
     def replace(self, b, o, t, why):
         """Put vanilla's node `t` in the place of ours node `o`. A comment above the
@@ -993,7 +1069,7 @@ class _Merge:
         start, end = o.start, o.end
         text = _reindent(self.t_text, t, ind)
         if b is None:                    # no base node: the mod's comments stay
-            self.ops.append(Op(start, end, text, why))
+            self._op(start, end, text, why)
             return
         if _own_line(self.o_text, o) and _own_line(self.t_text, t):
             above = _lead_lines(self.b_text, b)
@@ -1006,7 +1082,7 @@ class _Merge:
             if same and (tt and tt[1]) != (bt and bt[1]):
                 end = _line_end(self.o_text, o.end) if ot is not None else o.end
                 text += " " + tt[1] if tt else ""
-        self.ops.append(Op(start, end, text, why))
+        self._op(start, end, text, why)
 
     def decide_conflict(self, kind, here, b, o, t, place):
         action, by = self.decide(here, kind, o, t, self.t_text, "conflict")
@@ -1016,9 +1092,9 @@ class _Merge:
         if action == TAKE and o is not None:
             if t is None:
                 s, e = _delete_span(self.o_text, o)
-                self.ops.append(Op(s, e, "", by))
+                self._op(s, e, "", by)
             else:
-                self.ops.append(Op(o.start, o.end, _reindent(self.t_text, t, _indent(self.o_text, o.start)), by))
+                self._op(o.start, o.end, _reindent(self.t_text, t, _indent(self.o_text, o.start)), by)
         elif action == TAKE and o is None and t is not None:
             if place is None:
                 self.decisions[-1].action = OPEN
@@ -1062,50 +1138,86 @@ class _Merge:
                 pos = len(self.o_text)
                 sep = "" if self.o_text.endswith("\n") or not self.o_text else "\n"
                 text = sep + _reindent(self.t_text, t, "", comments=True) + "\n"
-        self.ops.append(Op(pos, pos, text, why, removes=False))
+        self._op(pos, pos, text, why, removes=False, rank=t.start)
 
-    # --- output -----------------------------------------------------------------
-    def apply(self):
-        ops = _splice_ops(self.ops, self.overlaps)
-        ops = sorted(self.expand_one_line_blocks(ops), key=lambda op: (op.start, op.end))
-        out, pos = [], 0
-        for op in ops:
-            out.append(self.o_text[pos:op.start])
-            out.append(op.text)
-            pos = op.end
-        out.append(self.o_text[pos:])
-        return "".join(out), ops
 
-    def expand_one_line_blocks(self, ops):
-        """`ops`, with each one-line block of ours that an op gives a line break made
-        into one op that lays the block out on more lines. The block is the outermost
-        one-line block around the op, so no one-line ancestor holds a line break."""
-        units, stack = [], list(diff3.nodes(self.o_text))
-        while stack:
-            n = stack.pop()
-            if n.kind != "block":
-                continue
-            if "\n" in self.o_text[n.start:n.end]:
-                stack.extend(n.children)
-            else:
-                units.append(n)
-        out = list(ops)
-        for u in units:
-            if not any("\n" in op.text and op.start >= u.open_end and op.end <= u.end - 1 for op in ops):
-                continue
-            inside = [op for op in out if u.start <= op.start and op.end <= u.end
-                      and not (op.start == op.end and op.start in (u.start, u.end))]
-            ids = {id(op) for op in inside}
-            if any(op.start < u.end and op.end > u.start and id(op) not in ids for op in out):
-                continue                             # an op crosses the edge of the block
-            text = _spliced(self.o_text[u.start:u.end],
-                            [Op(op.start - u.start, op.end - u.start, op.text, op.why) for op in inside])
-            new = _expand(text, _indent(self.o_text, u.start))
-            if new is None:
-                continue
-            why = next(op.why for op in inside if "\n" in op.text)
-            out = [op for op in out if id(op) not in ids] + [Op(u.start, u.end, new, why)]
-        return out
+def _in_vanilla_order(ops):
+    """`ops`, with the insertions at each offset in the order of theirs (rank). The
+    merge decides some nodes after the whole pass (moved), so the order in which it
+    makes the ops is not vanilla's order."""
+    out, slots = list(ops), defaultdict(list)
+    for k, op in enumerate(out):
+        if op.start == op.end and op.rank is not None:
+            slots[op.start].append(k)
+    for ks in slots.values():
+        for k, op in zip(ks, sorted((out[k] for k in ks), key=lambda op: op.rank)):
+            out[k] = op
+    return out
+
+
+def finish(ours, ops, decisions=(), inject=False):
+    """Result of the merge of one copy: `ours` with `ops`, the ops that the merge makes
+    for the decisions that take vanilla's text and for the comments that vanilla
+    changed, in the order the merge made them. An INJECT (`inject`) only deletes keys.
+    The removed-line check runs on the result."""
+    if inject:
+        ops = sorted(ops, key=lambda op: op.start)
+        text = _spliced_as_is(ours, ops)
+        return Result(text, ops, list(decisions), removed_lines(ours, text, ops))
+    overlaps = []
+    ops = _splice_ops(ops, overlaps)
+    ops = sorted(_expand_one_line_blocks(ours, ops), key=lambda op: (op.start, op.end))
+    text = _spliced_as_is(ours, ops)
+    res = Result(text, ops, list(decisions))
+    res.unexplained = removed_lines(ours, text, ops) + [
+        (ours.count("\n", 0, op.start) + 1, f"an edit ({op.why}) overlaps another edit and was not made")
+        for op in overlaps]
+    return res
+
+
+def _spliced_as_is(text, ops):
+    """`text` with `ops` applied in their order; they do not overlap."""
+    out, pos = [], 0
+    for op in ops:
+        out.append(text[pos:op.start])
+        out.append(op.text)
+        pos = op.end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _expand_one_line_blocks(o_text, ops):
+    """`ops`, with each one-line block of `o_text` that an op gives a line break made
+    into one op that lays the block out on more lines. The block is the outermost
+    one-line block around the op, so no one-line ancestor holds a line break."""
+    if not any("\n" in op.text for op in ops):
+        return list(ops)
+    units, stack = [], list(diff3.nodes(o_text))
+    while stack:
+        n = stack.pop()
+        if n.kind != "block":
+            continue
+        if "\n" in o_text[n.start:n.end]:
+            stack.extend(n.children)
+        else:
+            units.append(n)
+    out = list(ops)
+    for u in units:
+        if not any("\n" in op.text and op.start >= u.open_end and op.end <= u.end - 1 for op in ops):
+            continue
+        inside = [op for op in out if u.start <= op.start and op.end <= u.end
+                  and not (op.start == op.end and op.start in (u.start, u.end))]
+        ids = {id(op) for op in inside}
+        if any(op.start < u.end and op.end > u.start and id(op) not in ids for op in out):
+            continue                             # an op crosses the edge of the block
+        text = _spliced(o_text[u.start:u.end],
+                        [Op(op.start - u.start, op.end - u.start, op.text, op.why) for op in inside])
+        new = _expand(text, _indent(o_text, u.start))
+        if new is None:
+            continue
+        why = next(op.why for op in inside if "\n" in op.text)
+        out = [op for op in out if id(op) not in ids] + [Op(u.start, u.end, new, why)]
+    return out
 
 
 def _splice_ops(ops, dropped=None):
@@ -1195,16 +1307,29 @@ def _expand(text, indent):
     return new if new is not None and "".join(new.split()) == "".join(text.split()) else None
 
 
-def splice(text, edits):
+def splice(text, edits, marks=None):
     """(new text, spans) for `text` with each (start, end, new text) edit applied.
     Edits do not overlap; two insertions at one offset keep their order. spans: the
-    (start, end) of each edit's text in the new text. Then each run of two or more
-    lines that hold only white space at an edit is made one empty line, so a removal
-    never leaves two empty lines."""
+    (start, end) of each edit's text in the new text, before the next step. Then each
+    run of two or more lines that hold only white space at an edit is made one empty
+    line, so a removal never leaves two empty lines. An edit with a fourth item,
+    (before, after), is exact: no run inside its text changes, and it touches the run
+    above its first line when `before` is true and the run below its last line when
+    `after` is true. `marks`: offsets
+    in the text before that step (see spliced_offsets); with them, the result is
+    (new text, spans, the offsets of the marks in the new text)."""
+    raw, spans, order = _splice_raw(text, edits)
+    exact = [spans[n] + tuple(edits[k][3]) for n, k in enumerate(order) if len(edits[k]) > 3]
+    loose = [spans[n] for n, k in enumerate(order) if len(edits[k]) <= 3]
+    out, moved = _squeeze_blank_runs(raw, loose, exact, marks or ())
+    return (out, spans, moved) if marks is not None else (out, spans)
+
+
+def _splice_raw(text, edits):
     order = sorted(range(len(edits)), key=lambda k: (edits[k][0], edits[k][1], k))
     out, spans, pos, size = [], [], 0, 0
     for k in order:
-        s, e, new = edits[k]
+        s, e, new = edits[k][:3]
         out.append(text[pos:s])
         size += s - pos
         out.append(new)
@@ -1212,21 +1337,47 @@ def splice(text, edits):
         size += len(new)
         pos = e
     out.append(text[pos:])
-    return _squeeze_blank_runs("".join(out), spans), spans
+    return "".join(out), spans, order
 
 
-def _squeeze_blank_runs(text, spans):
+def spliced_offsets(edits, start, end, holds):
+    """(start, end) of the place start..end of a text in the text that splice makes
+    from it, before the blank runs change. `holds(edit)` is true for an edit in the
+    place: it comes after `start` and before `end`. Another edit at `start` comes
+    before the place, and another edit at `end` after it."""
+    a, b = start, end
+    for x in edits:
+        delta = len(x[2]) - (x[1] - x[0])
+        if holds(x):
+            b += delta
+        elif x[1] <= start:
+            a += delta
+            b += delta
+    return a, b
+
+
+def _squeeze_blank_runs(text, spans, exact=(), marks=()):
+    """(text, marks): see splice. Each mark is an offset; it moves with its line, and
+    a mark in a run that becomes one line moves to that line."""
     lines = text.split("\n")
     starts, at = [], 0
     for line in lines:
         starts.append(at)
         at += len(line) + 1
-    touched = set()
+    touched, kept = set(), set()
+    line_of = lambda pos: bisect.bisect_right(starts, pos) - 1   # noqa: E731
     for a, z in spans:
-        touched.update(range(text.count("\n", 0, a) - 1, text.count("\n", 0, z) + 2))
-    keep, k = [], 0
+        touched.update(range(line_of(a) - 1, line_of(z) + 2))
+    for a, z, before, after in exact:
+        kept.update(range(line_of(a), line_of(max(a, z - 1)) + 1))
+        if before:
+            touched.update((line_of(a) - 1, line_of(a)))
+        if after:
+            touched.update((line_of(z), line_of(z) + 1))
+    keep, k, out_line = [], 0, {}
     while k < len(lines):
         if lines[k].strip():
+            out_line[k] = len(keep)
             keep.append(lines[k])
             k += 1
             continue
@@ -1234,14 +1385,25 @@ def _squeeze_blank_runs(text, spans):
         while j < len(lines) and not lines[j].strip():
             j += 1
         run = lines[k:j]
-        if j - k < 2 or not touched & set(range(k, j)) or k == 0:
-            keep.extend(run)                     # untouched, or the file's first lines
-        elif j == len(lines):
-            keep.append("")                      # the text ends with one line end
+        if j - k < 2 or not touched & set(range(k, j)) or k == 0 or set(range(k, j)) <= kept:
+            for n in range(k, j):                # untouched, exact, or the file's first lines
+                out_line[n] = len(keep) + n - k
+            keep.extend(run)
         else:
-            keep.append("")
+            for n in range(k, j):
+                out_line[n] = len(keep)
+            keep.append("")                      # one empty line (one line end at the end)
         k = j
-    return "\n".join(keep)
+    out_starts, at = [], 0
+    for line in keep:
+        out_starts.append(at)
+        at += len(line) + 1
+    moved = []
+    for m in marks:
+        n = line_of(m)
+        col = m - starts[n] if keep[out_line[n]] == lines[n] else 0
+        moved.append(out_starts[out_line[n]] + col)
+    return "\n".join(keep), moved
 
 
 def removed_lines(ours, merged, ops):
@@ -1283,6 +1445,8 @@ def removed_lines(ours, merged, ops):
     have = Counter(norm(x) for x in b if norm(x))
     have.subtract(written)
     short = {t: n - have[t] for t, n in kept.items() if n > have[t]}
+    if not short:
+        return []                        # no line is missing, so the compare finds none
     out = []
     sm = difflib.SequenceMatcher(None, [norm(x) for x in a], [norm(x) for x in b], autojunk=False)
     for tag, i1, i2, _j1, _j2 in sm.get_opcodes():
@@ -1295,33 +1459,40 @@ def removed_lines(ours, merged, ops):
     return out
 
 
+def merge_ops(base, ours, theirs, dialect=diff3.SCRIPT, unwrap=False, decide=None, history=(), old=None,
+              older=(), templates=None):
+    """(decisions, ops) of a three-way merge of one copy, before `finish`. Each op
+    carries the index of the decision that takes it, or None for a comment that
+    vanilla changed. `decide(path, kind, ours node, theirs node, theirs text, what)`
+    returns (action, by); by default a vanilla change where ours equals base is taken
+    and every conflict is open. `history`: vanilla's texts between the base and
+    theirs, oldest first; a node the mod took from one of them counts as vanilla's
+    (see _Merge.later_vanilla). `old`: (vanilla's text at --old, its tag) when the
+    base is older than --old (see _Merge.gate). `older`: vanilla's texts before the
+    base, oldest first; a node the mod still holds from one of them is vanilla's old
+    text too. `templates`: {name: {key: value}} of the GUI templates (template_keys),
+    for _Merge.template_moves.
+
+    The decisions do not depend on each other: the list of decisions, and the ops of
+    each decision that takes vanilla's text, are the same for each answer of
+    `decide`. Only the actions change."""
+    decide = decide or (lambda path, kind, o, t, tt, what: (OPEN, None) if what == "conflict" else (TAKE, None))
+    return _Merge(base, ours, theirs, dialect, unwrap, decide, history, old, older, templates).run()
+
+
 def merge_texts(base, ours, theirs, dialect=diff3.SCRIPT, unwrap=False, decide=None, history=(), old=None,
                 older=(), templates=None):
-    """Result of a three-way merge of one copy. `decide(path, kind, ours node, theirs
-    node, theirs text, what)` returns (action, by); by default a vanilla change where
-    ours equals base is taken and every conflict is open. `history`: vanilla's texts
-    between the base and theirs, oldest first; a node the mod took from one of them
-    counts as vanilla's (see _Merge.later_vanilla). `old`: (vanilla's text at --old,
-    its tag) when the base is older than --old (see _Merge.gate). `older`: vanilla's
-    texts before the base, oldest first; a node the mod still holds from one of them
-    is vanilla's old text too. `templates`: {name: {key: value}} of the GUI templates
-    (template_keys), for _Merge.template_moves."""
-    decide = decide or (lambda path, kind, o, t, tt, what: (OPEN, None) if what == "conflict" else (TAKE, None))
-    m = _Merge(base, ours, theirs, dialect, unwrap, decide, history, old, older, templates)
-    text, ops = m.run()
-    res = Result(text, ops, m.decisions)
-    res.unexplained = removed_lines(ours, text, ops) + [
-        (ours.count("\n", 0, op.start) + 1, f"an edit ({op.why}) overlaps another edit and was not made")
-        for op in m.overlaps]
-    return res
+    """Result of a three-way merge of one copy (see merge_ops)."""
+    decisions, ops = merge_ops(base, ours, theirs, dialect, unwrap, decide, history, old, older, templates)
+    return finish(ours, ops, decisions)
 
 
-def merge_inject(base, ours, theirs, decide=None):
-    """Result for an INJECT. The INJECT sets children of vanilla's block; vanilla's
-    other changes reach the game without a merge. A child that the INJECT sets and
-    that vanilla changed between base and theirs is a decision: keep_mod keeps the
-    child, take_vanilla deletes it from the INJECT so vanilla's child applies, and
-    anything else stays open."""
+def inject_ops(base, ours, theirs, decide=None):
+    """(decisions, ops) for an INJECT, before `finish`. The INJECT sets children of
+    vanilla's block; vanilla's other changes reach the game without a merge. A child
+    that the INJECT sets and that vanilla changed between base and theirs is a
+    decision: keep_mod keeps the child, take_vanilla deletes it from the INJECT so
+    vanilla's child applies, and anything else stays open."""
     decide = decide or (lambda path, kind, o, t, tt, what: (OPEN, None))
     mine = diff3.body(diff3.nodes(ours))
     b_kids = diff3.body(diff3.nodes(base)) if base else []
@@ -1340,14 +1511,14 @@ def merge_inject(base, ours, theirs, decide=None):
                                   line=ours.count("\n", 0, m.start) + 1))
         if action == TAKE:
             s, e = _delete_span(ours, m)
-            ops.append(Op(s, e, "", by or "vanilla changed the injected key"))
-    text, pos = [], 0
-    for op in sorted(ops, key=lambda o: o.start):
-        text.append(ours[pos:op.start])
-        pos = op.end
-    text.append(ours[pos:])
-    merged = "".join(text)
-    return Result(merged, ops, decisions, removed_lines(ours, merged, ops))
+            ops.append(Op(s, e, "", by or "vanilla changed the injected key", decision=len(decisions) - 1))
+    return decisions, ops
+
+
+def merge_inject(base, ours, theirs, decide=None):
+    """Result for an INJECT (see inject_ops)."""
+    decisions, ops = inject_ops(base, ours, theirs, decide)
+    return finish(ours, ops, decisions, inject=True)
 
 
 def unified(path, before, after):

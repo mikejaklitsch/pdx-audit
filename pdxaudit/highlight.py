@@ -10,10 +10,17 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+from . import worker
+
 SYNTAX = Path(__file__).with_name("syntax")
 GRAMMARS = ("paradox.tmLanguage.json", "eu5.tmLanguage.json")
 ROOT_SCOPE = "source.paradox.eu5"
 THEME_CHAIN = ("dark_vs.json", "dark_plus.json", "dark_modern.json", "paradox-dark.json")
+# Corrections to the copied grammars: {(scope name, repository key): {field: value}}.
+# non-comparable-rhs ends a value only at whitespace, so in `a = { b = 1}` the value
+# takes the `}` and the block stays open. Each such line then adds one level to the
+# state that the next line starts from. The value now also ends before a `}`.
+GRAMMAR_FIXES = {("source.paradox", "non-comparable-rhs"): {"end": r"\s+|(?=\})"}}
 
 _LOOKBEHIND = re.compile(r"\(\?(<=|<!)((?:[^()\\]|\\.)*)\)")
 
@@ -142,6 +149,9 @@ class Highlighter:
         self.grammars = {}
         for name in GRAMMARS:
             raw = json.loads((SYNTAX / name).read_text(encoding="utf-8"))
+            for (scope, key), fields in GRAMMAR_FIXES.items():
+                if scope == raw["scopeName"]:
+                    raw["repository"][key].update(fields)
             self.grammars[raw["scopeName"]] = raw
         self._rules = {}
         self.injections = []
@@ -244,10 +254,12 @@ class Highlighter:
                 if candidate in blocked:
                     continue
                 rx = candidate.match or candidate.begin
-                m = found.get(rx, False)
+                # Keyed by id: a Pattern hashes its whole compiled code on each call,
+                # and the grammar's keyword lists are long.
+                m = found.get(id(rx), False)
                 if m is False or (m is not None and m.start() < pos):
                     m = rx.search(text, pos, limit)
-                    found[rx] = m
+                    found[id(rx)] = m
                 if m is not None and (best is None or m.start() < best.start()):
                     best, best_rule, is_end = m, candidate, False
             if best is None:
@@ -302,3 +314,16 @@ class Highlighter:
 @lru_cache(maxsize=None)
 def highlighter():
     return Highlighter()
+
+
+def _spans_of(groups):
+    hl = highlighter()
+    return [hl.line_spans(lines) for lines in groups]
+
+
+def spans_of(groups):
+    """line_spans of each group of lines, one grammar state for each group, worked out
+    in the app's colour worker process (worker.call). Call it from a worker thread."""
+    if not any(groups):
+        return [[] for _g in groups]
+    return worker.call("colour", "pdxaudit.highlight:_spans_of", groups)

@@ -161,18 +161,16 @@ def test_file_names_reads_definitions_and_uses_by_structure():
     assert sorted(found["bindings"]) == [("X", 13), ("Y", 13)]
 
 
-def test_rename_candidate_is_measured_from_vanilla_sites(tmp_path):
+def test_dropped_binding_names_no_replacement(tmp_path):
     """Vanilla 1.1 writes PortMarker on the line where 1.0 had ImportExportMarker.
-    The finding names the candidate and keeps it out of the id."""
+    The finding gives only the patch that dropped the name."""
     findings, out = _run(_tracker(tmp_path), _mod(tmp_path))
     f = next(f for f in findings if f.name == "ImportExportMarker")
-    assert "vanilla uses PortMarker in its place at 1 of 1 sites" in f.detail
-    assert f.data == {"rename_candidate": "PortMarker"}
+    assert f.detail == "unused since 1.1"
+    assert f.data is None
     assert f.key == {"target": "deps:binding/ImportExportMarker", "use": "binding"}
-    assert "Rename candidate" in out
-    # header_action_button_left had no line that vanilla replaced with another type
-    h = next(f for f in findings if f.name == "header_action_button_left")
-    assert "in its place" not in h.detail
+    assert "PortMarker" not in out
+    assert "Rename candidate" not in out
 
 
 def test_engine_data_drops_known_names_and_confirms_the_rest(tmp_path):

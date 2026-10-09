@@ -308,6 +308,43 @@ KIND.update({
     "override_nonblock": (SEV_INFO, "override", "", ""),
     "dupes_file_override_drops": (SEV_INFO, "dupes", "", ""),
 })
+
+# What the user must do about a finding, most urgent first. The severity says how
+# the copy differs; the rank orders the work:
+#   breaks  the game reads a name or a definition that is gone or set twice
+#   decide  both sides changed, or vanilla moved a statement; a person chooses
+#   merge   only vanilla changed; the merge takes the change without a choice
+#   check   a look is enough; no edit is expected
+RANK_ORDER = ("breaks", "decide", "merge", "check")
+# (one, more than one) for a count, and what the rank means.
+RANK_LABEL = {"breaks": ("game error", "game errors"), "decide": ("decision for you", "decisions for you"),
+              "merge": ("automatic merge", "automatic merges"), "check": ("note", "notes")}
+RANK_HELP = {
+    "breaks": "The game reads a name or a definition that is gone or set twice. Fix these first.",
+    "decide": "You and vanilla both changed this, or vanilla moved it. Choose which text stays.",
+    "merge": "Only vanilla changed this. The Merge page takes the change for you.",
+    "check": "Look at this. No edit is necessary.",
+}
+
+
+def rank_count(rank, n):
+    """`n` and the rank's label, such as "3 game errors"."""
+    one, more = RANK_LABEL[rank]
+    return f"{n} {one if n == 1 else more}"
+
+
+def _rank(kind, sev):
+    if sev == SEV_BROKEN or kind.startswith("deps_"):
+        return "breaks"
+    if re.search(r"_vanilla_(changed|added|removed)_|_block_changed_mid$|^file_def_added$", kind):
+        return "merge"
+    if kind in ("override_absent", "gui_file_review", "gui_van_removed", "file_review", "loc_removed",
+                "dupes_loc_key_same"):
+        return "check"
+    return "decide"
+
+
+RANK = {kind: _rank(kind, sev) for kind, (sev, *_rest) in KIND.items() if sev != SEV_INFO}
 _KIND_ORDER = sorted(KIND, key=lambda k: _SEV_ORDER.index(KIND[k][0]))
 
 # Classes fixed file by file: the triage lists one line per mod file, naming each item in it.

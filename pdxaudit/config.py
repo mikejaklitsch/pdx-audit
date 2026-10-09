@@ -19,6 +19,8 @@ Recognized keys:
                    data_types table to confirm or drop data-binding findings
     replace_findings  "block": the changes vanilla made in one REPLACE are one
                    finding; "statement": each change is a finding of its own
+    editor         the command that opens a file at a line, with {file} and {line};
+                   unset, the app opens the file with the system's default program
 
 Unknown keys are ignored. See config.sample.json for an example.
 """
@@ -51,6 +53,9 @@ SETTINGS = {
                          "env": "PDX_REPLACE_FINDINGS", "default": "block",
                          "help": "block: one finding for each REPLACE that vanilla changed; "
                                  "statement: one finding for each change"},
+    "editor": {"label": "Editor command", "kind": "text", "env": "PDX_EDITOR",
+               "help": "opens a file at a line, with {file} and {line}; empty opens the file "
+                       "with the system's default program"},
     "skip_dirs": {"kind": "list", "help": "directories excluded from every scan"},
     "skip_files": {"kind": "list", "help": "filename globs excluded from every scan"},
     "merge_types": {"kind": "list",
@@ -237,8 +242,17 @@ def _check_replace_findings(value):
     return text, None
 
 
+def _check_editor(value):
+    from . import editor
+    try:
+        return editor.check(value), None
+    except ValueError as e:
+        raise ConfigError(str(e)) from None
+
+
 _CHECKS = {"vanilla_repo": _check_tracker, "game_root": _check_game_root,
-           "patch_name": _check_patch_name, "replace_findings": _check_replace_findings}
+           "patch_name": _check_patch_name, "replace_findings": _check_replace_findings,
+           "editor": _check_editor}
 
 
 def set_value(key, value):

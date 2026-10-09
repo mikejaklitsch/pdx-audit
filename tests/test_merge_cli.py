@@ -38,6 +38,24 @@ def test_dry_run_writes_nothing_and_apply_writes_the_plan(tmp_path, monkeypatch,
     assert after.decode("utf-8-sig") == "REPLACE:law_a = {\n\tcost = 2\n\tx = 5\n\tnew = 1\n}\n"
 
 
+def test_the_same_merge_again_changes_nothing(tmp_path, monkeypatch, capsys):
+    """After --apply, a new dry run of the same versions has nothing to write in the
+    file, and --apply of that plan writes nothing."""
+    mod, common = _setup(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.json"
+    main(common + ["--dry-run", "--plan-out", str(plan)])
+    assert main(common + ["--apply", str(plan)]) == 0
+    after = (mod / FE).read_bytes()
+    again = tmp_path / "again.json"
+    assert main(common + ["--dry-run", "--plan-out", str(again)]) == 0
+    files = json.loads(again.read_text())["files"]
+    assert all(f["merged"] == f["gathered"]["ours"] and not f["open"] for f in files)
+    capsys.readouterr()
+    assert main(common + ["--apply", str(again)]) == 0
+    assert "Wrote" not in capsys.readouterr().out
+    assert (mod / FE).read_bytes() == after
+
+
 def test_apply_refuses_a_file_that_changed_after_the_dry_run(tmp_path, monkeypatch, capsys):
     mod, common = _setup(tmp_path, monkeypatch)
     plan = tmp_path / "plan.json"
@@ -64,6 +82,43 @@ def test_apply_refuses_open_decisions_and_failed_checks(tmp_path, monkeypatch, c
     plan.write_text(json.dumps(p))
     assert main(common + ["--apply", str(plan)]) == 1
     assert "removed-line check failed" in capsys.readouterr().err
+
+
+def test_apply_plans_the_written_file_again_and_restores_it_when_a_taken_change_is_missing(
+        tmp_path, monkeypatch, capsys):
+    """A written file whose plan still holds a change that it took gets its old text
+    back. Here the plan's merged text lacks `new = 1`, which the plan takes."""
+    mod, common = _setup(tmp_path, monkeypatch)
+    before = (mod / FE).read_bytes()
+    plan = tmp_path / "plan.json"
+    main(common + ["--dry-run", "--plan-out", str(plan)])
+    p = json.loads(plan.read_text())
+    p["files"][0]["merged"] = p["files"][0]["merged"].replace("\tnew = 1\n", "")
+    plan.write_text(json.dumps(p))
+    assert main(common + ["--apply", str(plan)]) == 1
+    err = capsys.readouterr().err
+    assert "after the write, the change at new (near line 4) is still a decision" in err
+    assert "its old text is back" in err
+    assert (mod / FE).read_bytes() == before
+
+
+def test_apply_refuses_a_text_that_the_page_did_not_show_and_a_plan_of_other_versions(
+        tmp_path, monkeypatch, capsys):
+    mod, common = _setup(tmp_path, monkeypatch)
+    before = (mod / FE).read_bytes()
+    plan = tmp_path / "plan.json"
+    main(common + ["--dry-run", "--plan-out", str(plan)])
+    p = json.loads(plan.read_text())
+    p["files"][0]["expect"] = "0" * 40
+    plan.write_text(json.dumps(p))
+    assert main(common + ["--apply", str(plan)]) == 1
+    assert "another text than the page showed" in capsys.readouterr().err
+    p["files"][0].pop("expect")
+    p["old"] = "0.9"
+    plan.write_text(json.dumps(p))
+    assert main(common + ["--apply", str(plan)]) == 1
+    assert "the plan merges 0.9 to 1.1, not 1.0 to 1.1" in capsys.readouterr().err
+    assert (mod / FE).read_bytes() == before
 
 
 def test_generated_files_are_listed_to_regenerate(tmp_path, monkeypatch, capsys):
@@ -450,3 +505,100 @@ def test_a_line_vanilla_removed_before_the_base_is_not_the_mods_own(tmp_path, mo
     assert (got["flag"]["kind"], got["flag"]["action"]) == ("vanilla_removed", "open")
     assert "before --old 1.2" in got["flag"]["reason"]
     assert got["b"]["action"] == "take"
+
+
+# --- choices: one decision at a time, from the app ------------------------------
+
+def _dry_run(common, tmp_path, *extra):
+    plan = tmp_path / "plan.json"
+    assert main(common + ["--dry-run", "--plan-out", str(plan), *extra]) == 0
+    return json.loads(plan.read_text(encoding="utf-8")), plan
+
+
+def _choose(tmp_path, f, d, action):
+    from pdxaudit.merge_cli import choice_key
+    path = tmp_path / "choices.json"
+    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"files": {}}
+    data["files"].setdefault(f["file"], {"sha": f["before_sha"], "nodes": {}})["nodes"][choice_key(d)] = action
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def test_each_decision_carries_the_address_a_choice_names(tmp_path, monkeypatch):
+    mod, common = _setup(tmp_path, monkeypatch, MOD.replace("cost = 1", "cost = 3"))
+    p, _ = _dry_run(common, tmp_path)
+    for d in p["files"][0]["decisions"]:
+        assert d["address"]["identity"] == "in_game/common/laws/law_a"
+        assert isinstance(d["address"]["path"], list)
+
+
+def test_a_choice_takes_vanillas_text_for_an_open_decision(tmp_path, monkeypatch):
+    mod, common = _setup(tmp_path, monkeypatch, MOD.replace("cost = 1", "cost = 3"))
+    p, _ = _dry_run(common, tmp_path)
+    [f] = p["files"]
+    [d] = [d for d in f["decisions"] if d["action"] == "open"]
+    choices = _choose(tmp_path, f, d, "take")
+    p, plan = _dry_run(common, tmp_path, "--choices", str(choices))
+    [f] = p["files"]
+    assert f["open"] == 0
+    [d] = [d for d in f["decisions"] if d["kind"] == "both_changed"]
+    assert (d["action"], d["by"]) == ("take", "choice")
+    assert main(common + ["--apply", str(plan)]) == 0
+    assert (mod / FE).read_text(encoding="utf-8-sig") == "REPLACE:law_a = {\n\tcost = 2\n\tx = 5\n\tnew = 1\n}\n"
+
+
+def test_a_choice_keeps_the_mods_text_for_an_open_decision(tmp_path, monkeypatch):
+    mod, common = _setup(tmp_path, monkeypatch, MOD.replace("cost = 1", "cost = 3"))
+    p, _ = _dry_run(common, tmp_path)
+    [f] = p["files"]
+    [d] = [d for d in f["decisions"] if d["action"] == "open"]
+    p, _ = _dry_run(common, tmp_path, "--choices", str(_choose(tmp_path, f, d, "keep")))
+    assert p["files"][0]["open"] == 0
+    assert "cost = 3" in p["files"][0]["merged"]
+
+
+def test_a_choice_keeps_the_mods_text_over_a_change_the_merge_takes(tmp_path, monkeypatch):
+    mod, common = _setup(tmp_path, monkeypatch)
+    p, _ = _dry_run(common, tmp_path)
+    [f] = p["files"]
+    [d] = [d for d in f["decisions"] if d["kind"] == "vanilla_added"]
+    assert d["action"] == "take"
+    p, _ = _dry_run(common, tmp_path, "--choices", str(_choose(tmp_path, f, d, "keep")))
+    merged = p["files"][0]["merged"]
+    assert "new = 1" not in merged and "cost = 2" in merged       # the other change is still taken
+
+
+def test_a_choice_lapses_when_the_file_changed_after_it(tmp_path, monkeypatch):
+    mod, common = _setup(tmp_path, monkeypatch, MOD.replace("cost = 1", "cost = 3"))
+    p, _ = _dry_run(common, tmp_path)
+    [f] = p["files"]
+    [d] = [d for d in f["decisions"] if d["action"] == "open"]
+    choices = _choose(tmp_path, f, d, "take")
+    (mod / FE).write_text(MOD.replace("cost = 1", "cost = 3").replace("x = 5", "x = 6"), encoding="utf-8")
+    p, _ = _dry_run(common, tmp_path, "--choices", str(choices))
+    assert p["files"][0]["open"] == 1
+
+
+def test_apply_with_a_file_writes_only_that_file(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    other = "in_game/common/laws/other.txt"
+    tr = build_tracker(tmp_path, [("1.0", {LAW: V1 + V1.replace("law_a", "law_b")}),
+                                  ("1.1", {LAW: V2 + V2.replace("law_a", "law_b")})])
+    mod = tmp_path / "mod"
+    _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}', FE: MOD, other: MOD.replace("law_a", "law_b")})
+    common = ["--mod-root", str(mod), "--vanilla-repo", tr.repo, "--old", "1.0", "--new", "1.1"]
+    p, plan = _dry_run(common, tmp_path)
+    assert {f["file"] for f in p["files"]} == {FE, other}
+    capsys.readouterr()
+    assert main(common + ["--apply", str(plan), "--file", other]) == 0
+    assert "cost = 2" in (mod / other).read_text(encoding="utf-8-sig")
+    assert "cost = 1" in (mod / FE).read_text(encoding="utf-8-sig")
+
+
+def test_quiet_prints_the_counts_and_the_plan_not_the_diffs(tmp_path, monkeypatch, capsys):
+    mod, common = _setup(tmp_path, monkeypatch, MOD.replace("cost = 1", "cost = 3"))
+    plan = tmp_path / "plan.json"
+    assert main(common + ["--dry-run", "--quiet", "--plan-out", str(plan)]) == 0
+    out = capsys.readouterr().out
+    assert "```diff" not in out
+    assert "1 file: 0 ready, 1 with open decisions" in out and str(plan) in out

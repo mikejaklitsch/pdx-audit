@@ -113,9 +113,9 @@ def test_gui_templates_and_blocks_vanilla_dropped_are_found(tmp_path):
     assert "GUI types, templates and blocks the mod uses that vanilla no longer defines" in buf.getvalue()
 
 
-def test_measured_rename_candidate_for_a_script_key(tmp_path):
-    """Vanilla wrote a new key on the line of the old one. The finding names it as
-    review evidence, and the id does not change."""
+def test_dropped_script_key_names_no_replacement(tmp_path):
+    """Vanilla wrote a new key on the line of the old one. The finding gives only the
+    patch that dropped the name. It never names a replacement."""
     law = "in_game/common/laws/l.txt"
     tr = build_tracker(tmp_path, [
         ("1.0", {law: "law_a = {\n\tlocal_food_decay_modifier = 0.1\n\tcost = 1\n}\n"}),
@@ -126,7 +126,8 @@ def test_measured_rename_candidate_for_a_script_key(tmp_path):
                       "in_game/common/laws/m.txt": "INJECT:law_a = {\n\tlocal_food_decay_modifier = 0.2\n}\n"})
     findings, out, _ = _run(tr, mod, "1.0", "1.1")
     f = next(f for f in findings if f.name == "local_food_decay_modifier")
-    assert f.detail == ("dropped in 1.1; vanilla uses local_food_preservation_efficiency_modifier "
-                        "in its place at 1 of 1 sites")
+    assert f.detail == "dropped in 1.1"
+    assert f.data is None
     assert f.key == {"target": "deps:local_food_decay_modifier", "use": "key"}
-    assert "Rename candidate" in out
+    assert "local_food_preservation_efficiency_modifier" not in out
+    assert "Rename candidate" not in out
