@@ -1,4 +1,4 @@
-"""`pdx-audit merge`: take vanilla patch changes into the mod's copies.
+"""`pdx-audit merge`: merge vanilla patch changes into the mod's copies.
 
 A dry run writes nothing into the mod. It prints the full diff of each file, the
 decisions, and the removed-line check, and it saves a plan in the per-user data
@@ -16,7 +16,8 @@ the gathered part and the user's choices. The dry run, `--apply` with choices an
 app's Merge page all call `build`, so a choice gives the same file everywhere.
 
 `--choices` names a file of the user's choices, one for each decision (see
-choice_key): "take" takes vanilla's text, "keep" keeps the mod's. A file's "all"
+choice_key): "take" accepts vanilla's change, "keep" keeps the mod's line. The
+option `--choose accept` gives "take". A file's "all"
 choice applies to each decision of the file that has no choice of its own, and
 `--choose` gives that choice to every file. A file's "own" list holds the user's own
 texts: each one takes the place of a span of the mod file, with each change in it
@@ -24,7 +25,7 @@ texts: each one takes the place of a span of the mod file, with each change in i
 file reads as it did when the user chose.
 
 The `merge_default` setting gives the action of a change with no conflict, a change
-that the merge takes with no rule and no intent store entry: "take" takes it, "ask"
+that the merge takes with no rule and no intent store entry: "accept" takes it, "ask"
 makes it a decision for the user, "keep" keeps the mod's text (set_defaults). Each
 decision has a cause, which names why it can be open (CAUSES)."""
 import argparse
@@ -36,6 +37,7 @@ import os
 import re
 import sys
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 
 from . import config, diff3, intent, merge, proposer, session
@@ -217,9 +219,10 @@ def build_parser():
     ap.add_argument("--saved", action="store_true",
                     help="use the choices that the app saved for --old and --new; --choices names the "
                          "files it changes")
-    ap.add_argument("--choose", choices=CHOICES,
-                    help="this choice for each decision that --choices does not name: take vanilla's text, "
-                         "or keep the mod's; use --file to choose for one file")
+    ap.add_argument("--choose", choices=CHOICES, metavar="{accept,keep}",
+                    type=lambda s: merge.TAKE if s == "accept" else s,
+                    help="this choice for each decision that --choices does not name: accept vanilla's "
+                         "change, or keep the mod's line; use --file to choose for one file")
     return ap
 
 
@@ -348,28 +351,49 @@ def _walk(nodes):
             yield from _walk(n.children)
 
 
+TEMPLATES_CACHE_VERSION = 1
+
+
 def gui_templates(mod_root, base, new_hash):
     """{template name: {key: value}} of the GUI templates the game loads at `new_hash`:
     vanilla's, with the mod's own template in place of vanilla's of the same name."""
     from .gui import mod_gui_files
-    from .tracker import MODULE_ROOTS
-    _defs, files, _bad = base.gui_index(new_hash, MODULE_ROOTS)
-    out = {}
-    for _rel, text in sorted(files.items()):
-        for name, keys in merge.template_keys(text).items():
-            out.setdefault(name, keys)
+    out = vanilla_templates(base, new_hash)
     for _rel, text in mod_gui_files(mod_root):
         out.update(merge.template_keys(text))
     return out
 
 
+def vanilla_templates(base, point):
+    """{template name: {key: value}} of vanilla's GUI templates at `point`. The cache
+    folder of the tracker keeps one file for each commit, because the parse of each
+    vanilla .gui file takes several seconds."""
+    from .gui_names import _read_cache, _write_cache
+    from .tracker import MODULE_ROOTS, cache_path, full_hash
+    repo = getattr(base, "repo", None)
+    full = full_hash(repo, point) if repo else ""
+    cache = cache_path(repo, f"guitpl-v{TEMPLATES_CACHE_VERSION}-{full}.json") if full else None
+    data = _read_cache(cache)
+    if data is not None:
+        return {name: {k: tuple(v) for k, v in keys.items()} for name, keys in data.items()}
+    _defs, files, _bad = base.gui_index(point, MODULE_ROOTS)
+    out = {}
+    for _rel, text in sorted(files.items()):
+        for name, keys in merge.template_keys(text).items():
+            out.setdefault(name, keys)
+    if out:
+        _write_cache(cache, out)
+    return out
+
+
 def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, block=None, choices=None,
-         bases=None):
+         bases=None, blame_cache=None):
     """{"files": [...], "regenerate": [...], "skipped": [...]} for a dry run. Each file
     holds its gathered part (see build) and the merge that `build` makes from it with
     `choices` (read_choices' result). `file`: one mod path, or a set of them. `bases`
     ({(mod path, copy name): base version}) gives a copy its base in place of the
-    version nearest to its text (see check_applied)."""
+    version nearest to its text (see check_applied). `blame_cache` (BlameCache) keeps
+    the blame of each file between runs."""
     from .tracker import tag_of
     reg = registry(mod_root)
     gen = {}
@@ -397,58 +421,21 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
         if old_tag not in c.tags:
             skipped.append((c.file, untracked_reason(c.file, old_tag)))
             continue
-        old_i = c.tags.index(old_tag)
-        pinned = (bases or {}).get((c.file, c.name))
-        if pinned == NO_BASE:
-            base_i = None
-        elif pinned in c.tags[:old_i + 1]:
-            base_i = c.tags.index(pinned)
-        else:
-            base_i = diff3.baseline(c.mod_text, c.versions[:old_i + 1], c.unwrap, c.dialect)
-        theirs = c.versions[-1]
-        if base_i is None:
-            # Vanilla held no version of this text at --old or before: vanilla added it
-            # later. The base is empty, so each node vanilla holds is its addition.
-            base_text, base_tag = "", NO_BASE
-        else:
-            base_text, base_tag = c.versions[base_i], c.tags[base_i]
-        # Vanilla changed nothing since the base. The mod can still hold vanilla's text
-        # from a version before the base (merge._Merge.older_change), so such a copy
-        # merges too.
-        if base_text == theirs and not any(v and v != base_text for v in c.versions[:base_i or 0]):
-            continue
-        later = c.versions[(base_i + 1 if base_i is not None else 0):-1]
-        by_file[c.file].append((c, base_tag, base_text, theirs, later))
+        based = _based(c, old_tag, (bases or {}).get((c.file, c.name)))
+        if based:
+            by_file[c.file].append(based)
     _add_injects(mod_root, base, commits, new_hash, old_tag, only, block, reg, by_file, regenerate, skipped)
     added = _new_definitions(mod_root, base, commits, new_hash, old_tag, only, block, reg, regenerate, it,
                              states, skipped)
     whole = _whole_copies(mod_root, findings, order, old_tag, only, block, it, states, reg, skipped)
-    files, templates = [], None
-    for rel in sorted(set(by_file) | set(added) | set(whole)):
-        text, bom, crlf = read_mod_file(Path(mod_root) / rel)
-        starts = _line_starts(text)
-        new_rows, stale = added.get(rel, ({"decisions": [], "inserts": []}, set()))
-        removed, w_stale = whole.get(rel, ([], set()))
-        g = {"ours": text, "copies": [], "added": new_rows, "removed": removed}
-        stale = stale | w_stale
-        for c, base_tag, base_text, theirs, later in by_file.get(rel, []):
-            start = _locate(text, c, starts)
-            if start is None:
-                g["copies"].append({"fixed": _not_merged(
-                    rel, c.name, c.line, base_tag, f"the copy {c.name} at line {c.line} does not read as the audit "
-                    "read it", skipped)})
-                continue
-            if c.dialect == diff3.GUI and c.audit != "inject" and templates is None:
-                templates = gui_templates(mod_root, base, new_hash)
-            tpl = _Template(c, mod_root, reg)
-            g["copies"].append(_gather_copy(text, starts, start, c, base_tag, base_text, theirs, later, old_tag,
-                                            templates, tpl, it, states))
-            stale |= tpl.stale
-        g["stale"] = sorted(stale)
-        g["blame"] = _blame(mod_root, rel, g)
-        files.append({"file": rel, "before_sha": _sha(text), "bom": bom, "crlf": crlf, "gathered": g})
-    ours_layout(files)
-    set_defaults(files, config.setting("merge_default")[0])
+    with ThreadPoolExecutor(BLAME_WORKERS) as pool:
+        files, formatted = _gather_files(mod_root, base, new_hash, old_tag, it, states, reg, by_file, added,
+                                         whole, skipped, pool, blame_cache, config.setting("merge_default")[0])
+        ours_layout(files, formatted.result)
+        for f in files:
+            f["gathered"]["blame"] = f["gathered"]["blame"].result()
+    if blame_cache is not None:
+        blame_cache.save()
     skipped += build(files, choices)
     # A tool's output that the merge met but cannot compare goes to the regenerate
     # list, never to the skipped list: the tool reads vanilla again.
@@ -480,8 +467,8 @@ def set_defaults(files, default):
     with no conflict is one that the merge takes with no rule and no intent store entry,
     and that a choice can change. "conflict": you and vanilla both changed the text.
     "review": the merge cannot take vanilla's change safely, and opens it."""
-    reason = {merge.OPEN: "a change with no conflict; the merge_default setting asks you",
-              merge.KEEP: "a change with no conflict; the merge_default setting keeps your text"}
+    reason = {merge.OPEN: "the merge_default setting is ask, so the merge asks you",
+              merge.KEEP: "the merge_default setting is keep, so the merge keeps your text"}
     for f in files:
         for row in gathered_rows(f["gathered"]):
             d = row["d"]
@@ -570,9 +557,85 @@ def copy_parts(decisions, ops, took, all_ops, extra):
     return rows, op_rows
 
 
-def _blame(mod_root, rel, g):
+# git blame of the mod's files runs in these threads while the plan goes on. The cost
+# is the wait on git and on the disk, so threads run the files at the same time.
+BLAME_WORKERS = 8
+
+
+def _gather_files(mod_root, base, new_hash, old_tag, it, states, reg, by_file, added, whole, skipped, pool,
+                  blame_cache=None, default="accept"):
+    """(files, formatted): the plan files, each with its gathered part (see build), for
+    the copies of `by_file`, the new definitions of `added` and the whole copies of
+    `whole`. Each file gets the defaults of the merge_default setting `default`
+    (set_defaults) before its blame, so the blame holds each row that the setting
+    opens. Work that waits on other programs runs in the thread pool `pool`: the
+    "blame" of each file is a future, and `formatted` is the future of the pdx-format
+    pass that ours_layout reads."""
+    files, templates, skips = [], None, defaultdict(list)
+    rels = sorted(set(by_file) | set(added) | set(whole))
+    read = {rel: read_mod_file(Path(mod_root) / rel) for rel in rels}
+    formatted = pool.submit(FORMATTER, {"ours/" + rel: read[rel][0] for rel in rels
+                                        if PurePosixPath(rel).suffix.lower() in FORMAT_EXTS})
+    # The largest files first: their blame takes longest, so it starts first.
+    for rel in sorted(rels, key=lambda r: -len(read[r][0])):
+        text, bom, crlf = read[rel]
+        starts = _line_starts(text)
+        new_rows, stale = added.get(rel, ({"decisions": [], "inserts": []}, set()))
+        removed, w_stale = whole.get(rel, ([], set()))
+        g = {"ours": text, "copies": [], "added": new_rows, "removed": removed}
+        stale = stale | w_stale
+        for c, base_tag, base_text, theirs, later in by_file.get(rel, []):
+            start = _locate(text, c, starts)
+            if start is None:
+                g["copies"].append({"fixed": _not_merged(
+                    rel, c.name, c.line, base_tag, f"the copy {c.name} at line {c.line} does not read as the audit "
+                    "read it", skips[rel])})
+                continue
+            if c.dialect == diff3.GUI and c.audit != "inject" and templates is None:
+                templates = gui_templates(mod_root, base, new_hash)
+            tpl = _Template(c, mod_root, reg)
+            g["copies"].append(_gather_copy(text, starts, start, c, base_tag, base_text, theirs, later, old_tag,
+                                            templates, tpl, it, states))
+            stale |= tpl.stale
+        g["stale"] = sorted(stale)
+        f = {"file": rel, "before_sha": _sha(text), "bom": bom, "crlf": crlf, "gathered": g}
+        set_defaults([f], default)
+        g["blame"] = pool.submit(_blame, mod_root, rel, g, blame_cache)
+        files.append(f)
+    files.sort(key=lambda f: f["file"])
+    for rel in rels:
+        skipped += skips[rel]
+    return files, formatted
+
+
+def _based(c, old_tag, pinned):
+    """(copy, base tag, base text, vanilla's current text, the versions between them)
+    for copy `c`, or None when vanilla changed nothing since the base. The mod can
+    still hold vanilla's text from a version before the base
+    (merge._Merge.older_change), so such a copy merges too. `pinned` is a base
+    version that check_applied gives, or None."""
+    old_i = c.tags.index(old_tag)
+    if pinned == NO_BASE:
+        base_i = None
+    elif pinned in c.tags[:old_i + 1]:
+        base_i = c.tags.index(pinned)
+    else:
+        base_i = diff3.baseline(c.mod_text, c.versions[:old_i + 1], c.unwrap, c.dialect)
+    theirs = c.versions[-1]
+    if base_i is None:
+        # Vanilla held no version of this text at --old or before: vanilla added it
+        # later. The base is empty, so each node vanilla holds is its addition.
+        base_text, base_tag = "", NO_BASE
+    else:
+        base_text, base_tag = c.versions[base_i], c.tags[base_i]
+    if base_text == theirs and not any(v and v != base_text for v in c.versions[:base_i or 0]):
+        return None
+    return c, base_tag, base_text, theirs, c.versions[(base_i + 1 if base_i is not None else 0):-1]
+
+
+def _blame(mod_root, rel, g, cache=None):
     """{line: commit} for each line of the file that a decision on it can leave open,
-    with any choice."""
+    with any choice. `cache` (BlameCache) gives the answer of an earlier run."""
     lines = set()
     for cp in g["copies"]:
         if "fixed" in cp:
@@ -585,8 +648,92 @@ def _blame(mod_root, rel, g):
                 lines.add(r["d"].get("line"))
     lines |= {r["d"].get("line") for r in g["removed"]}
     lines.discard(None)
-    blamed = proposer.blame(mod_root, rel, lines) if lines else {}
-    return {str(ln): (hit or (None,))[0] for ln, hit in blamed.items()}
+    sha = _sha(g["ours"])
+    got = cache.get(rel, sha, lines) if cache is not None and lines else None
+    if got is None:
+        blamed = proposer.blame(mod_root, rel, lines) if lines else {}
+        got = {str(ln): (hit or (None,))[0] for ln, hit in blamed.items()}
+        if cache is not None and lines:
+            cache.put(rel, sha, got)
+    return got
+
+
+def _changed_since(mod_root, old, head):
+    """The paths, relative to `mod_root`, that the commits from `old` to `head` changed in
+    the mod, or None when `head` does not descend from `old`."""
+    import subprocess
+
+    def git(*args):
+        try:
+            return subprocess.run(["git", "-C", str(mod_root), *args], capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=120)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    ancestor = git("merge-base", "--is-ancestor", old, head)
+    if ancestor is None or ancestor.returncode != 0:
+        return None
+    diff = git("-c", "core.quotepath=off", "diff", "--name-only", "--relative", "--no-renames", old, head)
+    if diff is None or diff.returncode != 0:
+        return None
+    return set(diff.stdout.splitlines())
+
+
+class BlameCache:
+    """The blame of each mod file from earlier runs, in the mod's data folder. git
+    blames the text in the working tree against the commits that changed the file, so
+    an answer holds while the file's text is the same and no new commit changed the
+    file. After new commits, the cache keeps the files that they did not change, but
+    only when the new HEAD descends from the cached one: a rewritten history gives
+    the old commits new names. A file asked for other lines than the cache holds is
+    blamed again, because git can give a line another commit when the ranges around
+    it change."""
+
+    NAME = "merge-blame.json"
+
+    def __init__(self, folder, head, mod_root=None):
+        self.path, self.head = Path(folder) / self.NAME, head
+        self.files, self.changed = {}, False
+        if not head:
+            return
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict) or not isinstance(data.get("files"), dict):
+            return
+        old = data.get("head")
+        if old == head:
+            self.files = data["files"]
+        elif old and mod_root is not None:
+            changed = _changed_since(mod_root, old, head)
+            if changed is not None:
+                self.files = {rel: v for rel, v in data["files"].items() if rel not in changed}
+                self.changed = True
+
+    def get(self, rel, sha, lines):
+        """{str(line): commit} for `lines` of file `rel` with text sha `sha`, or None."""
+        hit = self.files.get(rel)
+        if not self.head or not hit or hit.get("sha") != sha or set(hit["lines"]) != {str(ln) for ln in lines}:
+            return None
+        return dict(hit["lines"])
+
+    def put(self, rel, sha, blamed):
+        if self.head:
+            self.files[rel] = {"sha": sha, "lines": dict(blamed)}
+            self.changed = True
+
+    def save(self):
+        """Write the cache when this run blamed a file."""
+        if not self.changed:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_name(self.NAME + ".tmp")
+            tmp.write_text(json.dumps({"head": self.head, "files": self.files}, separators=(",", ":")),
+                           encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
 
 
 def build(files, choices=None, memo=None):
@@ -819,9 +966,9 @@ def _build_file(f, rec, memo=None):
             d["own"], d["by"] = [s, e], "choice"
             d.pop("commit", None)
             if why:
-                d["action"], d["reason"] = merge.OPEN, f"your own text for {where} cannot go in: {why}"
+                d["action"], d["reason"] = merge.OPEN, f"your custom merge for {where} cannot go in: {why}"
             else:
-                d["action"], d["reason"] = merge.TAKE, f"your own text for {where} takes the place of this change"
+                d["action"], d["reason"] = merge.TAKE, f"your custom merge for {where} takes the place of this change"
         if why:
             continue
         edits = [x for x in edits if not inside(x[:2], s, e)] + [(s, e, o["text"], tuple(o["edges"]))]
@@ -898,18 +1045,20 @@ def same_content(a, b):
 LAYOUT_WHY = "the mod file is not in pdx-format layout, so the merge keeps its layout"
 
 
-def ours_layout(files):
+def ours_layout(files, formatted=None):
     """Record in each plan file's gathered part whether the mod file is in pdx-format
     layout: `layout` is None when it is, else the `format` outcome of the file. The
     mod keeps some files out of pdx-format (map data, setup files, generated
-    locators), and formatting them would change lines the merge did not touch."""
+    locators), and formatting them would change lines the merge did not touch.
+    `formatted` gives the FORMATTER result of the mod texts when a caller started it
+    early."""
     todo = [f for f in files if PurePosixPath(f["file"]).suffix.lower() in FORMAT_EXTS]
     for f in files:
         f["gathered"]["layout"] = {"applied": False, "why": "not a .txt or .gui file"}
     if not todo:
         return
     try:
-        done = FORMATTER({"ours/" + f["file"]: f["gathered"]["ours"] for f in todo})
+        done = (formatted or (lambda: FORMATTER({"ours/" + f["file"]: f["gathered"]["ours"] for f in todo})))()
     except FileNotFoundError as e:
         for f in todo:
             f["gathered"]["layout"] = {"applied": False, "why": f"{e}; run pdx-format on the file after --apply"}
@@ -1014,11 +1163,11 @@ def _whole_copies(mod_root, findings, order, old_tag, only, block, it, states, r
             continue                      # vanilla made this change at or before --old
         if f.kind == "file_bulk_changed":
             skipped.append((rel, f"{f.name} is too large to merge statement by statement; {f.detail} "
-                                 f"after {f.base}; take them by hand"))
+                                 f"after {f.base}; merge them by hand"))
             continue
         if f.kind.startswith("file_") and f.kind.endswith("_mid") and "#" not in target:
             skipped.append((rel, "the file is not script; vanilla changed lines in it (see the file audit); "
-                                 "take them by hand"))
+                                 "merge them by hand"))
             continue
         if f.kind not in WHOLE_REMOVED or (f.kind.endswith("file_review") and (f.key or {}).get("change") != "removed"):
             continue
@@ -1283,10 +1432,10 @@ def _print(p):
         print()
         taken = sum(1 for d in f["decisions"] if d["action"] == merge.TAKE)
         kept = sum(1 for d in f["decisions"] if d["action"] == merge.KEEP)
-        print(f"- {taken} vanilla changes taken, {kept} kept by a rule or an entry, {f['open']} open decisions")
+        print(f"- {taken} vanilla changes accepted, {kept} kept by a rule or an entry, {f['open']} open decisions")
         for why, n in f.get("not_set") or []:
-            word = "Take vanilla" if f["choices"]["all"] == merge.TAKE else "Keep mine"
-            print(f"- {word} for all does not apply to {n} decision{'' if n == 1 else 's'}: {why}")
+            word = "Accept All Vanilla Changes" if f["choices"]["all"] == merge.TAKE else "Keep All My Lines"
+            print(f"- {word} does not apply to {n} decision{'' if n == 1 else 's'}: {why}")
         rc = f["removed_check"]
         print(f"- Removed-line check: {'passed' if rc['passed'] else 'FAILED'}")
         fm = f.get("format", {})
@@ -1300,7 +1449,7 @@ def _print(p):
             first, last = o["lines"]
             where = f"lines {first} to {last}" if last > first else f"line {first}"
             state = f"NOT USED, {o['problem']}" if o["problem"] else f"{o['decisions']} changes in it"
-            print(f"- Your own text for {where} ({state}):")
+            print(f"- Your custom merge for {where} ({state}):")
             print("  " + "\n  ".join(o["text"].strip("\n").split("\n")[:20]))
         for d in f["decisions"]:
             if d["action"] == merge.OPEN:
@@ -1356,10 +1505,12 @@ def _main(args):
                   if args.choices or args.choose or saved else None)
         return _apply(mod_root, args.apply, args.file, chosen,
                       lambda files: plan(mod_root, base, commits, args.old, new_hash, new_msg, it, {f["file"] for f in files},
-                                         bases=plan_bases(files)))
+                                         bases=plan_bases(files),
+                                         blame_cache=BlameCache(store.dir, store.head, mod_root)))
     try:
         p = plan(mod_root, base, commits, args.old, new_hash, new_msg, it, args.file, args.block,
-                 read_choices(args.choices, mod_root, args.choose, saved))
+                 read_choices(args.choices, mod_root, args.choose, saved),
+                 blame_cache=BlameCache(store.dir, store.head, mod_root))
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2

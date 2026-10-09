@@ -91,7 +91,7 @@ def test_paths_start_at_the_module_folders(install):
 def test_the_audits_read_the_install_repository(install):
     out = _out(run_override_audit, install.mod, install.repo,
                install.old, "1.0.0", install.new, "1.1.0", install.args)
-    assert "2 REPLACE changes to take or check" in out
+    assert "2 REPLACE changes to accept or check" in out
     assert "upkeep = 5" in out and "legacy_mod = 1" in out
     out = _out(run_gui_audit, install.mod, install.repo,
                install.old, "1.0.0", install.new, "1.1.0", install.args)

@@ -48,7 +48,7 @@ def test_override_audit_flags_stale_replace(world):
     # vanilla added `upkeep = 5` and dropped `legacy_mod`; the mod's REPLACE
     # lacks the first and still carries the second
     assert "some_building" in out
-    assert "2 REPLACE changes to take or check" in out
+    assert "2 REPLACE changes to accept or check" in out
     assert "upkeep = 5" in out and "legacy_mod = 1" in out
 
 

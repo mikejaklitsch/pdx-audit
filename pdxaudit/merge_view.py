@@ -65,10 +65,11 @@ KIND_WORDS = {
     "both_added": "You and vanilla both added this, with different text.",
     "inject_overlap": "Vanilla changed a key that you inject.",
     "not_merged": "The merge cannot put the changes of this copy into your file.",
-    "own_text": "Your own text for these lines.",
+    "own_text": "Your custom merge for these lines.",
 }
-BUTTONS = ((merge.TAKE, "Take vanilla"), (merge.KEEP, "Keep mine"))
-FILE_BUTTONS = ((merge.TAKE, "Take vanilla for all"), (merge.KEEP, "Keep mine for all"))
+BUTTONS = ((merge.TAKE, "Accept Vanilla Change"), (merge.KEEP, "Keep My Line"))
+FILE_BUTTONS = ((merge.TAKE, "Accept All Vanilla Changes", "Accept Vanilla Change"),
+                (merge.KEEP, "Keep All My Lines", "Keep My Line"))
 FOLDER = Qt.ItemDataRole.UserRole + 1     # a folder item's path in the file tree
 MISSING_OURS = "(not in your file)"
 MISSING_THEIRS = "(vanilla deleted it)"
@@ -251,9 +252,9 @@ class MergePage(QWidget):
         every = QHBoxLayout()
         every.setSpacing(6)
         self.file_buttons = {}
-        for act, text in FILE_BUTTONS:
+        for act, text, row_text in FILE_BUTTONS:
             b = QPushButton(text)
-            b.setToolTip(f"{text.rsplit(' for all', 1)[0]} for each decision in this file. "
+            b.setToolTip(f"{row_text} for each decision in this file. "
                          "A choice that you make on a row after this stays.")
             b.clicked.connect(lambda _c=False, act=act: self.current and self.choose_all(act))
             every.addWidget(b)
@@ -691,7 +692,7 @@ class MergePage(QWidget):
         if rel in self.building:
             notes.append("Updating the file with your choices.")
         elif f.get("not_set"):
-            word = dict(FILE_BUTTONS)[f["choices"]["all"]]
+            word = {a: t for a, t, _row in FILE_BUTTONS}[f["choices"]["all"]]
             n = sum(c for _why, c in f["not_set"])
             notes.append(f"{word} does not apply to {n} decision{'' if n == 1 else 's'}:")
             notes += [f"{why[:1].upper()}{why[1:]} ({c})." for why, c in f["not_set"]]
@@ -817,17 +818,25 @@ class MergePage(QWidget):
         return " › ".join(steps) + place
 
     def _add_row(self, d):
+        """A row card: the mark, the place and the buttons on one line, then what
+        happened and the notes, then the text of each side."""
         row = QFrame(objectName="card")
         row.setProperty("selected", False)
         row.setCursor(Qt.CursorShape.PointingHandCursor)
         row.installEventFilter(self)
         v = QVBoxLayout(row)
-        v.setContentsMargins(14, 12, 14, 10)
-        v.setSpacing(6)
+        v.setContentsMargins(12, 8, 12, 8)
+        v.setSpacing(4)
+        top = QHBoxLayout()
+        top.setSpacing(6)
         row.head = QLabel()
         row.head.setTextFormat(Qt.TextFormat.RichText)
         row.head.setWordWrap(True)
-        v.addWidget(row.head)
+        top.addWidget(row.head, 1)
+        row.buttons = QHBoxLayout()
+        row.buttons.setSpacing(6)
+        top.addLayout(row.buttons)
+        v.addLayout(top)
         row.what = QLabel(objectName="hint")
         row.what.setTextFormat(Qt.TextFormat.PlainText)
         row.what.setWordWrap(True)
@@ -849,16 +858,11 @@ class MergePage(QWidget):
             columns = [(t, x) for t, x in columns if not t.endswith("before the change")] or columns
         if columns:
             grid = QHBoxLayout()
-            grid.setContentsMargins(0, 4, 0, 4)
+            grid.setContentsMargins(0, 2, 0, 0)
             grid.setSpacing(10)
             for title, text in columns:
                 grid.addLayout(self._code_column(title, text), 1)
             v.addLayout(grid)
-        foot = QFrame(objectName="cardFoot")       # a line divides the buttons from the text
-        row.buttons = QHBoxLayout(foot)
-        row.buttons.setContentsMargins(0, 10, 0, 0)
-        row.buttons.setSpacing(6)
-        v.addWidget(foot)
         for w in row.findChildren(QLabel):
             w.installEventFilter(self)
         self.row_box.insertWidget(self.row_box.count() - 3, row)   # before the more label, the note and the stretch
@@ -870,12 +874,17 @@ class MergePage(QWidget):
         text = text.replace("--old ", "")
         return text[:1].upper() + text[1:] + ("" if text.endswith(".") else ".")
 
-    def _what(self, d):
-        """What happened to the text of decision `d`, and the reason of its action."""
+    def _what(self, d, action=None):
+        """What happened to the text of decision `d`, and the reason of its action. On
+        an open row (`action` OPEN) the mark and the text of each side say what
+        happened, so only the reason shows, and a row with no conflict has none."""
         what = KIND_WORDS.get(d["kind"], d["kind"])
         if d["kind"] == "both_changed" and not d.get("theirs"):
             what = "You changed this. Vanilla deleted it."
-        return what + (" " + self._sentence(d["reason"]) if d.get("reason") else "")
+        reason = self._sentence(d["reason"]) if d.get("reason") else ""
+        if action == merge.OPEN:
+            return "" if d.get("cause") == "clean" else reason
+        return f"{what} {reason}".strip()
 
     def _blocked(self, d, act):
         """Why the button of action `act` cannot change decision `d`, or ""."""
@@ -900,7 +909,7 @@ class MergePage(QWidget):
                 f'</span>&nbsp;&nbsp;' if action == merge.OPEN else "")
         row.head.setText(f'{mark}<span style="font-family:\'{self.mono}\'; color:{C["text"]};">'
                          f'{html.escape(self.where(d))}</span>')
-        row.what.setText(self._what(d))
+        row.head.setToolTip(self._what(d))
         # Qt gives the focus of a hidden button to the next widget, and the list scrolls
         # to show that widget. The row holds the focus, so the list stays where it is.
         if row.isAncestorOf(QApplication.focusWidget()):
@@ -918,7 +927,7 @@ class MergePage(QWidget):
             b = QPushButton(text)
             if own:
                 b.setEnabled(False)
-                b.setToolTip("Your own text decides this change. Click My own text to change or remove it.")
+                b.setToolTip("Your custom merge decides this change. Click Custom Merge to change or remove it.")
             elif act == action:
                 b.setText("✓ " + text)
                 b.setProperty("chosen", True)
@@ -936,7 +945,7 @@ class MergePage(QWidget):
                     self._gate(b, getattr(self.win, "busy_reason", ""))
             row.buttons.addWidget(b)
         # Your own text: it takes the place of the whole block that holds the change.
-        b = QPushButton("✓ My own text" if own else "Write my own")
+        b = QPushButton("✓ Custom Merge" if own else "Write Custom Merge")
         why = "" if own or d.get("span") is not None else "No text of your file holds this change."
         if own:
             b.setProperty("chosen", action != merge.OPEN)
@@ -947,26 +956,20 @@ class MergePage(QWidget):
             b.setToolTip("Write the text that Apply file puts in place of the block that holds this change.")
             b.clicked.connect(lambda _c=False, d=d: self.edit_text(d))
             self._row_buttons.append(b)
-            row.labels.append("Write my own")
+            row.labels.append("Write Custom Merge")
             if self.win.process is not None:
                 self._gate(b, getattr(self.win, "busy_reason", ""))
         row.buttons.addWidget(b)
         if own:
-            notes.insert(0, "Your own text" if action != merge.OPEN else "Your own text cannot go in")
+            notes.insert(0, "Your custom merge" if action != merge.OPEN else "Your custom merge cannot go in")
         elif action != merge.OPEN:
             by = "Your choice" if choice or d.get("by") == "choice" else "Default"
             notes.insert(0, by + (f" ({d['by']})" if d.get("by") and d["by"] != "choice" else ""))
         elif choice and self.current not in self.building:
             notes.insert(0, f"Your choice {dict(BUTTONS)[choice]} does not apply")
-        if notes:
-            note = QLabel(". ".join(n.rstrip(".") for n in notes) + ("." if len(notes) > 1 else ""),
-                          objectName="faint")
-            note.setTextFormat(Qt.TextFormat.PlainText)
-            note.setWordWrap(True)
-            note.installEventFilter(self)
-            row.buttons.addWidget(note, 1)
-        else:
-            row.buttons.addStretch(1)
+        what = " ".join([self._what(d, action)] + [n.rstrip(".") + "." for n in notes]).strip()
+        row.what.setText(what)
+        row.what.setVisible(bool(what))
         if d.get("line"):
             b = QPushButton("Open in editor")
             b.clicked.connect(lambda _c=False, d=d: self.win.open_file(self.current, d["line"]))
@@ -1290,13 +1293,13 @@ class MergePage(QWidget):
         first, last = block["lines"]
         where = f"lines {first} to {last}" if last > first else f"line {first}"
         dlg = QDialog(self)
-        dlg.setWindowTitle("Write your own text")
+        dlg.setWindowTitle("Write Custom Merge")
         dlg.resize(820, 600)
         v = QVBoxLayout(dlg)
         head = QLabel(f"{self.where(d)} · {where}")
         head.setStyleSheet(f"font-family: '{self.mono}';")
         v.addWidget(head)
-        hint = QLabel(f"Your text takes the place of {where} of your file, with each change in them. "
+        hint = QLabel(f"Your custom merge takes the place of {where} of your file, with each change in them. "
                       "Apply file writes it as it stands.", objectName="hint")
         hint.setWordWrap(True)
         v.addWidget(hint)
@@ -1321,7 +1324,7 @@ class MergePage(QWidget):
             bar.addWidget(b)
         bar.addStretch(1)
         if block["own"] is not None:
-            remove = QPushButton("Remove my text")
+            remove = QPushButton("Remove Custom Merge")
             remove.setToolTip("Use your choices for the changes in this block again.")
             remove.clicked.connect(lambda: (self.remove_own(d, block), dlg.reject()))
             bar.addWidget(remove)
@@ -1333,7 +1336,7 @@ class MergePage(QWidget):
         def accept():
             why = self.write_own(d, edit.toPlainText(), block)
             if why:
-                QMessageBox.warning(dlg, "Write your own text", f"Your text cannot go in: {why}.")
+                QMessageBox.warning(dlg, "Write Custom Merge", f"Your custom merge cannot go in: {why}.")
             else:
                 dlg.accept()
         save.clicked.connect(accept)

@@ -20,7 +20,8 @@ Recognized keys:
     replace_findings  "block": the changes vanilla made in one REPLACE are one
                    finding; "statement": each change is a finding of its own
     merge_default  what the merge does with a change that only vanilla made: "ask"
-                   makes it a decision; "take" takes it; "keep" keeps the mod's text
+                   makes it a decision; "accept" accepts it; "keep" keeps the mod's
+                   text. "take" is an old name of "accept"
     editor         the command that opens a file at a line, with {file} and {line};
                    unset, the app opens the file with the system's default program
 
@@ -55,10 +56,10 @@ SETTINGS = {
                          "env": "PDX_REPLACE_FINDINGS", "default": "block",
                          "help": "block: one finding for each REPLACE that vanilla changed; "
                                  "statement: one finding for each change"},
-    "merge_default": {"label": "Changes with no conflict", "kind": "choice", "choices": ("ask", "take", "keep"),
+    "merge_default": {"label": "Changes with no conflict", "kind": "choice", "choices": ("ask", "accept", "keep"), "aliases": {"take": "accept"},
                       "env": "PDX_MERGE_DEFAULT", "default": "ask",
                       "help": "what the merge does with a change that only vanilla made: ask makes it a "
-                              "decision for you; take takes vanilla's text; keep keeps yours"},
+                              "decision for you; accept accepts vanilla's change; keep keeps your line"},
     "editor": {"label": "Editor command", "kind": "text", "env": "PDX_EDITOR",
                "help": "opens a file at a line, with {file} and {line}; empty opens the file "
                        "with the system's default program"},
@@ -149,8 +150,15 @@ def cfg(key, default=None):
 def setting(key, flag=None):
     """(value, where it comes from) for one setting, at the precedence every run
     uses: a CLI flag, then the environment, then the config file, then the built-in
-    default. `where` names the source, for a report that says why a value is in use."""
+    default. `where` names the source, for a report that says why a value is in use.
+    An old name of a choice gives the choice (the setting's "aliases")."""
     spec = SETTINGS[key]
+    value, where = _setting(spec, key, flag)
+    return spec.get("aliases", {}).get(value, value), where
+
+
+def _setting(spec, key, flag):
+    """(value, where) for setting `key` with spec `spec`, before an alias applies."""
     if flag:
         return flag, spec.get("flag", "a command-line option")
     env_name = spec.get("env")
@@ -243,6 +251,7 @@ def _check_patch_name(value):
 def _check_choice(key):
     def check(value):
         text = str(value).strip().lower()
+        text = SETTINGS[key].get("aliases", {}).get(text, text)
         choices = SETTINGS[key]["choices"]
         if text not in choices:
             raise ConfigError(f"{key} is one of: {', '.join(choices)}.")

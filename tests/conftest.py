@@ -148,9 +148,9 @@ def _own_data_folder(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _merge_takes(monkeypatch):
-    """The merge takes a change with no conflict (`merge_default` take), as most tests
+    """The merge takes a change with no conflict (`merge_default` accept), as most tests
     describe. The tests of the setting set their own value."""
-    monkeypatch.setenv("PDX_MERGE_DEFAULT", "take")
+    monkeypatch.setenv("PDX_MERGE_DEFAULT", "accept")
 
 
 @pytest.fixture

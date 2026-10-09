@@ -80,7 +80,7 @@ _fonts_loaded = False
 # (page index, icon, tooltip), in the order the rail shows them.
 RAIL_PAGES = (
     (0, "findings", "Findings: what to fix, from the last run"),
-    (5, "merge", "Merge: take vanilla's changes into the mod's copies"),
+    (5, "merge", "Merge: merge vanilla's changes into the mod's copies"),
     (1, "dismissed", "Dismissed: findings you hid, and how to bring them back"),
     (2, "commits", "Tracker: the vanilla commits to compare with, and making a new one"),
     (3, "output", "Output: the run's report and its log"),
@@ -303,11 +303,10 @@ def stylesheet():
     #viewBar {{ background: {C['bar']}; border-bottom: 1px solid {C['edge']};
                 border-top-left-radius: 9px; border-top-right-radius: 9px; }}
     #viewTitle {{ font-family: "{MONO}"; font-size: 12px; color: {C['text2']}; }}
-    #cardFoot {{ border-top: 1px solid {C['line']}; }}
     #hint {{ color: {C['muted']}; font-size: 12px; }}
     #faint {{ color: {C['faint']}; font-size: 11.5px; }}
     #codeBox {{ font-family: "{MONO}"; font-size: 12px; background: {C['code']}; border: 1px solid {C['line']};
-                padding: 6px; }}
+                padding: 3px 6px; }}
     QToolTip {{ background: {C['popup']}; color: {C['text']}; border: 1px solid #2f343d; padding: 4px 6px; }}
     QMessageBox {{ background: {C['bar']}; }}
     QProgressBar {{ background: {C['line']}; border: none; border-radius: 2px; }}
@@ -1790,6 +1789,7 @@ class MainWindow(QMainWindow):
                 continue
             shown = s["stored"] if s["stored"] not in (None, "") else s["value"]
             if isinstance(edit, QComboBox):
+                shown = config.SETTINGS[s["key"]].get("aliases", {}).get(shown, shown)
                 edit.setCurrentText(str(shown))
             elif not edit.hasFocus():
                 edit.setText("" if shown in (None, "") else str(shown))

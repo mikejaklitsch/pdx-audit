@@ -322,7 +322,7 @@ RANK_LABEL = {"breaks": ("game error", "game errors"), "decide": ("decision for 
 RANK_HELP = {
     "breaks": "The game reads a name or a definition that is gone or set twice. Fix these first.",
     "decide": "You and vanilla both changed this, or vanilla moved it. Choose which text stays.",
-    "merge": "Only vanilla changed this. The Merge page takes the change, or asks you when the "
+    "merge": "Only vanilla changed this. The Merge page accepts the change, or asks you when the "
              "merge_default setting is ask.",
     "check": "Look at this. No edit is necessary.",
 }

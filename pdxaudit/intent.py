@@ -155,7 +155,7 @@ def digest(text):
 
 
 def _ident(node, dialect):
-    """The fields diff3 pairs a sibling by, strongest first, as a dict."""
+    """The fields diff3 pairs a sibling by, strongest first, as a dict of strings."""
     seg = {"key": node.key}
     if node.label != node.key:
         seg["name"] = node.label[len(node.key) + 1:]
@@ -180,13 +180,13 @@ def segment(node, siblings, dialect, cache=None):
         idents = [_ident(s, dialect) for s in siblings]
         groups = {}
         for i, (s, ident) in enumerate(zip(siblings, idents)):
-            groups.setdefault(json.dumps(ident, sort_keys=True), []).append(i)
+            groups.setdefault(tuple(sorted(ident.items())), []).append(i)
         where = {(s.start, s.end): i for i, s in enumerate(siblings)}
         cache[key] = (siblings, idents, groups, where)
     _sibs, idents, groups, where = cache[key]
     i = where[(node.start, node.end)]
     seg = dict(idents[i])
-    same = groups[json.dumps(seg, sort_keys=True)]
+    same = groups[tuple(sorted(seg.items()))]
     if len(same) > 1:
         seg["n"] = same.index(i) + 1
     return seg

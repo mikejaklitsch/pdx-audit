@@ -901,7 +901,7 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
         "",
         f"**{len(unique)}** unique overrides scanned ({len(replaces)} REPLACE-type, "
         f"{len(injects)} INJECT-type)",
-        f"- **{len(changed_replace)}** REPLACE blocks with vanilla changes to take or check "
+        f"- **{len(changed_replace)}** REPLACE blocks with vanilla changes to accept or check "
         f"({sum(len(item[-1].flagged) for item in changed_replace)} changes)",
         f"- **{len(changed_inject)}** INJECT targets vanilla changed",
         f"- **{len(scalar_results)}** single-value REPLACEs vanilla changed",
@@ -1052,7 +1052,7 @@ def run_override_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, arg
         print("**All overrides are current with vanilla.** No action needed.")
     else:
         print("---")
-        print(f"**Action needed:** {n_changes} REPLACE changes to take or check, "
+        print(f"**Action needed:** {n_changes} REPLACE changes to accept or check, "
               f"{overlaps_found} INJECT collisions, {len(removed) + len(shadowed)} orphaned.")
         if not args.diff and (changed_replace or changed_inject):
             print("Run with `--diff` for vanilla's changes since each copy's version.")

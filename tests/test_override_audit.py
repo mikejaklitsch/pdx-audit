@@ -30,7 +30,7 @@ def test_each_vanilla_change_the_replace_lacks_is_one_finding(world):
         ("override_vanilla_added_mid", "in_game/common/building_types/m.txt:2", None, "upkeep = 5"),
         ("override_vanilla_removed_mid", "in_game/common/building_types/m.txt:3", "legacy_mod = 1", None)]
     assert all(f.key["target"] == TARGET and f.since == "1.1.0" and f.base == "1.0.0" for f in findings)
-    assert "vanilla:  added upkeep = 5  (1.1.0)" in out and "2 REPLACE changes to take or check" in out
+    assert "vanilla:  added upkeep = 5  (1.1.0)" in out and "2 REPLACE changes to accept or check" in out
 
 
 def test_your_edit_raises_vanilla_changes_in_its_block_and_is_not_a_finding(world):

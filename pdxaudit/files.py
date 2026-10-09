@@ -602,7 +602,7 @@ def _print_report(tags, window, new_msg, n_files, copies, added, removed, file_r
     print("\n".join([
         f"**{n_files}** mod files replace a vanilla file at the same path; "
         f"**{len(untracked_rows)}** more have no vanilla history to compare with",
-        f"- **{len(copies)}** definitions or files with vanilla changes to take or check "
+        f"- **{len(copies)}** definitions or files with vanilla changes to accept or check "
         f"({n_changes} changes)",
         f"- **{len(added)}** definitions vanilla added that a file copy lacks",
         f"- **{len(removed)}** definitions vanilla deleted that a file copy still has",

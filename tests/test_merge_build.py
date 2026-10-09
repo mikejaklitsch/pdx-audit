@@ -225,12 +225,12 @@ def test_a_decision_that_takes_no_choice_says_why(tmp_path, monkeypatch, capsys)
     _write_tree(mod, {".metadata/metadata.json": '{"id": "t"}', gone: "G = {\n\tv = 3\n}\n"})
     common = ["--mod-root", str(mod), "--vanilla-repo", tr.repo, "--old", "1.0", "--new", "1.1"]
     plan = tmp_path / "plan.json"
-    assert merge_cli.main(common + ["--dry-run", "--choose", "take", "--plan-out", str(plan)]) == 0
+    assert merge_cli.main(common + ["--dry-run", "--choose", "accept", "--plan-out", str(plan)]) == 0
     out = capsys.readouterr().out
     [f] = json.loads(plan.read_text(encoding="utf-8"))["files"]
     assert f["open"] == 1
     assert f["not_set"] == [["--apply does not delete a file: delete it by hand, or keep it", 1]]
-    assert "Take vanilla for all does not apply to 1 decision: --apply does not delete a file" in out
+    assert "Accept All Vanilla Changes does not apply to 1 decision: --apply does not delete a file" in out
     [row] = f["gathered"]["removed"]
     assert row["take"][0] == merge.OPEN and row["keep"][0] == merge.KEEP
 

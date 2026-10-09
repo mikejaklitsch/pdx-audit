@@ -400,9 +400,9 @@ def run_gui_audit(mod_root, base, old_hash, old_msg, new_hash, new_msg, args, ct
         f"**{len(shadow_defs)}** shadow-capable definitions ({n_tmpl} template, "
         f"{len(shadow_defs) - n_tmpl} type) in **{len(files)}** mod .gui files"
         + ("; " + "; ".join(extras) if extras else ""),
-        f"- **{len(shadowed)}** shadowed definitions with vanilla changes to take or check "
+        f"- **{len(shadowed)}** shadowed definitions with vanilla changes to accept or check "
         f"({n_changes(shadowed)} changes)",
-        f"- **{len(replaced)}** same-path file replacements with vanilla changes to take or check "
+        f"- **{len(replaced)}** same-path file replacements with vanilla changes to accept or check "
         f"({n_changes(replaced)} changes)",
         f"- **{len(file_review)}** same-path files vanilla added or removed",
         f"- **{len(new_coll)}** new name collisions (vanilla added a same-name definition)",

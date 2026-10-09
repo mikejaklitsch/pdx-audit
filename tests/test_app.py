@@ -349,7 +349,7 @@ def test_the_settings_page_shows_each_value_and_where_it_comes_from(window, cfg_
     assert set(window.setting_edits) == {"vanilla_repo", "game_root", "patch_name", "replace_findings",
                                          "merge_default", "editor"}
     assert window.setting_edits["replace_findings"].currentText() == "block"
-    assert window.setting_edits["merge_default"].currentText() == "take"     # the tests' value (conftest)
+    assert window.setting_edits["merge_default"].currentText() == "accept"     # the tests' value (conftest)
     assert window.setting_notes["patch_name"].text() == "from the built-in default"
     assert window.setting_edits["patch_name"].text() == "Pavia"    # the value in use
 

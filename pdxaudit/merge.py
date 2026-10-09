@@ -569,7 +569,7 @@ class _Merge:
             if not clash:
                 continue
             reason = (f"vanilla moved {', '.join(sorted(sets))} into template {name}; the mod sets "
-                      f"{', '.join(clash)} to its own value, so take the template line and its removals "
+                      f"{', '.join(clash)} to its own value, so accept the template line and its removals "
                       "together by hand, or keep the mod's lines")
             self.template_block[id(t)] = reason
             for b in B:
@@ -630,8 +630,8 @@ class _Merge:
             older = t.sig in sigs or (unique and any(intent._ident(n, self.dialect) == ident for n in level))
         if not older:
             return action, ""
-        return OPEN, (f"vanilla made this change before --old {self.old_tag}; the mod never took it. "
-                      "Take it if an earlier port missed it, keep the mod's text if the mod left it out "
+        return OPEN, (f"vanilla made this change before --old {self.old_tag}; the mod never accepted it. "
+                      "Accept it if an earlier port missed it, keep the mod's text if the mod left it out "
                       "on purpose")
 
     def _theirs_level(self, parent_path):
@@ -771,7 +771,7 @@ class _Merge:
         if action == TAKE and by is None:
             # The base is never later than --old, so the change is older than --old too.
             old = f"--old {self.old_tag}" if self.old_tag else "--old"
-            return OPEN, (f"vanilla made this change before {old}; the mod never took it. Take it "
+            return OPEN, (f"vanilla made this change before {old}; the mod never accepted it. Accept it "
                           "if an earlier port missed it, keep the mod's text if the mod left it out on purpose")
         return action, ""
 

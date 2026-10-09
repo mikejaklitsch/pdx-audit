@@ -625,3 +625,80 @@ def test_quiet_prints_the_counts_and_the_plan_not_the_diffs(tmp_path, monkeypatc
     out = capsys.readouterr().out
     assert "```diff" not in out
     assert "1 file: 0 ready, 1 with open decisions" in out and str(plan) in out
+
+
+def _git(repo, *args):
+    import subprocess
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                   check=True, capture_output=True)
+
+
+def _head(repo):
+    import subprocess
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
+                          text=True).stdout.strip()
+
+
+def test_the_blame_cache_keeps_a_file_until_its_text_or_a_commit_changes_it(tmp_path):
+    """A cached blame holds for the same text and lines. A commit that changes file a
+    drops a, and keeps b. A rewritten history drops each file."""
+    from pdxaudit.merge_cli import BlameCache
+    mod, data = tmp_path / "mod", tmp_path / "data"
+    _write_tree(mod, {"a.txt": "x = 1\n", "b.txt": "y = 1\n"})
+    _git(mod, "init", "-q")
+    _git(mod, "add", "-A")
+    _git(mod, "commit", "-q", "-m", "one")
+    cache = BlameCache(data, _head(mod), mod)
+    cache.put("a.txt", "sa", {"1": "c1"})
+    cache.put("b.txt", "sb", {"1": "c1"})
+    cache.save()
+    again = BlameCache(data, _head(mod), mod)
+    assert again.get("a.txt", "sa", {1}) == {"1": "c1"}
+    assert again.get("a.txt", "other text", {1}) is None
+    assert again.get("a.txt", "sa", {1, 2}) is None
+    (mod / "a.txt").write_text("x = 2\n", encoding="utf-8")
+    _git(mod, "commit", "-q", "-am", "two")
+    later = BlameCache(data, _head(mod), mod)
+    assert later.get("a.txt", "sa", {1}) is None and later.get("b.txt", "sb", {1}) == {"1": "c1"}
+    later.save()
+    _git(mod, "commit", "-q", "--amend", "-m", "two again")
+    assert BlameCache(data, _head(mod), mod).get("b.txt", "sb", {1}) is None
+
+
+def test_a_second_dry_run_takes_the_blame_from_the_cache(tmp_path, monkeypatch):
+    """The dry run keeps the blame of each file in the mod's data folder, so a second
+    dry run with the same HEAD runs no git blame and gives the same plan."""
+    from pdxaudit import proposer
+    mod, common = _setup(tmp_path, monkeypatch, "REPLACE:law_a = {\n\tcost = 5\n\tx = 1\n}\n")
+    _git(mod, "init", "-q")
+    _git(mod, "add", "-A")
+    _git(mod, "commit", "-q", "-m", "one")
+    calls = []
+    real = proposer.blame
+    monkeypatch.setattr(proposer, "blame", lambda *a, **k: calls.append(a) or real(*a, **k))
+    first, second = tmp_path / "1.json", tmp_path / "2.json"
+    assert main(common + ["--dry-run", "--quiet", "--plan-out", str(first)]) == 0
+    assert calls
+    calls.clear()
+    assert main(common + ["--dry-run", "--quiet", "--plan-out", str(second)]) == 0
+    assert not calls
+    files = [json.loads(p.read_text(encoding="utf-8"))["files"] for p in (first, second)]
+    assert files[0] == files[1] and files[0][0]["gathered"]["blame"]
+
+
+def test_a_row_that_merge_default_opens_names_the_commit_of_its_line(tmp_path, monkeypatch):
+    """With merge_default ask, a change with no conflict is open, and the plan gives
+    it the commit that wrote your line, as it gives a conflict."""
+    import subprocess
+    mod, common = _setup(tmp_path, monkeypatch)
+    _git(mod, "init", "-q")
+    _git(mod, "add", "-A")
+    _git(mod, "commit", "-q", "-m", "one")
+    monkeypatch.setenv("PDX_MERGE_DEFAULT", "ask")
+    plan = tmp_path / "plan.json"
+    assert main(common + ["--dry-run", "--quiet", "--plan-out", str(plan)]) == 0
+    [f] = json.loads(plan.read_text(encoding="utf-8"))["files"]
+    clean = [d for d in f["decisions"] if d.get("cause") == "clean" and d.get("line")]
+    head = subprocess.run(["git", "-C", str(mod), "rev-parse", "--short=10", "HEAD"], capture_output=True,
+                          text=True).stdout.strip()
+    assert clean and all(d["action"] == "open" and d.get("commit") == head for d in clean)

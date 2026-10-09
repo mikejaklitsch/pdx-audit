@@ -1,5 +1,5 @@
 """The Merge page of the app: plan the merge, decide single decisions or a whole file
-with Take vanilla and Keep mine, and apply a file once nothing in it is open. The
+with Accept Vanilla Change and Keep My Line, and apply a file once nothing in it is open. The
 tests run the merge command in this process, not in a background process."""
 import json
 import os
@@ -83,9 +83,9 @@ def test_each_row_offers_the_buttons_for_its_state(window):
     assert rows
     for d, labels in rows:
         if d["action"] == "take":
-            assert "Keep mine" in labels and "Take vanilla" not in labels
+            assert "Keep My Line" in labels and "Accept Vanilla Change" not in labels
         elif d["action"] == "open":
-            assert {"Take vanilla", "Keep mine"} <= set(labels)
+            assert {"Accept Vanilla Change", "Keep My Line"} <= set(labels)
 
 
 def test_keep_mine_on_a_change_the_merge_takes_updates_the_file_without_a_command(window):
@@ -98,7 +98,7 @@ def test_keep_mine_on_a_change_the_merge_takes_updates_the_file_without_a_comman
     page.choose(d, "keep")
     # The row shows the choice at once; the file follows when the build ends.
     row = next(labels for rd, labels in page.row_buttons() if rd is d)
-    assert "Keep mine" not in row and "Take vanilla" in row       # Keep mine shows ✓ and is off
+    assert "Keep My Line" not in row and "Accept Vanilla Change" in row       # Keep My Line shows ✓ and is off
     assert any("Your choice" in t for t in page.row_texts())
     _settle(window)
     assert len(window.merge_calls) == calls                       # no command ran
@@ -345,7 +345,7 @@ def test_the_chosen_action_shows_a_check_and_cannot_be_clicked(window):
     for d, row in zip(page.decisions(), page.row_widgets()):
         buttons = {b.text(): b for b in row.findChildren(QtWidgets.QPushButton)}
         if d["action"] == "take":
-            assert not buttons["✓ Take vanilla"].isEnabled() and buttons["Keep mine"].isEnabled()
+            assert not buttons["✓ Accept Vanilla Change"].isEnabled() and buttons["Keep My Line"].isEnabled()
 
 
 def test_a_click_on_a_row_shows_its_full_block_below(window):
@@ -594,7 +594,7 @@ def test_your_own_text_decides_each_row_of_its_block_until_you_remove_it(window)
     inside = [d for d in f["decisions"] if d.get("own") == block["span"]]
     assert inside and all(d["action"] == "take" for d in inside)
     covered = [labels for d, labels in page.row_buttons() if d.get("own")]
-    assert covered and all("Take vanilla" not in x and "Keep mine" not in x and "Write my own" in x for x in covered)
+    assert covered and all("Accept Vanilla Change" not in x and "Keep My Line" not in x and "Write Custom Merge" in x for x in covered)
     page.remove_own(inside[0])
     _settle(window)
     assert not any(d.get("own") for d in page.file(M_TXT)["decisions"])
@@ -613,7 +613,7 @@ def test_your_own_text_is_saved_and_a_new_session_reads_it_back(window):
     assert page.write_own(d, "REPLACE:some_building = {", block) == "your text leaves 1 block open"
     key = merge_cli.choice_key(d)
     i = next(k for k, x in enumerate(page.decisions()) if x.get("address") and merge_cli.choice_key(x) == key)
-    assert any("✓ My own text" in b.text() for b in page.row_widgets()[i].findChildren(QtWidgets.QPushButton))
+    assert any("✓ Custom Merge" in b.text() for b in page.row_widgets()[i].findChildren(QtWidgets.QPushButton))
     saved = window.store.dir / merge_cli.SAVED_CHOICES
     assert saved.is_file()
     page.choices, page._versions_of_choices = {}, None        # as in a new session
@@ -627,7 +627,7 @@ def test_your_own_text_is_saved_and_a_new_session_reads_it_back(window):
 
 
 def test_a_choice_does_not_move_the_list(tmp_path, monkeypatch):
-    """Keep mine, Take vanilla and the buttons for all keep the rows where they are."""
+    """Keep My Line, Accept Vanilla Change and the buttons for all keep the rows where they are."""
     from conftest import build_tracker, _write_tree
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
@@ -659,7 +659,7 @@ def test_a_choice_does_not_move_the_list(tmp_path, monkeypatch):
             bar.setValue(row.y())
             pump()
             at = bar.value()
-            button = next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Keep mine")
+            button = next(b for b in row.findChildren(QtWidgets.QPushButton) if b.text() == "Keep My Line")
             QTest.mouseClick(button, Qt.MouseButton.LeftButton)
             assert bar.value() == at
             pump()
