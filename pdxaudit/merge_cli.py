@@ -21,7 +21,12 @@ choice applies to each decision of the file that has no choice of its own, and
 `--choose` gives that choice to every file. A file's "own" list holds the user's own
 texts: each one takes the place of a span of the mod file, with each change in it
 (see own_place). The app writes the choices file. A choice applies only while its mod
-file reads as it did when the user chose."""
+file reads as it did when the user chose.
+
+The `merge_default` setting gives the action of a change with no conflict, a change
+that the merge takes with no rule and no intent store entry: "take" takes it, "ask"
+makes it a decision for the user, "keep" keeps the mod's text (set_defaults). Each
+decision has a cause, which names why it can be open (CAUSES)."""
 import argparse
 import bisect
 import datetime
@@ -33,7 +38,7 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
 
-from . import diff3, intent, merge, proposer, session
+from . import config, diff3, intent, merge, proposer, session
 from .registry import registry
 
 
@@ -443,6 +448,7 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
         g["blame"] = _blame(mod_root, rel, g)
         files.append({"file": rel, "before_sha": _sha(text), "bom": bom, "crlf": crlf, "gathered": g})
     ours_layout(files)
+    set_defaults(files, config.setting("merge_default")[0])
     skipped += build(files, choices)
     # A tool's output that the merge met but cannot compare goes to the regenerate
     # list, never to the skipped list: the tool reads vanilla again.
@@ -453,6 +459,37 @@ def plan(mod_root, base, commits, old_tag, new_hash, new_msg, it, file=None, blo
     return {"old": old_tag, "new": tag_of(new_msg), "files": files,
             "regenerate": [{"file": f, "tool": t, "hint": reg.regenerate_hint(t)} for f, t in sorted(regenerate.items())],
             "skipped": _distinct_skips([(f, w) for f, w in skipped if f not in regenerate])}
+
+
+# Why a decision can be open, in the words of a row.
+CAUSES = {"conflict": "Merge Conflict", "review": "Needs Review", "clean": "No Conflict"}
+CONFLICT_KINDS = {"both_changed", "removed_changed", "both_added", "inject_overlap"}
+
+
+def gathered_rows(g):
+    """Each gathered decision of the gathered part `g` of a plan file."""
+    for cp in g.get("copies", ()):
+        yield from cp.get("decisions", ())
+    yield from (g.get("added") or {}).get("decisions", ())
+    yield from g.get("removed", ())
+
+
+def set_defaults(files, default):
+    """Give each gathered decision of plan files `files` its cause (CAUSES), and give a
+    change with no conflict the action of `default`, the merge_default setting. A change
+    with no conflict is one that the merge takes with no rule and no intent store entry,
+    and that a choice can change. "conflict": you and vanilla both changed the text.
+    "review": the merge cannot take vanilla's change safely, and opens it."""
+    reason = {merge.OPEN: "a change with no conflict; the merge_default setting asks you",
+              merge.KEEP: "a change with no conflict; the merge_default setting keeps your text"}
+    for f in files:
+        for row in gathered_rows(f["gathered"]):
+            d = row["d"]
+            clean = d["action"] == merge.TAKE and not d.get("by") and row["take"] is not None
+            d["cause"] = ("conflict" if d["kind"] in CONFLICT_KINDS else "clean" if clean else "review")
+            action = {"ask": merge.OPEN, "keep": merge.KEEP}.get(default)
+            if clean and action:
+                d["action"], d["reason"] = action, reason[action]
 
 
 def _row(d, take=None, keep=None):
@@ -1270,7 +1307,8 @@ def _print(p):
                 where = (f"line {d['line']}" if d.get("line") else f"new node near line {d['at']}"
                          if d.get("at") else "new node")
                 who = f", written by {d['commit']}" if d.get("commit") else ""
-                print(f"  - OPEN {d['kind']} `{' > '.join(s['key'] for s in d['path'])}` ({where}{who})"
+                print(f"  - OPEN ({CAUSES.get(d.get('cause'), 'Needs Review')}) {d['kind']} "
+                      f"`{' > '.join(s['key'] for s in d['path'])}` ({where}{who})"
                       + (f" [{d['by']}]" if d.get("by") else ""))
                 for side in ("base", "ours", "theirs"):
                     if d.get(side):

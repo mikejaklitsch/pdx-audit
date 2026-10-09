@@ -19,6 +19,8 @@ Recognized keys:
                    data_types table to confirm or drop data-binding findings
     replace_findings  "block": the changes vanilla made in one REPLACE are one
                    finding; "statement": each change is a finding of its own
+    merge_default  what the merge does with a change that only vanilla made: "ask"
+                   makes it a decision; "take" takes it; "keep" keeps the mod's text
     editor         the command that opens a file at a line, with {file} and {line};
                    unset, the app opens the file with the system's default program
 
@@ -53,6 +55,10 @@ SETTINGS = {
                          "env": "PDX_REPLACE_FINDINGS", "default": "block",
                          "help": "block: one finding for each REPLACE that vanilla changed; "
                                  "statement: one finding for each change"},
+    "merge_default": {"label": "Changes with no conflict", "kind": "choice", "choices": ("ask", "take", "keep"),
+                      "env": "PDX_MERGE_DEFAULT", "default": "ask",
+                      "help": "what the merge does with a change that only vanilla made: ask makes it a "
+                              "decision for you; take takes vanilla's text; keep keeps yours"},
     "editor": {"label": "Editor command", "kind": "text", "env": "PDX_EDITOR",
                "help": "opens a file at a line, with {file} and {line}; empty opens the file "
                        "with the system's default program"},
@@ -234,12 +240,14 @@ def _check_patch_name(value):
     return text, None
 
 
-def _check_replace_findings(value):
-    text = str(value).strip().lower()
-    choices = SETTINGS["replace_findings"]["choices"]
-    if text not in choices:
-        raise ConfigError(f"replace_findings is one of: {', '.join(choices)}.")
-    return text, None
+def _check_choice(key):
+    def check(value):
+        text = str(value).strip().lower()
+        choices = SETTINGS[key]["choices"]
+        if text not in choices:
+            raise ConfigError(f"{key} is one of: {', '.join(choices)}.")
+        return text, None
+    return check
 
 
 def _check_editor(value):
@@ -251,8 +259,8 @@ def _check_editor(value):
 
 
 _CHECKS = {"vanilla_repo": _check_tracker, "game_root": _check_game_root,
-           "patch_name": _check_patch_name, "replace_findings": _check_replace_findings,
-           "editor": _check_editor}
+           "patch_name": _check_patch_name, "replace_findings": _check_choice("replace_findings"),
+           "merge_default": _check_choice("merge_default"), "editor": _check_editor}
 
 
 def set_value(key, value):

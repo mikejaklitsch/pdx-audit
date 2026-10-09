@@ -547,6 +547,29 @@ def test_a_choice_takes_vanillas_text_for_an_open_decision(tmp_path, monkeypatch
     assert (mod / FE).read_text(encoding="utf-8-sig") == "REPLACE:law_a = {\n\tcost = 2\n\tx = 5\n\tnew = 1\n}\n"
 
 
+def test_merge_default_decides_each_change_with_no_conflict(tmp_path, monkeypatch, capsys):
+    """take takes a change that only vanilla made, ask opens it as No Conflict, keep
+    keeps the mod's text. A conflict stays open with each value, and a choice still
+    decides a change that ask opened."""
+    mod, common = _setup(tmp_path, monkeypatch, MOD.replace("cost = 1", "cost = 3"))
+    causes = lambda p: {d["path"][-1]["key"]: (d["cause"], d["action"])   # noqa: E731
+                        for d in p["files"][0]["decisions"]}
+    p, _ = _dry_run(common, tmp_path)
+    assert causes(p) == {"cost": ("conflict", "open"), "new": ("clean", "take")}
+    monkeypatch.setenv("PDX_MERGE_DEFAULT", "ask")
+    capsys.readouterr()
+    p, _ = _dry_run(common, tmp_path)
+    [f] = p["files"]
+    assert causes(p) == {"cost": ("conflict", "open"), "new": ("clean", "open")} and f["open"] == 2
+    out = capsys.readouterr().out
+    assert "OPEN (Merge Conflict) both_changed" in out and "OPEN (No Conflict) vanilla_added" in out
+    [d] = [d for d in f["decisions"] if d["path"][-1]["key"] == "new"]
+    p, _ = _dry_run(common, tmp_path, "--choices", str(_choose(tmp_path, f, d, "take")))
+    assert "new = 1" in p["files"][0]["merged"] and p["files"][0]["open"] == 1
+    monkeypatch.setenv("PDX_MERGE_DEFAULT", "keep")
+    p, _ = _dry_run(common, tmp_path)
+    assert causes(p)["new"] == ("clean", "keep") and "new = 1" not in p["files"][0]["merged"]
+
 def test_a_choice_keeps_the_mods_text_for_an_open_decision(tmp_path, monkeypatch):
     mod, common = _setup(tmp_path, monkeypatch, MOD.replace("cost = 1", "cost = 3"))
     p, _ = _dry_run(common, tmp_path)

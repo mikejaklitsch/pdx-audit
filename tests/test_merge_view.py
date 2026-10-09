@@ -132,6 +132,35 @@ def test_a_choice_on_the_page_gives_the_file_of_a_dry_run_with_it(window, world,
         assert mine[key] == f[key]
 
 
+def test_an_open_row_names_its_cause(window, world, monkeypatch):
+    """With merge_default ask, a change that only vanilla made is an open row marked No
+    Conflict, and a change that you and vanilla both made is a Merge Conflict."""
+    monkeypatch.setenv("PDX_MERGE_DEFAULT", "ask")
+    (world.mod / M_TXT).write_text("REPLACE:some_building = {\n\tcost = 100\n\tlegacy_mod = 2\n}\n",
+                                   encoding="utf-8")
+    page = window.merge_page
+    page.plan_all()
+    page.select_file(M_TXT)
+    texts = page.row_texts()
+    assert any("No Conflict" in t for t in texts) and any("Merge Conflict" in t for t in texts)
+    assert "Merge Conflict" in page.file_note.text() and "No Conflict" in page.file_note.text()
+    text, colour = page._item_text(page.file(M_TXT))
+    assert text.endswith("2 vanilla changes · 1 Merge Conflict, 1 No Conflict")
+    assert colour == page.C["broken"]
+
+
+def test_a_copy_that_vanilla_changed_shows_its_change_in_the_file_list(window, monkeypatch):
+    """Your file is a copy of the old vanilla file. With merge_default ask, its file
+    item gives the vanilla changes and the No Conflict rows, in the No Conflict colour."""
+    monkeypatch.setenv("PDX_MERGE_DEFAULT", "ask")
+    page = window.merge_page
+    page.plan_all()
+    f = page.file(M_TXT)
+    assert f["open"] == 2 and {d["cause"] for d in f["decisions"]} == {"clean"}
+    text, colour = page._item_text(f)
+    assert text.endswith("2 vanilla changes · 2 No Conflict") and colour == page.C["review"]
+
+
 def test_take_vanilla_for_all_and_keep_mine_for_all_choose_each_row(window, world):
     (world.mod / M_TXT).write_text("REPLACE:some_building = {\n\tcost = 100\n\tlegacy_mod = 2\n}\n",
                                    encoding="utf-8")

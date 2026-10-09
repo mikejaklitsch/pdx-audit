@@ -15,6 +15,7 @@ the lines that Apply file deletes and adds. The worker makes those rows too, so 
 calculation holds the window."""
 import html
 import json
+from collections import Counter
 import os
 import re
 import tempfile
@@ -35,18 +36,24 @@ from .merge_rows import (INDENT, MISSING, SELECTED, block_of, diff_rows,  # noqa
 from .safety import remove_file
 from .tracker import tag_of
 
-# The steps of a merge, side by side in the top bar. {n} and {mark} are colours.
+# The steps of a merge, side by side in the top bar. {n} and the names of CAUSE_COLOURS
+# are colours.
 HELP_STEPS = (
     "Set <b>Ported to</b> to the vanilla version that your files match. Set <b>Merge in</b> to the new "
     "version. Click <b>Plan merge</b>.",
     "Select a file. On each row, ✓ shows the text that <b>Apply file</b> writes. To change it, click the "
     "other button. The app saves your choices.",
-    "A row with <span style=\"color:{mark};\">●</span> <b>Decision for you</b> has no default. Choose one. "
-    "When no decision is left, click <b>Apply file</b>.")
+    "An open row has no default. Its mark says why: <span style=\"color:{conflict};\">●</span> "
+    "<b>Merge Conflict</b>, <span style=\"color:{review};\">●</span> <b>Needs Review</b> or "
+    "<span style=\"color:{clean};\">●</span> <b>No Conflict</b>. Choose for each one, then click "
+    "<b>Apply file</b>.")
 HELP = ('<table width="100%" cellspacing="0" cellpadding="0"><tr>'
         + "".join(f'<td width="33%" valign="top" style="padding-right: 24px;">'
                   f'<b style="color:{{n}};">{i}</b>&nbsp;&nbsp;{step}</td>' for i, step in enumerate(HELP_STEPS, 1))
         + "</tr></table>")
+
+# The colour of the mark of an open row, by its cause (merge_cli.CAUSES).
+CAUSE_COLOURS = {"conflict": "broken", "review": "stale", "clean": "review"}
 
 # What happened to the text, in the words a row shows.
 KIND_WORDS = {
@@ -89,11 +96,11 @@ class MergePage(QWidget):
     # when its build takes longer than this, so a click does not show the words for
     # one frame. Apply file checks the build itself (_apply_block).
     UPDATING_DELAY = 300
-    SORTS = (("ready", "Ready files first"), ("most", "Most decisions first"),
-             ("fewest", "Fewest decisions first"), ("name", "File name"))
-    SHOWS = (("all", "All files"), ("ready", "Ready files"), ("decide", "Files with decisions"),
+    SORTS = (("ready", "Ready files first"), ("most", "Most open rows first"),
+             ("fewest", "Fewest open rows first"), ("name", "File name"))
+    SHOWS = (("all", "All files"), ("ready", "Ready files"), ("decide", "Files with open rows"),
              ("hand", "Files to merge by hand"))
-    ROW_SHOWS = (("all", "All rows"), ("open", "Decisions for you"))
+    ROW_SHOWS = (("all", "All rows"), ("open", "Open rows"))
 
     def __init__(self, win, colours, mono, settings):
         super().__init__(objectName="mergePage")
@@ -147,7 +154,8 @@ class MergePage(QWidget):
         self.apply_ready_button.clicked.connect(self.apply_ready)
         top.addWidget(self.apply_ready_button)
         bv.addLayout(top)
-        self.help = QLabel(HELP.format(n=colours["accent_text"], mark=colours["stale"]), objectName="hint")
+        self.help = QLabel(HELP.format(n=colours["accent_text"], **{c: colours[k] for c, k in CAUSE_COLOURS.items()}),
+                           objectName="hint")
         self.help.setWordWrap(True)
         self.help.setTextFormat(Qt.TextFormat.RichText)
         bv.addWidget(self.help)
@@ -409,7 +417,7 @@ class MergePage(QWidget):
         if rel in self.building:
             return "Wait: the page is updating this file with your last choices."
         if f["open"]:
-            return f"{f['open']} decision{'' if f['open'] == 1 else 's'} for you {'is' if f['open'] == 1 else 'are'} left."
+            return f"{f['open']} open row{'' if f['open'] == 1 else 's'} {'is' if f['open'] == 1 else 'are'} left."
         if not merge_cli.ready_to_apply(f):
             return "The merge cannot write this file. Merge it by hand."
         return ""
@@ -541,14 +549,18 @@ class MergePage(QWidget):
         return ({"ready": 0, "decide": 1, "hand": 2}[self._state(f)], f["open"], f["file"])
 
     def _item_text(self, f):
-        taken = sum(1 for d in f["decisions"] if d["action"] == merge.TAKE)
-        changes = f"{taken} change{'' if taken == 1 else 's'} from vanilla"
+        """The text and colour of the item of file `f`: the number of vanilla changes,
+        then the state. The open rows show by cause, in the colour of the first cause."""
+        n = len(f["decisions"])
+        changes = f"{n} vanilla change{'' if n == 1 else 's'}"
+        causes = self._open_causes(f)
         state = {"ready": "ready",
-                 "decide": f"{f['open']} decision{'' if f['open'] == 1 else 's'} for you",
+                 "decide": ", ".join(f"{k} {merge_cli.CAUSES[c]}" for c, k in causes),
                  "hand": "merge by hand"}[self._state(f)]
         if f["file"] in self.building:
             state += " · updating"
-        colour = {"ready": self.C["added"], "decide": self.C["stale"], "hand": self.C["broken"]}[self._state(f)]
+        colour = {"ready": self.C["added"], "hand": self.C["broken"],
+                  "decide": self.C[CAUSE_COLOURS[causes[0][0]] if causes else "stale"]}[self._state(f)]
         full = self.paths_box.isChecked() and not self.tree_box.isChecked()
         return f"{f['file'] if full else f['file'].rsplit('/', 1)[-1]}\n{changes} · {state}", colour
 
@@ -684,7 +696,7 @@ class MergePage(QWidget):
             notes.append(f"{word} does not apply to {n} decision{'' if n == 1 else 's'}:")
             notes += [f"{why[:1].upper()}{why[1:]} ({c})." for why, c in f["not_set"]]
         if f["open"]:
-            notes.append(f"{f['open']} decision{'' if f['open'] == 1 else 's'} for you.")
+            notes.append(self._open_note(f))
         if not f["removed_check"]["passed"]:
             notes.append("The merge deletes lines that no vanilla change explains. Merge this file by hand.")
         if f["stale_entries"]:
@@ -742,11 +754,19 @@ class MergePage(QWidget):
     @staticmethod
     def _gathered_rows(f):
         """The gathered decisions of plan file `f` (see merge_cli.build)."""
-        g = f.get("gathered") or {}
-        for cp in g.get("copies", ()):
-            yield from cp.get("decisions", ())
-        yield from (g.get("added") or {}).get("decisions", ())
-        yield from g.get("removed", ())
+        return merge_cli.gathered_rows(f.get("gathered") or {})
+
+    @staticmethod
+    def _open_causes(f):
+        """The open rows of plan file `f` by cause, as [(cause, count)] in the order of
+        merge_cli.CAUSES."""
+        causes = Counter(d.get("cause", "review") for d in f["decisions"] if d["action"] == merge.OPEN)
+        return [(c, causes[c]) for c in merge_cli.CAUSES if causes[c]]
+
+    def _open_note(self, f):
+        """The open rows of plan file `f` by cause, as "3 open: 1 Merge Conflict, 2 No Conflict"."""
+        parts = [f"{k} {merge_cli.CAUSES[c]}" for c, k in self._open_causes(f)]
+        return f"{f['open']} open: {', '.join(parts)}."
 
     def _choice(self, d):
         """The user's choice for decision `d`: its own, else the file's choice for all."""
@@ -875,8 +895,9 @@ class MergePage(QWidget):
         choice = self._choice(d)
         own = d.get("own")                   # the span of your own text that decides it
         action = self._shown_action(d)
-        mark = (f'<span style="color:{C["stale"]}; font-weight:600;">●&nbsp;Decision for you</span>&nbsp;&nbsp;'
-                if action == merge.OPEN else "")
+        cause = d.get("cause") if d.get("cause") in merge_cli.CAUSES else "review"
+        mark = (f'<span style="color:{C[CAUSE_COLOURS[cause]]}; font-weight:600;">●&nbsp;{merge_cli.CAUSES[cause]}'
+                f'</span>&nbsp;&nbsp;' if action == merge.OPEN else "")
         row.head.setText(f'{mark}<span style="font-family:\'{self.mono}\'; color:{C["text"]};">'
                          f'{html.escape(self.where(d))}</span>')
         row.what.setText(self._what(d))

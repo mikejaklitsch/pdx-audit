@@ -146,6 +146,13 @@ def _own_data_folder(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "xdg-data"))
 
 
+@pytest.fixture(autouse=True)
+def _merge_takes(monkeypatch):
+    """The merge takes a change with no conflict (`merge_default` take), as most tests
+    describe. The tests of the setting set their own value."""
+    monkeypatch.setenv("PDX_MERGE_DEFAULT", "take")
+
+
 @pytest.fixture
 def statement_findings(monkeypatch):
     """Each change in a REPLACE is a finding of its own (`replace_findings` statement),

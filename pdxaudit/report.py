@@ -313,7 +313,7 @@ KIND.update({
 # the copy differs; the rank orders the work:
 #   breaks  the game reads a name or a definition that is gone or set twice
 #   decide  both sides changed, or vanilla moved a statement; a person chooses
-#   merge   only vanilla changed; the merge takes the change without a choice
+#   merge   only vanilla changed; the merge takes the change, or asks (merge_default)
 #   check   a look is enough; no edit is expected
 RANK_ORDER = ("breaks", "decide", "merge", "check")
 # (one, more than one) for a count, and what the rank means.
@@ -322,7 +322,8 @@ RANK_LABEL = {"breaks": ("game error", "game errors"), "decide": ("decision for 
 RANK_HELP = {
     "breaks": "The game reads a name or a definition that is gone or set twice. Fix these first.",
     "decide": "You and vanilla both changed this, or vanilla moved it. Choose which text stays.",
-    "merge": "Only vanilla changed this. The Merge page takes the change for you.",
+    "merge": "Only vanilla changed this. The Merge page takes the change, or asks you when the "
+             "merge_default setting is ask.",
     "check": "Look at this. No edit is necessary.",
 }
 

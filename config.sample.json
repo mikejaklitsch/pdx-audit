@@ -1,9 +1,10 @@
 {
-  "_note": "Each key is optional. `pdx-audit --set <key> <value>` and the Settings page of the app write game_root, vanilla_repo, patch_name and replace_findings into <data folder>/config.json. Edit the other keys in that file. Each setting uses this order: CLI option, then environment variable, then config file, then the default value.",
+  "_note": "Each key is optional. `pdx-audit --set <key> <value>` and the Settings page of the app write game_root, vanilla_repo, patch_name, replace_findings, merge_default and editor into <data folder>/config.json. Edit the other keys in that file. Each setting uses this order: CLI option, then environment variable, then config file, then the default value.",
   "vanilla_repo": "/path/to/my-tracker.git",
   "game_root": "/path/to/Steam/steamapps/common/Europa Universalis V/game",
   "patch_name": "Pavia",
   "replace_findings": "block",
+  "merge_default": "ask",
   "skip_dirs": ["backup", "wip", "in_game/gui/experimental"],
   "skip_files": ["*.bak", "*_disabled.txt"],
   "merge_types": []
