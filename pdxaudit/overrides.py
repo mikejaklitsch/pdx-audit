@@ -12,7 +12,7 @@ from collections import defaultdict
 from . import changes, diff3, ledger, session
 from .gui import audit_window, commits_up_to
 from .report import diff_lines, diff_summary, Finding
-from .tracker import MODULE_ROOTS, _git_archive, cache_path, full_hash, tag_of
+from .tracker import MODULE_ROOTS, _git_archive, cache_path, cache_key, tag_of
 from .config import should_skip
 
 REPLACE_TYPES = ("REPLACE", "TRY_REPLACE", "REPLACE_OR_CREATE")
@@ -124,21 +124,21 @@ def build_index(vanilla_repo, commit, categories, progress_label=""):
 BLOCK_CACHE_VERSION = 1
 
 def _block_cache_path(vanilla_repo, commit, categories):
-    """Cache file for a commit's block index, keyed by the full commit hash and
-    the set of categories indexed. Commit content is immutable, so entries never
+    """Cache file for a commit's block index, keyed by the commit's cache_key
+    and the set of categories indexed. Commit content is immutable, so entries never
     go stale; the version bumps when the parser or index shape changes."""
-    full = full_hash(vanilla_repo, commit)
-    if not full:
+    key = cache_key(vanilla_repo, commit)
+    if not key:
         return None
     cat_key = hashlib.sha1(",".join(sorted(set(categories))).encode()).hexdigest()[:12]
-    return cache_path(vanilla_repo, f"blocks-v{BLOCK_CACHE_VERSION}-{full}-{cat_key}.json")
+    return cache_path(vanilla_repo, f"blocks-v{BLOCK_CACHE_VERSION}-{key}-{cat_key}.json")
 
 def build_index_cached(vanilla_repo, commit, categories, progress_label=""):
     """Does the same as build_index, and also keeps the result on disk.
 
     An override run and a later --diff run read the same blocks. This function
     writes the parsed index into the cache folder of the tracker. The name of the
-    cache file contains the full hash of the commit. The second run then uses the
+    cache file contains the commit's cache_key. The second run then uses the
     result of the first run. prune_cache deletes an entry when its commit is no
     longer in the tracker."""
     cache = _block_cache_path(vanilla_repo, commit, categories)
@@ -323,13 +323,13 @@ def mod_referenced_values(mod_root):
 VOCAB_CACHE_VERSION = 1
 
 def _vocab_cache_path(vanilla_repo, commit):
-    """Cache file for a commit's vocabulary, keyed by the full commit hash;
+    """Cache file for a commit's vocabulary, keyed by the commit's cache_key;
     commit content is immutable, so entries never go stale. The version bumps
     when the tokenizer changes."""
-    full = full_hash(vanilla_repo, commit)
-    if not full:
+    key = cache_key(vanilla_repo, commit)
+    if not key:
         return None
-    return cache_path(vanilla_repo, f"vocab-v{VOCAB_CACHE_VERSION}-{full}.json")
+    return cache_path(vanilla_repo, f"vocab-v{VOCAB_CACHE_VERSION}-{key}.json")
 
 def build_vocab(vanilla_repo, commit, label=""):
     """Returns the number of `token =` occurrences for each token, in the .txt files

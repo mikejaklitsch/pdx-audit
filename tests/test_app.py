@@ -600,3 +600,20 @@ def test_the_run_options_open_inside_the_window_with_their_dropdowns(window):
     assert not window.category_combo.popup_shown() and panel.isVisible()
     _press(window, window.pages)                         # a click outside closes the panel
     assert not panel.isVisible()
+
+
+def test_clear_cache_runs_the_command_line_and_says_what_it_deleted(window, world):
+    from pdxaudit.tracker import cache_dir_of
+    d = cache_dir_of(world.repo)
+    d.mkdir(parents=True, exist_ok=True)
+    cached = d / f"vocab-v1-{'a' * 40}.json"
+    cached.write_text("{}")
+    window.clear_cache_button.click()
+    deadline = time.monotonic() + 60
+    while window.process is not None and time.monotonic() < deadline:
+        QtWidgets.QApplication.instance().processEvents()
+        time.sleep(0.01)
+    assert window.process is None
+    assert not cached.exists()
+    assert "Deleted 1 cache file" in window.settings_message.text()
+    assert window.clear_cache_button.isEnabled()

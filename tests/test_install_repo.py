@@ -17,7 +17,10 @@ from pdxaudit.gui import run_gui_audit
 from pdxaudit.loc import run_loc_audit
 from pdxaudit.overrides import run_override_audit
 from pdxaudit.tracker import (cache_dir_of, do_commit, game_prefix, get_commits,
-                              git_dir_of, locate_vanilla_repo, tree_files)
+                              git_dir_of, locate_vanilla_repo, prune_cache, tree_files)
+
+# These tests make the install and the tracker that they read.
+pytestmark = pytest.mark.own_layout
 
 
 def _git(cwd, *args):
@@ -126,6 +129,40 @@ def test_a_full_run_writes_nothing_into_the_repository_or_the_install(install, t
     assert _state(install.root) == before
     cache = tmp_path / "data" / "pdx-audit" / "tracker-cache"
     assert list(cache.glob("*/blocks-v*.json"))
+
+
+def test_a_cache_read_from_another_folder_is_never_read_as_the_game(install, monkeypatch):
+    # An earlier version took `clausewitz` for the game folder and cached what it
+    # read there under the commit's hash. The game's files must be read again.
+    import pdxaudit.tracker as tracker
+    real = tracker.game_prefix
+    monkeypatch.setattr(tracker, "game_prefix", lambda repo, commit: "clausewitz")
+    assert {p for p, _b in tree_files(install.repo, install.new)} == {"main_menu/gui/engine.gui",
+                                                                     "loading_screen/gui/load.gui"}
+    stale = sorted(cache_dir_of(install.repo).glob("tree-v*.json"))
+    monkeypatch.setattr(tracker, "game_prefix", real)
+    assert {p for p, _b in tree_files(install.repo, install.new)} == set(VANILLA_NEW)
+    prune_cache(install.repo)
+    assert not any(p.exists() for p in stale)
+    assert list(cache_dir_of(install.repo).glob("tree-v*.json"))
+
+
+def test_the_merge_reads_the_install_repository_after_a_stale_cache(install, monkeypatch, tmp_path):
+    from pdxaudit.merge_cli import main
+    import pdxaudit.tracker as tracker
+    real = tracker.game_prefix
+    monkeypatch.setattr(tracker, "game_prefix", lambda repo, commit: real(repo, commit) and "clausewitz")
+    tree_files(install.repo, install.old)
+    tree_files(install.repo, install.new)
+    monkeypatch.setattr(tracker, "game_prefix", real)
+    rel = "in_game/common/building_types/b.txt"
+    _write_tree(install.mod, {rel: VANILLA_OLD[rel].replace("cost = 100", "cost = 150")})
+    plan = tmp_path / "plan.json"
+    assert main(["--mod-root", str(install.mod), "--vanilla-repo", str(install.root), "--old", "1.0.0",
+                 "--new", "1.1.0", "--dry-run", "--quiet", "--plan-out", str(plan)]) == 0
+    import json
+    files = {f["file"]: f for f in json.loads(plan.read_text())["files"]}
+    assert rel in files and "upkeep = 5" in files[rel]["merged"] and "cost = 150" in files[rel]["merged"]
 
 
 def test_the_cache_of_a_tracker_is_in_the_data_folder(tmp_path):

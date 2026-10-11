@@ -43,6 +43,8 @@ Decide the oldest version that you want to track. Then do these steps on the **T
 
 The audits need two commits or more. Make one more commit after each game patch. The app shows a note when the game has changed since the newest commit.
 
+pdx-audit saves what it reads from each version, so that later runs are fast. If the audits or the merge show results that do not agree with the tracker, for example no files where your mod has copies, press **Clear cache** on the **Settings** page, or run `pdx-audit --clear-cache`. The next run reads each version again, which takes some minutes.
+
 ## Read the findings
 
 Press **Run audits**. Each chip in the top bar gives the number of findings of one audit. Press a chip to show or hide its findings. Select a finding to see your statement against the change that vanilla made. For a REPLACE or a GUI copy, the app also shows the current text of vanilla next to your copy.
@@ -72,6 +74,7 @@ pdx-audit --summary           # the summary only, with no detail
 pdx-audit --diff              # show the line changes
 pdx-audit --full              # from the oldest commit, not the last patch
 pdx-audit --commit 1.3.12     # record the installed game as a version
+pdx-audit --clear-cache       # delete what pdx-audit saved from each version of the tracker
 ```
 
 Each finding starts with an id, which `--dismiss` takes:

@@ -511,10 +511,10 @@ def _cache_path(base, new_hash):
     """The deviation cache of one vanilla version, in the cache folder of the tracker.
     A copy's key hashes its text and vanilla's history, so an entry never goes stale;
     each run keeps only the entries of the copies it read."""
-    from .tracker import cache_path, full_hash
+    from .tracker import cache_path, cache_key
     repo = getattr(base, "repo", None)
-    full = full_hash(repo, new_hash) if repo else ""
-    return cache_path(repo, f"devs-v{DEV_CACHE_VERSION}-{full}.json") if full else None
+    key = cache_key(repo, new_hash) if repo else ""
+    return cache_path(repo, f"devs-v{DEV_CACHE_VERSION}-{key}.json") if key else None
 
 
 def _read_cache(path):

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import changes, diff3, session
 from .report import Finding
-from .tracker import MODULE_ROOTS, _git_archive, cache_path, full_hash, tag_of
+from .tracker import MODULE_ROOTS, _git_archive, cache_path, cache_key, tag_of
 from .config import should_skip
 
 # The engine reads these keywords in any case: vanilla 1.4 hud_topbar.gui opens
@@ -179,21 +179,21 @@ def build_gui_vanilla(vanilla_repo, commit, modules, label=""):
 GUI_CACHE_VERSION = 2
 
 def _gui_cache_path(vanilla_repo, commit, modules):
-    """Cache file for a commit's parsed GUI index, keyed by the full commit hash
-    and the module set. Commit content is immutable, so entries never go stale;
-    the version bumps when the parser or index shape changes."""
-    full = full_hash(vanilla_repo, commit)
-    if not full:
+    """Cache file for a commit's parsed GUI index, keyed by the commit's
+    cache_key and the module set. Commit content is immutable, so entries never
+    go stale; the version bumps when the parser or index shape changes."""
+    key = cache_key(vanilla_repo, commit)
+    if not key:
         return None
     mod_key = hashlib.sha1(",".join(sorted(modules)).encode()).hexdigest()[:12]
-    return cache_path(vanilla_repo, f"gui-v{GUI_CACHE_VERSION}-{full}-{mod_key}.json")
+    return cache_path(vanilla_repo, f"gui-v{GUI_CACHE_VERSION}-{key}-{mod_key}.json")
 
 def build_gui_vanilla_cached(vanilla_repo, commit, modules, label=""):
     """Does the same as build_gui_vanilla, and also keeps the result on disk.
 
     The audit reads the GUI index at each commit in its window. This function
     writes each index into the cache folder of the tracker. The name of the cache
-    file contains the full hash of the commit."""
+    file contains the commit's cache_key."""
     cache = _gui_cache_path(vanilla_repo, commit, modules)
     if cache and cache.is_file():
         try:

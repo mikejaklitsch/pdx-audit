@@ -276,7 +276,8 @@ def test_cli_add_rule_list_propose_accept(tmp_path, monkeypatch, capsys):
     from pdxaudit.intent_cli import main
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     mod, _c, _d = _world(tmp_path)
-    repo = str(tmp_path / "vanilla-tracker" / "repo.git")
+    repo = next(str(p) for p in (tmp_path / "vanilla-tracker" / "repo.git", tmp_path / "Europa Universalis V")
+                if p.exists())
     common = ["--mod-root", str(mod), "--vanilla-repo", repo]
     rule = tmp_path / "rule.json"
     rule.write_text(json.dumps(_rule()))

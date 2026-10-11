@@ -19,7 +19,7 @@ from .config import cfg, config_file, setting, SETTINGS
 from .safety import remove_file, RefusedRemoval
 
 # pdx-audit writes cache files with these names in the cache folder of the tracker.
-CACHE_FILE_RE = r"(?:blocks|gui|guinames|guitpl|locbind|vocab|dupes|devs|tree)-v\d+-[0-9a-f]{40}(?:-[0-9a-f]{12})?\.json"
+CACHE_FILE_RE = r"(?:blocks|gui|guinames|guitpl|locbind|vocab|dupes|devs|tree)-v\d+-[0-9a-f]{40}(?:-[0-9a-f]{12}){0,2}\.json"
 
 # The one temporary file --commit creates, inside the tracker repo itself. Its name is
 # also the pattern the removal helper checks, and it is left as it is so that a file an
@@ -142,14 +142,27 @@ def full_hash(vanilla_repo, commit):
     return session.memo(("rev-parse", str(vanilla_repo), commit),
                         lambda: git(vanilla_repo, "rev-parse", commit).strip())
 
+def cache_key(vanilla_repo, commit):
+    """The name of a version in the names of its cache files, or '' when the commit
+    does not resolve. It is the commit's full hash. In a repository of the whole
+    install, the id of the game folder's tree follows it, so that a cache read from
+    another folder of the commit is never read as the game."""
+    full = full_hash(vanilla_repo, commit)
+    prefix = game_prefix(vanilla_repo, commit) if full else ""
+    if not prefix:
+        return full
+    tree = session.memo(("tree-id", str(vanilla_repo), commit, prefix),
+                        lambda: git(vanilla_repo, "rev-parse", f"{commit}:{prefix}").strip())
+    return f"{full}-{tree[:12]}" if tree else full
+
 def tree_files(vanilla_repo, commit):
     """[(path, blob id)] for the regular files at `commit`, in tree order, which
     is the order `git archive` writes them in. The cache folder keeps the listing,
     because a commit never changes."""
     def cached():
         import json
-        full = full_hash(vanilla_repo, commit)
-        path = cache_path(vanilla_repo, f"tree-v2-{full}.json") if full else None
+        key = cache_key(vanilla_repo, commit)
+        path = cache_path(vanilla_repo, f"tree-v2-{key}.json") if key else None
         if path is not None and path.is_file():
             try:
                 return [tuple(x) for x in json.loads(path.read_text())]
@@ -227,22 +240,48 @@ def cache_path(vanilla_repo, name):
     return cache_dir_of(vanilla_repo) / name
 
 def prune_cache(vanilla_repo):
-    """Deletes each cache file of a commit that is no longer in the tracker."""
+    """Deletes each cache file of a commit that is no longer in the tracker, and each
+    one whose name does not hold the commit's cache_key (in a repository of the whole
+    install, a cache read from a folder that is no longer the game folder)."""
     cache_dir = cache_dir_of(vanilla_repo)
     if not cache_dir.is_dir() or not vanilla_repo:
         return
     live = set(git(vanilla_repo, "rev-list", "--all").split())
     if not live:
         return
+    keys = {}
+    def key_of(full):
+        if full not in keys:
+            keys[full] = cache_key(vanilla_repo, full)
+        return keys[full]
     for fp in cache_dir.glob("*.json"):
         if not re.fullmatch(CACHE_FILE_RE, fp.name):
             continue
         m = _CACHE_HASH_RE.search(fp.name)
-        if m and m.group(1) not in live:
+        if m and (m.group(1) not in live or f"-{key_of(m.group(1))}" not in fp.name):
             try:
                 remove_file(fp, cache_dir, CACHE_FILE_RE)
             except (RefusedRemoval, OSError):
                 pass
+
+def clear_cache(vanilla_repo):
+    """Deletes each cache file of the tracker, so that the next run reads each version
+    from the tracker again. Returns (files deleted, bytes deleted). Only the files
+    that pdx-audit writes there are deleted."""
+    cache_dir = cache_dir_of(vanilla_repo)
+    count = size = 0
+    if not cache_dir.is_dir():
+        return count, size
+    for fp in cache_dir.glob("*.json"):
+        if not re.fullmatch(CACHE_FILE_RE, fp.name):
+            continue
+        try:
+            n = fp.stat().st_size
+            remove_file(fp, cache_dir, CACHE_FILE_RE)
+        except (RefusedRemoval, OSError):
+            continue
+        count, size = count + 1, size + n
+    return count, size
 
 def resolve_ref(vanilla_repo, ref, commits, side):
     """Validate a user-supplied --old/--new value against the tracker."""

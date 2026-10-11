@@ -79,7 +79,7 @@ A dismissal applies while that content is the same. When vanilla changes its sta
 
 pdx-audit keeps the record in the data folder of the user, with one file for each git commit of the mod. It never writes in the mod, and it never removes a folder. A branch sees the decisions up to its start point, and its own decisions.
 
-The cache of what pdx-audit reads from each vanilla version is in the same data folder, in `tracker-cache`, with one folder for each tracker. pdx-audit only reads the tracker, and writes nothing into it or next to it.
+The cache of what pdx-audit reads from each vanilla version is in the same data folder, in `tracker-cache`, with one folder for each tracker. pdx-audit only reads the tracker, and writes nothing into it or next to it. For a git repository of the whole install, the name of each cache file also holds the id of the game folder that pdx-audit read. Thus pdx-audit never reads a cache of another folder as the game, and it deletes such a cache.
 
 A finding stays in the report until you correct it or dismiss it, also after later commits move the window past its patch.
 

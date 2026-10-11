@@ -36,7 +36,7 @@ from .config import cfg, should_skip
 from .gui import mod_gui_files, parse_gui_defs
 from .loc import is_replace_loc, loc_entries, mod_loc_files
 from .report import Finding
-from .tracker import MODULE_ROOTS, _git_archive, cache_path, full_hash
+from .tracker import MODULE_ROOTS, _git_archive, cache_path, cache_key
 
 DUPES_CACHE_VERSION = 2
 _HEAD = re.compile(r"^\s*(?:([A-Z][A-Z_]*):)?([A-Za-z0-9_.\-:]+)\s*\??=")
@@ -95,10 +95,10 @@ def scan_script(text):
 
 
 def _cache_path(vanilla_repo, commit):
-    full = full_hash(vanilla_repo, commit)
-    if not full:
+    key = cache_key(vanilla_repo, commit)
+    if not key:
         return None
-    return cache_path(vanilla_repo, f"dupes-v{DUPES_CACHE_VERSION}-{full}.json")
+    return cache_path(vanilla_repo, f"dupes-v{DUPES_CACHE_VERSION}-{key}.json")
 
 
 def vanilla_definitions(vanilla_repo, commit):

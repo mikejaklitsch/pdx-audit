@@ -54,13 +54,14 @@ from .base import VanillaBase
 from .report import ColorWriter, color_enabled, render_triage, window_heading
 from .results import build_payload, mod_fingerprint
 from .store import open_store, orphan_note, remove_orphaned_records
-from .tracker import (do_commit, find_mod_root, find_vanilla_repo, get_commits, locate_vanilla_repo,
-                      patch_name, prune_cache, resolve_ref, resolve_tracker_path, warn_if_tracker_stale)
+from .tracker import (clear_cache, do_commit, find_mod_root, find_vanilla_repo, get_commits,
+                      locate_vanilla_repo, patch_name, prune_cache, resolve_ref, resolve_tracker_path,
+                      warn_if_tracker_stale)
 
 ALL_AUDITS = ["overrides", "deps", "gui", "files", "loc", "dupes"]
 # Commands that do their own thing and exit; the --display app has a button for each.
 APP_COMMANDS = ("dismiss", "undismiss", "show_dismissed", "remove_orphaned_records",
-                "commit", "list_commits", "results_file")
+                "commit", "list_commits", "clear_cache", "results_file")
 
 # Config commands, which need no mod and no tracker, so they run before either is found.
 CONFIG_COMMANDS = ("config", "set_value", "unset_value")
@@ -134,6 +135,9 @@ def build_parser():
                     help="New vanilla version tag or commit (default: most-recent)")
     ap.add_argument("--list-commits", action="store_true",
                     help="List available vanilla-tracker commits and exit")
+    ap.add_argument("--clear-cache", action="store_true",
+                    help="Delete what pdx-audit saved from each version of the tracker, then "
+                         "exit. The next run reads each version again")
     ap.add_argument("--mod-root",
                     help="Mod root directory (default: auto-detect via .metadata/)")
     ap.add_argument("--vanilla-repo",
@@ -190,6 +194,17 @@ def _config_command(args):
         print(f"Error: {e}", file=sys.stderr)
         return 1
     _print_messages(messages)
+    return 0
+
+
+def _clear_cache(vanilla_repo):
+    """Run --clear-cache. Returns the exit code."""
+    count, size = clear_cache(vanilla_repo)
+    if not count:
+        print(f"The tracker at {vanilla_repo} has no cache files.")
+    else:
+        print(f"Deleted {count} cache file{'' if count == 1 else 's'} ({size / 1e6:.1f} MB) of the "
+              f"tracker at {vanilla_repo}. The next run reads each version again.")
     return 0
 
 
@@ -277,6 +292,9 @@ def _main():
         repo = resolve_tracker_path(args.mod_root, args.vanilla_repo)
         do_commit(repo, args.commit, patch_name(args.patch_name), args.game_root)
         sys.exit(0)
+
+    if args.clear_cache:
+        sys.exit(_clear_cache(resolve_tracker_path(args.mod_root, args.vanilla_repo)))
 
     mod_root = find_mod_root(args.mod_root)
     store, store_err = open_store(mod_root)

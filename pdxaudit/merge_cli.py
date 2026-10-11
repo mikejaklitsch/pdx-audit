@@ -369,10 +369,10 @@ def vanilla_templates(base, point):
     folder of the tracker keeps one file for each commit, because the parse of each
     vanilla .gui file takes several seconds."""
     from .gui_names import _read_cache, _write_cache
-    from .tracker import MODULE_ROOTS, cache_path, full_hash
+    from .tracker import MODULE_ROOTS, cache_path, cache_key
     repo = getattr(base, "repo", None)
-    full = full_hash(repo, point) if repo else ""
-    cache = cache_path(repo, f"guitpl-v{TEMPLATES_CACHE_VERSION}-{full}.json") if full else None
+    key = cache_key(repo, point) if repo else ""
+    cache = cache_path(repo, f"guitpl-v{TEMPLATES_CACHE_VERSION}-{key}.json") if key else None
     data = _read_cache(cache)
     if data is not None:
         return {name: {k: tuple(v) for k, v in keys.items()} for name, keys in data.items()}

@@ -1756,6 +1756,15 @@ class MainWindow(QMainWindow):
         v.addWidget(self.settings_message)
         lay.addWidget(card)
 
+        cache, cv = self._card("Cache", "pdx-audit saves what it reads from each version of the tracker, "
+                                        "so that later runs are fast. Clear the cache when the audits read "
+                                        "old data. The next run reads each version again, which takes some "
+                                        "minutes. pdx-audit --clear-cache does the same.")
+        self.clear_cache_button = QPushButton("Clear cache")
+        self.clear_cache_button.clicked.connect(self.clear_cache)
+        cv.addWidget(self.clear_cache_button, 0, Qt.AlignmentFlag.AlignRight)
+        lay.addWidget(cache)
+
         lay.addStretch(1)
         return page
 
@@ -2098,7 +2107,7 @@ class MainWindow(QMainWindow):
         # A blocked button says why in its tooltip.
         self.busy_reason = (f"Wait until this command ends: {(text or 'a command').rstrip('….')}." if busy else "")
         for w in (self.run_button, self.run_arrow, self.restore_button, self.commit_button,
-                  self.orphan_button, *self.setting_buttons):
+                  self.orphan_button, self.clear_cache_button, *self.setting_buttons):
             if w.property("idle_tip") is None:
                 w.setProperty("idle_tip", w.toolTip())
             w.setEnabled(not busy)
@@ -2813,6 +2822,18 @@ class MainWindow(QMainWindow):
             return
         self._start(["--remove-orphaned-records", "--force"], self._orphans_done,
                     "Removing orphaned records…")
+
+    def clear_cache(self):
+        if not self.vanilla_repo:
+            self._settings_note("There is no tracker, so there is no cache to clear.")
+            return
+        self._start(["--clear-cache"], self._clear_cache_done, "Clearing the cache…")
+
+    def _clear_cache_done(self, code):
+        if code != 0:
+            self._job_failed(f"The cache was not cleared: {self.last_line}")
+            return
+        self._settings_note(self.last_line or "Cache cleared.")
 
     def _orphans_done(self, code):
         self.refresh_store_views()

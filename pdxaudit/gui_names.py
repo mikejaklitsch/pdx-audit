@@ -31,7 +31,7 @@ from . import diff3, session
 from .config import setting
 from .gui import commits_up_to, mod_gui_files
 from .report import Finding
-from .tracker import cache_path, full_hash, tag_of
+from .tracker import cache_path, cache_key, tag_of
 
 NAMES_CACHE_VERSION = 3
 LOC_CACHE_VERSION = 1
@@ -184,8 +184,8 @@ def build_vanilla_gui_names(base, point, label=""):
     binding names they use.
     The cache folder of the tracker keeps one file for each commit."""
     repo = getattr(base, "repo", None)
-    full = full_hash(repo, point) if repo else ""
-    cache = cache_path(repo, f"guinames-v{NAMES_CACHE_VERSION}-{full}.json") if full else None
+    key = cache_key(repo, point) if repo else ""
+    cache = cache_path(repo, f"guinames-v{NAMES_CACHE_VERSION}-{key}.json") if key else None
     data = _read_cache(cache)
     if data is None:
         if label:
@@ -207,8 +207,8 @@ def build_vanilla_gui_names(base, point, label=""):
 def build_vanilla_loc_bindings(base, point):
     """The binding names in vanilla's English localization files at `point`."""
     repo = getattr(base, "repo", None)
-    full = full_hash(repo, point) if repo else ""
-    cache = cache_path(repo, f"locbind-v{LOC_CACHE_VERSION}-{full}.json") if full else None
+    key = cache_key(repo, point) if repo else ""
+    cache = cache_path(repo, f"locbind-v{LOC_CACHE_VERSION}-{key}.json") if key else None
     data = _read_cache(cache)
     if data is None:
         names = set()
