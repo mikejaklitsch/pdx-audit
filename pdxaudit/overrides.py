@@ -348,7 +348,9 @@ def build_vocab(vanilla_repo, commit, label=""):
     if label:
         print(f"  {label}: reading vanilla vocabulary...",
               end="", file=sys.stderr, flush=True)
-    raw = _git_archive(vanilla_repo, commit, None, timeout=180)
+    # Only the .txt files: a repository of the whole install also holds the
+    # textures, models and sound, which are many gigabytes.
+    raw = _git_archive(vanilla_repo, commit, ["*.txt"], timeout=180)
     if not raw:
         if label:
             print(" failed!", file=sys.stderr)

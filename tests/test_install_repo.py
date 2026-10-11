@@ -104,6 +104,28 @@ def test_the_audits_read_the_install_repository(install):
     assert "1 changed strings" in out
 
 
+def test_the_vocabulary_reads_only_the_script_files(install, monkeypatch):
+    """An install also holds textures, models and sound, many gigabytes of them;
+    the vocabulary archive carries only the .txt files."""
+    import tarfile
+    from pdxaudit import overrides
+    _write_tree(install.root / "game", {"in_game/gfx/big.dds": "x" * 4096})
+    _git(install.root, "add", "-A")
+    _git(install.root, "commit", "-q", "-m", "1.2.0 Test")
+    names = []
+
+    def archive(*a, **k):
+        raw = real(*a, **k)
+        with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+            names.extend(m.name for m in tf.getmembers() if m.isfile())
+        return raw
+    real = overrides._git_archive
+    monkeypatch.setattr(overrides, "_git_archive", archive)
+    monkeypatch.setattr(overrides, "_vocab_cache_path", lambda *_a: None)
+    vocab = overrides.build_vocab(install.repo, "HEAD")
+    assert vocab and names and all(n.endswith(".txt") for n in names)
+
+
 def _state(root):
     """Every file and folder under `root`, with the size and time of each file."""
     out = {}
